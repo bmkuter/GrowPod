@@ -6,37 +6,38 @@
 static const char *TAG = "ACTUATOR_CONTROL";
 static QueueHandle_t actuator_queue = NULL; // Queue handle
 
-// Maximum duty cycle based on the resolution of the PWM signal (13 bits -> 8191 max)
-#define LEDC_MAX_DUTY       ((1 << LEDC_TIMER_13_BIT) - 1)  // 8191 for 13-bit resolution
+// Define the new maximum duty based on 8-bit resolution
+#define LEDC_MAX_DUTY       ((1 << LEDC_TIMER_8_BIT) - 1)  // 255 for 8-bit resolution
 
 void actuator_control_init(void) {
     ESP_LOGI(TAG, "Initializing actuators");
 
     // Create the queue for commands
-    actuator_queue = xQueueCreate(10, sizeof(actuator_command_t)); // Queue can hold 10 commands
+    actuator_queue = xQueueCreate(10, sizeof(actuator_command_t));
     if (actuator_queue == NULL) {
         ESP_LOGE(TAG, "Failed to create actuator command queue");
         return;
     }
 
-    // Configure PWM for Air Pump
+    // Configure PWM timer for Air Pump
     ledc_timer_config_t air_pump_timer = {
-        .speed_mode = PWM_MODE,
-        .timer_num = PWM_TIMER,
-        .duty_resolution = LEDC_TIMER_13_BIT,
-        .freq_hz = 5000,
-        .clk_cfg = LEDC_AUTO_CLK
+        .speed_mode       = PWM_MODE,
+        .timer_num        = PWM_TIMER,
+        .duty_resolution  = LEDC_TIMER_8_BIT,  // Changed from 13-bit to 8-bit
+        .freq_hz          = 25000,             // Increased frequency to 25 kHz
+        .clk_cfg          = LEDC_AUTO_CLK
     };
     ledc_timer_config(&air_pump_timer);
 
+    // Configure PWM channel for Air Pump
     ledc_channel_config_t air_pump_channel = {
-        .speed_mode = PWM_MODE,
-        .channel = AIR_PUMP_CHANNEL,
-        .timer_sel = PWM_TIMER,
-        .intr_type = LEDC_INTR_DISABLE,
-        .gpio_num = AIR_PUMP_GPIO,
-        .duty = 0,
-        .hpoint = 0
+        .speed_mode     = PWM_MODE,
+        .channel        = AIR_PUMP_CHANNEL,
+        .timer_sel      = PWM_TIMER,
+        .intr_type      = LEDC_INTR_DISABLE,
+        .gpio_num       = AIR_PUMP_GPIO,
+        .duty           = 0,
+        .hpoint         = 0
     };
     ledc_channel_config(&air_pump_channel);
 
@@ -76,7 +77,7 @@ void set_air_pump_pwm(uint32_t duty_percentage) {
         duty_percentage = 100;  // Clamp the value to 100%
     }
     uint32_t duty = (duty_percentage * LEDC_MAX_DUTY) / 100; // Convert percentage to duty cycle
-    ESP_LOGI(TAG, "Setting air pump PWM to %lu%% (duty: %lu)", duty_percentage, (unsigned long)duty);
+    ESP_LOGI(TAG, "Setting air pump PWM to %lu%% (duty: %lu)", duty_percentage, duty);
     ledc_set_duty(PWM_MODE, AIR_PUMP_CHANNEL, duty);
     ledc_update_duty(PWM_MODE, AIR_PUMP_CHANNEL);
 }

@@ -1,27 +1,56 @@
-#include <stdio.h>
-#include <string.h>
+// main/main.c
+
+#include "Networking/wifi_manager.h"
+#include "actuator_control.h"
+#include "uart_comm.h"
 #include "ina260.h"
-#include "actuator_control/actuator_control.h"
-#include "uart_comm/uart_comm.h"
+#include "flowmeter_control.h"
+#include "https_server/https_server.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "freertos/queue.h"
+#include "esp_log.h"
+#include "mdns.h"
+
+void start_mdns_service(void) {
+    // Initialize mDNS
+    ESP_ERROR_CHECK(mdns_init());
+    ESP_ERROR_CHECK(mdns_hostname_set("hydroponics_device"));
+    ESP_ERROR_CHECK(mdns_instance_name_set("Hydroponics Device"));
+
+    // Set service type and port
+    mdns_service_add("Hydroponics Service", "_hydroponics", "_tcp", 443, NULL, 0);
+
+    ESP_LOGI("MDNS", "mDNS service started");
+}
 
 void app_main(void) {
-    // Create a FreeRTOS task for INA260
-    xTaskCreate(&ina260_task, "INA260 Task", 4096, NULL, 5, NULL);
-
-    printf("Hello world!\n");
+    // Initialize Wi-Fi
+    if (wifi_init() == ESP_OK) {
+        // Start mDNS
+        start_mdns_service();
+        // Start HTTPS server
+        start_https_server();
+    } else {
+        ESP_LOGE("MAIN", "Failed to initialize Wi-Fi");
+    }
 
     // Initialize actuators
     actuator_control_init();
-    
-    // Create a FreeRTOS task for actuator control
-    xTaskCreate(&actuator_control_task, "Actuator Control Task", 4096, NULL, 5, NULL);
+    xTaskCreate(actuator_control_task, "actuator_control_task", 4096, NULL, 5, NULL);
 
-    // Initialize UART communication
+    // Initialize UART console
     uart_comm_init();
+    xTaskCreate(uart_console_task, "uart_console_task", 8192, NULL, 5, NULL);
 
-    // Create a task for UART echo and command processing
-    xTaskCreate(uart_echo_task, "UART Echo Task", 4096, NULL, 5, NULL);
+    // Start INA260 task
+    xTaskCreate(ina260_task, "ina260_task", 4096, NULL, 5, NULL);
+
+    // Initialize and start flowmeter task
+    if (flowmeter_init() == ESP_OK) {
+        xTaskCreate(flowmeter_task, "flowmeter_task", 4096, NULL, 5, NULL);
+    } else {
+        ESP_LOGE("MAIN", "Failed to initialize flowmeter");
+    }
+
+    // Rest of your application...
 }
