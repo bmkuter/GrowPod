@@ -249,23 +249,69 @@ static esp_err_t led_post_handler(httpd_req_t *req) {
 static esp_err_t sensors_get_handler(httpd_req_t *req) {
     // Create JSON response
     cJSON *json = cJSON_CreateObject();
+    cJSON *table = cJSON_CreateArray();  // Create a JSON array for the table
 
-    // Get sensor data
+    // Variables to hold sensor data
     float current_led, voltage_led, power_led;
+    float current_drain, voltage_drain, power_drain;
+    float current_source, voltage_source, power_source;
+    float current_air, voltage_air, power_air;
+
+    // Read data for each actuator
     ina260_read_current(INA260_LED_ADDRESS, &current_led);
     ina260_read_voltage(INA260_LED_ADDRESS, &voltage_led);
     ina260_read_power(INA260_LED_ADDRESS, &power_led);
 
+    ina260_read_current(INA260_DRAIN_ADDRESS, &current_drain);
+    ina260_read_voltage(INA260_DRAIN_ADDRESS, &voltage_drain);
+    ina260_read_power(INA260_DRAIN_ADDRESS, &power_drain);
+
+    ina260_read_current(INA260_SOURCE_ADDRESS, &current_source);
+    ina260_read_voltage(INA260_SOURCE_ADDRESS, &voltage_source);
+    ina260_read_power(INA260_SOURCE_ADDRESS, &power_source);
+
+    ina260_read_current(INA260_AIR_ADDRESS, &current_air);
+    ina260_read_voltage(INA260_AIR_ADDRESS, &voltage_air);
+    ina260_read_power(INA260_AIR_ADDRESS, &power_air);
+
     float drain_flow = get_drain_flow_rate();
     float source_flow = get_source_flow_rate();
 
-    // Add data to JSON
-    cJSON_AddNumberToObject(json, "current_led", current_led);
-    cJSON_AddNumberToObject(json, "voltage_led", voltage_led);
-    cJSON_AddNumberToObject(json, "power_led", power_led);
-    cJSON_AddNumberToObject(json, "drain_flow", drain_flow);
-    cJSON_AddNumberToObject(json, "source_flow", source_flow);
+    // Add rows to the table for each actuator (current, voltage, and power)
+    cJSON *row_led = cJSON_CreateObject();
+    cJSON_AddStringToObject(row_led, "actuator", "LED");
+    cJSON_AddNumberToObject(row_led, "current_mA", current_led);
+    cJSON_AddNumberToObject(row_led, "voltage_mV", voltage_led);
+    cJSON_AddNumberToObject(row_led, "power_mW", power_led);
+    cJSON_AddItemToArray(table, row_led);
 
+    cJSON *row_drain = cJSON_CreateObject();
+    cJSON_AddStringToObject(row_drain, "actuator", "Drain");
+    cJSON_AddNumberToObject(row_drain, "current_mA", current_drain);
+    cJSON_AddNumberToObject(row_drain, "voltage_mV", voltage_drain);
+    cJSON_AddNumberToObject(row_drain, "power_mW", power_drain);
+    cJSON_AddNumberToObject(row_drain, "flow_rate_L_min", drain_flow);
+    cJSON_AddItemToArray(table, row_drain);
+
+    cJSON *row_source = cJSON_CreateObject();
+    cJSON_AddStringToObject(row_source, "actuator", "Source");
+    cJSON_AddNumberToObject(row_source, "current_mA", current_source);
+    cJSON_AddNumberToObject(row_source, "voltage_mV", voltage_source);
+    cJSON_AddNumberToObject(row_source, "power_mW", power_source);
+    cJSON_AddNumberToObject(row_source, "flow_rate_L_min", source_flow);
+    cJSON_AddItemToArray(table, row_source);
+
+    cJSON *row_air = cJSON_CreateObject();
+    cJSON_AddStringToObject(row_air, "actuator", "Air Pump");
+    cJSON_AddNumberToObject(row_air, "current_mA", current_air);
+    cJSON_AddNumberToObject(row_air, "voltage_mV", voltage_air);
+    cJSON_AddNumberToObject(row_air, "power_mW", power_air);
+    cJSON_AddItemToArray(table, row_air);
+
+    // Add the table to the main JSON object
+    cJSON_AddItemToObject(json, "sensors_data", table);
+
+    // Convert JSON to string
     char *response = cJSON_Print(json);
 
     // Send response
