@@ -51,6 +51,4 @@ void app_main(void) {
     } else {
         ESP_LOGE("MAIN", "Failed to initialize flowmeter");
     }
-
-    // Rest of your application...
 }
