@@ -274,8 +274,8 @@ static esp_err_t sensors_get_handler(httpd_req_t *req) {
     ina260_read_voltage(INA260_AIR_ADDRESS, &voltage_air);
     ina260_read_power(INA260_AIR_ADDRESS, &power_air);
 
-    float drain_flow = get_drain_flow_rate();
-    float source_flow = get_source_flow_rate();
+    float drain_flow = 42;//get_drain_flow_rate();
+    float source_flow = 42;//get_source_flow_rate();
 
     // Add rows to the table for each actuator (current, voltage, and power)
     cJSON *row_led = cJSON_CreateObject();

@@ -45,6 +45,8 @@ void app_main(void) {
     // Start INA260 task
     xTaskCreate(ina260_task, "ina260_task", 4096, NULL, 5, NULL);
 
+    vTaskDelay(1000/portTICK_PERIOD_MS);
+
     // Initialize and start flowmeter task
     if (flowmeter_init() == ESP_OK) {
         xTaskCreate(flowmeter_task, "flowmeter_task", 4096, NULL, 5, NULL);

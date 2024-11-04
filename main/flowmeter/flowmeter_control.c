@@ -6,205 +6,180 @@
 #include "freertos/queue.h"
 #include "esp_log.h"
 #include "esp_err.h"
-#include <math.h>
+#include "driver/gpio.h"
+#include "esp_timer.h" // For esp_timer_get_time()
 
 static const char *TAG = "FLOWMETER";
 
-static QueueHandle_t drain_evt_queue = NULL;
-static QueueHandle_t source_evt_queue = NULL;
+// Calibration constants
+#define PULSES_PER_LITER 450.0f // Based on flowmeter specifications
 
-static float drain_flow_rate = 0.0f;
-static float source_flow_rate = 0.0f;
+// Flowmeter IDs
+#define FLOWMETER_ID_DRAIN    0
+#define FLOWMETER_ID_SOURCE   1
+#define FLOWMETER_ID_OVERFLOW 2
+#define FLOWMETER_COUNT       3
 
-// Calibration constants (replace with your calibration data)
-#define PULSES_PER_LITER        450.0f  // Example value for flowmeter
+// Flowmeter event structure
+typedef struct {
+    int flowmeter_id; // Flowmeter ID
+    int64_t timestamp; // Timestamp of the pulse
+} flowmeter_event_t;
 
-// Forward declaration of helper functions
-static float calculate_flow_rate(int num_pulses);
+// Flowmeter data structure
+typedef struct {
+    int flowmeter_id;
+    gpio_num_t gpio_num;
+    uint32_t pulse_count;
+    int64_t flow_start_time;
+    int64_t last_calc_time;
+    int64_t last_pulse_time;
+    bool flow_active;
+} flowmeter_t;
 
-// RMT receive configuration handles
-static rmt_channel_handle_t rmt_rx_channel_drain = NULL;
-static rmt_channel_handle_t rmt_rx_channel_source = NULL;
+// Array to hold flowmeter data
+static flowmeter_t flowmeters[FLOWMETER_COUNT] = {
+    [FLOWMETER_ID_DRAIN] = {
+        .flowmeter_id = FLOWMETER_ID_DRAIN,
+        .gpio_num = FLOWMETER_GPIO_DRAIN,
+    },
+    [FLOWMETER_ID_SOURCE] = {
+        .flowmeter_id = FLOWMETER_ID_SOURCE,
+        .gpio_num = FLOWMETER_GPIO_SOURCE,
+    },
+    [FLOWMETER_ID_OVERFLOW] = {
+        .flowmeter_id = FLOWMETER_ID_OVERFLOW,
+        .gpio_num = FLOWMETER_GPIO_OVERFLOW,
+    },
+};
 
-// RMT receive callback function
-static bool IRAM_ATTR rmt_rx_drain_callback(rmt_channel_handle_t channel, const rmt_rx_done_event_data_t *edata, void *user_data) {
+// Event queue for flowmeter events
+static QueueHandle_t flowmeter_evt_queue = NULL;
+
+// Forward declaration of the flowmeter task
+void flowmeter_task(void *pvParameter);
+
+// GPIO ISR handler
+static void IRAM_ATTR gpio_isr_handler(void *arg) {
+    int flowmeter_id = (int)(uintptr_t)arg;
+    flowmeter_event_t evt = {
+        .flowmeter_id = flowmeter_id,
+        .timestamp = esp_timer_get_time(),
+    };
     BaseType_t high_task_wakeup = pdFALSE;
-    size_t num_items = edata->num_symbols;
+    xQueueSendFromISR(flowmeter_evt_queue, &evt, &high_task_wakeup);
 
-    // Send the number of items (pulses) to the queue
-    xQueueSendFromISR(drain_evt_queue, &num_items, &high_task_wakeup);
-
-    // Return whether a higher priority task was woken up
-    return high_task_wakeup == pdTRUE;
-}
-
-static bool IRAM_ATTR rmt_rx_source_callback(rmt_channel_handle_t channel, const rmt_rx_done_event_data_t *edata, void *user_data) {
-    BaseType_t high_task_wakeup = pdFALSE;
-    size_t num_items = edata->num_symbols;
-
-    // Send the number of items (pulses) to the queue
-    xQueueSendFromISR(source_evt_queue, &num_items, &high_task_wakeup);
-
-    // Return whether a higher priority task was woken up
-    return high_task_wakeup == pdTRUE;
+    if (high_task_wakeup == pdTRUE) {
+        portYIELD_FROM_ISR();
+    }
 }
 
 esp_err_t flowmeter_init(void) {
     esp_err_t ret = ESP_OK;
 
-    // Create event queues
-    drain_evt_queue = xQueueCreate(10, sizeof(size_t));
-    if (!drain_evt_queue) {
-        ESP_LOGE(TAG, "Failed to create drain event queue");
+    // Create the event queue
+    flowmeter_evt_queue = xQueueCreate(20, sizeof(flowmeter_event_t));
+    if (flowmeter_evt_queue == NULL) {
+        ESP_LOGE(TAG, "Failed to create event queue");
         return ESP_FAIL;
     }
 
-    source_evt_queue = xQueueCreate(10, sizeof(size_t));
-    if (!source_evt_queue) {
-        ESP_LOGE(TAG, "Failed to create source event queue");
-        return ESP_FAIL;
+    // Install GPIO ISR service
+    gpio_install_isr_service(ESP_INTR_FLAG_IRAM);
+
+    for (int i = 0; i < FLOWMETER_COUNT; i++) {
+        flowmeter_t *fm = &flowmeters[i];
+
+        // Configure the GPIO pin with internal pull-up resistor
+        gpio_config_t io_conf = {
+            .pin_bit_mask = (1ULL << fm->gpio_num),
+            .mode = GPIO_MODE_INPUT,
+            .pull_up_en = GPIO_PULLUP_ENABLE,
+            .pull_down_en = GPIO_PULLDOWN_DISABLE,
+            .intr_type = GPIO_INTR_NEGEDGE, // Trigger on falling edge
+        };
+        gpio_config(&io_conf);
+
+        // Add ISR handler
+        ret = gpio_isr_handler_add(fm->gpio_num, gpio_isr_handler, (void *)(uintptr_t)fm->flowmeter_id);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to add ISR handler for flowmeter %d", fm->flowmeter_id);
+            return ret;
+        }
     }
 
-    // Initialize RMT receiver for drain flowmeter
-    rmt_rx_channel_config_t drain_channel_config = {
-        .gpio_num = FLOWMETER_GPIO_DRAIN,
-        .clk_src = RMT_CLK_SRC_DEFAULT,
-        .resolution_hz = 1000000,  // 1 MHz resolution
-        .mem_block_symbols = 64,
-        .flags.with_dma = false,
-    };
+    // Create the flowmeter task
+    xTaskCreate(flowmeter_task, "flowmeter_task", 4096, NULL, 5, NULL);
 
-    ret = rmt_new_rx_channel(&drain_channel_config, &rmt_rx_channel_drain);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to create RMT RX channel for drain");
-        return ret;
-    }
-
-    // Register RX event callback for drain
-    rmt_rx_event_callbacks_t drain_cbs = {
-        .on_recv_done = rmt_rx_drain_callback,
-    };
-    ret = rmt_rx_register_event_callbacks(rmt_rx_channel_drain, &drain_cbs, NULL);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to register RX callback for drain");
-        return ret;
-    }
-
-    // Enable RMT RX channel for drain
-    ret = rmt_enable(rmt_rx_channel_drain);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to enable RMT RX channel for drain");
-        return ret;
-    }
-
-    // Start receiving on drain channel
-    ret = rmt_receive(rmt_rx_channel_drain, NULL, 0, &((rmt_receive_config_t){
-        .signal_range_min_ns = 1000,   // Filter out pulses shorter than 1 us
-        .signal_range_max_ns = 1000000 // Filter out pulses longer than 1 ms
-    }));
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to start RMT receive for drain");
-        return ret;
-    }
-
-    // Initialize RMT receiver for source flowmeter (similar steps)
-    rmt_rx_channel_config_t source_channel_config = {
-        .gpio_num = FLOWMETER_GPIO_SOURCE,
-        .clk_src = RMT_CLK_SRC_DEFAULT,
-        .resolution_hz = 1000000,  // 1 MHz resolution
-        .mem_block_symbols = 64,
-        .flags.with_dma = false,
-    };
-
-    ret = rmt_new_rx_channel(&source_channel_config, &rmt_rx_channel_source);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to create RMT RX channel for source");
-        return ret;
-    }
-
-    // Register RX event callback for source
-    rmt_rx_event_callbacks_t source_cbs = {
-        .on_recv_done = rmt_rx_source_callback,
-    };
-    ret = rmt_rx_register_event_callbacks(rmt_rx_channel_source, &source_cbs, NULL);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to register RX callback for source");
-        return ret;
-    }
-
-    // Enable RMT RX channel for source
-    ret = rmt_enable(rmt_rx_channel_source);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to enable RMT RX channel for source");
-        return ret;
-    }
-
-    // Start receiving on source channel
-    ret = rmt_receive(rmt_rx_channel_source, NULL, 0, &((rmt_receive_config_t){
-        .signal_range_min_ns = 1000,   // Filter out pulses shorter than 1 us
-        .signal_range_max_ns = 1000000 // Filter out pulses longer than 1 ms
-    }));
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to start RMT receive for source");
-        return ret;
-    }
-
-    ESP_LOGI(TAG, "Flowmeter RMT initialized");
+    ESP_LOGI(TAG, "Flowmeters initialized using GPIO interrupts");
     return ESP_OK;
 }
 
 void flowmeter_task(void *pvParameter) {
-    size_t drain_num_pulses = 0;
-    size_t source_num_pulses = 0;
+    const int64_t FLOW_STOPPED_TIMEOUT_US = 2000000; // 2 seconds
+    const int64_t FLOW_CALC_INTERVAL_US = 1000000;   // 1 second
 
     while (1) {
-        // Wait for data from drain flowmeter
-        if (xQueueReceive(drain_evt_queue, &drain_num_pulses, pdMS_TO_TICKS(1000))) {
-            drain_flow_rate = calculate_flow_rate(drain_num_pulses);
-            ESP_LOGI(TAG, "Drain Flow Rate: %.2f L/min", drain_flow_rate);
+        flowmeter_event_t evt;
+        // Wait for an event from the queue with timeout
+        if (xQueueReceive(flowmeter_evt_queue, &evt, pdMS_TO_TICKS(1000))) {
+            // Event received
+            int flowmeter_id = evt.flowmeter_id;
+            flowmeter_t *fm = &flowmeters[flowmeter_id];
+            int64_t current_time = evt.timestamp; // Use the timestamp from the ISR
+
+            // Pulse detected
+            fm->pulse_count++;
+
+            // Update last pulse time
+            fm->last_pulse_time = current_time;
+
+            if (!fm->flow_active) {
+                // Flow just started
+                fm->flow_active = true;
+                fm->flow_start_time = current_time;
+                fm->last_calc_time = current_time;
+                fm->pulse_count = 1; // Reset pulse count to 1 for the first pulse
+                ESP_LOGI(TAG, "Flowmeter %d: Flow started at time %lld us", flowmeter_id, fm->flow_start_time);
+            }
+
+            // Calculate flow rate every second
+            if (current_time - fm->last_calc_time >= FLOW_CALC_INTERVAL_US) {
+                // Calculate flow rate
+                float flow_rate = (fm->pulse_count / PULSES_PER_LITER) * 60.0f; // L/min
+
+                // Output flow rate with timestamp
+                ESP_LOGI(TAG, "Flowmeter %d: Time: %.2f s, Flow Rate: %.2f L/min",
+                         flowmeter_id, (current_time - fm->flow_start_time) / 1000000.0f, flow_rate);
+
+                // Reset pulse count and last_calc_time
+                fm->pulse_count = 0;
+                fm->last_calc_time = current_time;
+            }
         } else {
-            // No data received, flow rate is zero
-            drain_flow_rate = 0.0f;
-        }
+            // Timeout occurred (no event received within 1000 ms)
+            int64_t current_time = esp_timer_get_time(); // Current time in microseconds
 
-        // Wait for data from source flowmeter
-        if (xQueueReceive(source_evt_queue, &source_num_pulses, pdMS_TO_TICKS(1000))) {
-            source_flow_rate = calculate_flow_rate(source_num_pulses);
-            ESP_LOGI(TAG, "Source Flow Rate: %.2f L/min", source_flow_rate);
-        } else {
-            // No data received, flow rate is zero
-            source_flow_rate = 0.0f;
-        }
+            for (int i = 0; i < FLOWMETER_COUNT; i++) {
+                flowmeter_t *fm = &flowmeters[i];
 
-        // Re-start RMT receive for drain
-        esp_err_t ret = rmt_receive(rmt_rx_channel_drain, NULL, 0, NULL);
-        if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to restart RMT receive for drain");
-        }
+                if (fm->flow_active) {
+                    // Check if flow has stopped
+                    if (current_time - fm->last_pulse_time >= FLOW_STOPPED_TIMEOUT_US) {
+                        fm->flow_active = false;
+                        ESP_LOGI(TAG, "Flowmeter %d: Flow stopped at time %lld us", fm->flowmeter_id, current_time);
+                    } else if (current_time - fm->last_calc_time >= FLOW_CALC_INTERVAL_US) {
+                        // Flow is still considered active, but no pulses in the last interval
+                        // Output zero flow rate
+                        ESP_LOGI(TAG, "Flowmeter %d: Time: %.2f s, Flow Rate: 0.00 L/min",
+                                 fm->flowmeter_id, (current_time - fm->flow_start_time) / 1000000.0f);
 
-        // Re-start RMT receive for source
-        ret = rmt_receive(rmt_rx_channel_source, NULL, 0, NULL);
-        if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to restart RMT receive for source");
+                        // Reset pulse count and last_calc_time
+                        fm->pulse_count = 0;
+                        fm->last_calc_time = current_time;
+                    }
+                }
+            }
         }
-
-        // Delay before next reading
-        vTaskDelay(pdMS_TO_TICKS(1000));
     }
-}
-
-static float calculate_flow_rate(int num_pulses) {
-    // Calculate flow rate in liters per minute
-    // Example calculation: flow_rate = (num_pulses / PULSES_PER_LITER) * (60 seconds / measurement_interval)
-    // Since measurement_interval is 1 second, the calculation simplifies
-    float flow_rate = (num_pulses / PULSES_PER_LITER) * 60.0f;
-    return flow_rate;
-}
-
-float get_drain_flow_rate(void) {
-    return drain_flow_rate;
-}
-
-float get_source_flow_rate(void) {
-    return source_flow_rate;
 }
