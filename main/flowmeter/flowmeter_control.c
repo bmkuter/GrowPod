@@ -35,10 +35,11 @@ typedef struct {
     int64_t last_calc_time;
     int64_t last_pulse_time;
     bool flow_active;
+    float current_flow_rate;
 } flowmeter_t;
 
 // Array to hold flowmeter data
-static flowmeter_t flowmeters[FLOWMETER_COUNT] = {
+flowmeter_t flowmeters[FLOWMETER_COUNT] = {
     [FLOWMETER_ID_DRAIN] = {
         .flowmeter_id = FLOWMETER_ID_DRAIN,
         .gpio_num = FLOWMETER_GPIO_DRAIN,
@@ -55,9 +56,6 @@ static flowmeter_t flowmeters[FLOWMETER_COUNT] = {
 
 // Event queue for flowmeter events
 static QueueHandle_t flowmeter_evt_queue = NULL;
-
-// Forward declaration of the flowmeter task
-void flowmeter_task(void *pvParameter);
 
 // GPIO ISR handler
 static void IRAM_ATTR gpio_isr_handler(void *arg) {
@@ -147,6 +145,7 @@ void flowmeter_task(void *pvParameter) {
             if (current_time - fm->last_calc_time >= FLOW_CALC_INTERVAL_US) {
                 // Calculate flow rate
                 float flow_rate = (fm->pulse_count / PULSES_PER_LITER) * 60.0f; // L/min
+                fm->current_flow_rate = flow_rate;
 
                 // Output flow rate with timestamp
                 ESP_LOGI(TAG, "Flowmeter %d: Time: %.2f s, Flow Rate: %.2f L/min",
@@ -178,8 +177,22 @@ void flowmeter_task(void *pvParameter) {
                         fm->pulse_count = 0;
                         fm->last_calc_time = current_time;
                     }
+                    // Set current_flow_rate to 0 when flow stops
+                    fm->current_flow_rate = 0.0f;
                 }
             }
         }
     }
+}
+
+float get_drain_flow_rate(void) {
+    return flowmeters[FLOWMETER_ID_DRAIN].current_flow_rate;
+}
+
+float get_source_flow_rate(void) {
+    return flowmeters[FLOWMETER_ID_SOURCE].current_flow_rate;
+}
+
+float get_overflow_flow_rate(void) {
+    return flowmeters[FLOWMETER_ID_OVERFLOW].current_flow_rate;
 }

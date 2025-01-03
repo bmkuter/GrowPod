@@ -11,6 +11,10 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from datetime import datetime
 import time
 
+# JUST FOR DEBUG, REMOVE ME DURING PRODUCTION
+import urllib3
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
 # Setup Logging
 logging.basicConfig(
     level=logging.INFO,
@@ -81,13 +85,34 @@ class HydroponicsConsole(Cmd):
             'status': 'Get sensor data from the selected device.',
             'airpump': 'Set air pump PWM value: airpump <value>',
             'waterpump': 'Set water pump PWM value: waterpump <value>',
-            'solenoid': 'Set solenoid valve state: solenoid <on/off>',
+            'servo': 'Set servo angle: servo <0..180>',
             'led': 'Set LED array state: led <on/off>',
             'schedule_actuators': 'Set actuator schedule: schedule_actuators',
             'view_schedules': 'View all actuator schedules: view_schedules',
             'delete_schedule': 'Delete a schedule: delete_schedule <schedule_name>',
+            'start_feeding_cycle': 'Start the feeding cycle.',
+            'stop_feeding_cycle': 'Stop the feeding cycle.',
+            'start_emptying_water': 'Start emptying water.',
+            'stop_emptying_water': 'Stop emptying water.',
             'exit': 'Exit the console.',
         }
+
+        # Initialize flow status tracking
+        self.flow_status = {
+            'drain': False,
+            'source': False,
+            'overflow': False
+        }
+        self.polling_interval = 1  # Poll every 1 second
+
+        # Track previous system status
+        self.previous_system_status = None
+
+        # Start the background polling thread
+        self.polling_thread = threading.Thread(target=self.poll_sensors)
+        self.polling_thread.daemon = True
+        self.polling_thread.start()
+
         self.session = requests.Session()
         self.session.verify = False  # Disable SSL verification for testing or replace with 'ca_bundle'
 
@@ -225,9 +250,12 @@ class HydroponicsConsole(Cmd):
                 if actuator in ['airpump', 'waterpump']:
                     # Turning off pumps by setting PWM to 0
                     self._post_actuator_command(actuator, {'value': 0}, device_name)
-                elif actuator in ['solenoid', 'led']:
+                elif actuator in ['led']:
                     # Turning off binary actuators
                     self._post_actuator_command(actuator, {'state': 'off'}, device_name)
+                elif actuator in ['servo']:
+                    # Optionally, return servo to 0 degrees or a safe angle
+                    self._post_actuator_command(actuator, {'angle': 0}, device_name)
         
         # Schedule turning off actuators after 'duration' minutes
         if duration > 0:
@@ -280,7 +308,6 @@ class HydroponicsConsole(Cmd):
             logger.error(f"Error fetching sensor data: {e}")
             print(f"Error fetching sensor data: {e}")
 
-
     def do_airpump(self, arg):
         'Set air pump PWM value: airpump <value>'
         if not self._check_device_selected():
@@ -307,15 +334,18 @@ class HydroponicsConsole(Cmd):
         except ValueError:
             print("Please provide a valid integer value.")
 
-    def do_solenoid(self, arg):
-        'Set solenoid valve state: solenoid <on/off>'
+    def do_servo(self, arg):
+        'Set servo angle: servo <angle>'
         if not self._check_device_selected():
             return
-        state = arg.strip().lower()
-        if state not in ['on', 'off']:
-            print("Please specify 'on' or 'off'.")
-            return
-        self._post_actuator_command('solenoid', {'state': state}, self.selected_device)
+        try:
+            angle = int(arg.strip())
+            if angle < 0 or angle > 180:
+                print("Angle must be between 0 and 180.")
+                return
+            self._post_actuator_command('servo', {'angle': angle}, self.selected_device)
+        except ValueError:
+            print("Please provide a valid integer angle.")
 
     def do_led(self, arg):
         'Set LED array state: led <on/off>'
@@ -430,15 +460,18 @@ class HydroponicsConsole(Cmd):
                     print("Invalid Water Pump value. Skipping Water Pump scheduling.")
             except ValueError:
                 print("Invalid Water Pump value. Skipping Water Pump scheduling.")
-        
-        # Solenoid Valve
-        solenoid_choice = self._prompt_input("Schedule Solenoid Valve? (y/n): ").lower()
-        if solenoid_choice == 'y':
-            solenoid_state = self._prompt_input("Enter Solenoid Valve state ('on' or 'off'): ").lower()
-            if solenoid_state not in ['on', 'off']:
-                print("Invalid Solenoid Valve state. Skipping Solenoid Valve scheduling.")
-            else:
-                actions['solenoid'] = {'state': solenoid_state}
+
+        # Servo
+        servo_choice = self._prompt_input("Schedule Servo? (y/n): ").lower()
+        if servo_choice == 'y':
+            try:
+                servo_angle = int(self._prompt_input("Enter Servo angle (0-180): "))
+                if 0 <= servo_angle <= 180:
+                    actions['servo'] = {'angle': servo_angle}
+                else:
+                    print("Invalid Servo angle. Skipping servo scheduling.")
+            except ValueError:
+                print("Invalid Servo angle. Skipping servo scheduling.")
         
         if not actions:
             print("No actuators scheduled. Exiting schedule setup.")
@@ -475,8 +508,8 @@ class HydroponicsConsole(Cmd):
             return
         
         # Define table headers
-        headers = ["Name", "Device Name", "Device IP", "Start Time (H:M)", "Duration (H:M)", "Frequency", "Day of Week", "LED", "Air Pump", "Water Pump", "Solenoid Valve"]
-        col_widths = [15, 15, 15, 15, 15, 10, 15, 10, 10, 12, 15]
+        headers = ["Name", "Device Name", "Device IP", "Start Time (H:M)", "Duration (H:M)", "Frequency", "Day of Week", "LED", "Air Pump", "Water Pump", "Servo"]
+        col_widths = [15, 15, 15, 15, 15, 10, 15, 10, 10, 12, 10]
         
         # Print header
         header_row = " | ".join([headers[i].ljust(col_widths[i]) for i in range(len(headers))])
@@ -502,7 +535,7 @@ class HydroponicsConsole(Cmd):
             led = details['actions'].get('led', {}).get('state', '-')
             airpump = str(details['actions'].get('airpump', {}).get('value', '-'))
             waterpump = str(details['actions'].get('waterpump', {}).get('value', '-'))
-            solenoid = details['actions'].get('solenoid', {}).get('state', '-')
+            servo = str(details['actions'].get('servo', {}).get('angle', '-'))
             
             row = [
                 name.ljust(col_widths[0]),
@@ -515,7 +548,7 @@ class HydroponicsConsole(Cmd):
                 led.ljust(col_widths[7]),
                 airpump.ljust(col_widths[8]),
                 waterpump.ljust(col_widths[9]),
-                solenoid.ljust(col_widths[10])
+                servo.ljust(col_widths[10])
             ]
             print(" | ".join(row))
         print()  # Newline at the end
@@ -591,16 +624,23 @@ class HydroponicsConsole(Cmd):
         
         for actuator in data.get("sensors_data", []):
             actuator_name = actuator.get("actuator", "Unknown")
-            current = actuator.get("current_mA", 0.0)
-            voltage = actuator.get("voltage_mV", 0.0)
-            power = actuator.get("power_mW", 0.0)
-            flow_rate = actuator.get("flow_rate_L_min", "-")
+            current = actuator.get("current_mA", None)
+            voltage = actuator.get("voltage_mV", None)
+            power = actuator.get("power_mW", None)
+            flow_rate = actuator.get("flow_rate_L_min", None)
+            
+            # Format the values, handling None types
+            current_str = f"{current:.2f}" if current is not None else "-"
+            voltage_str = f"{voltage:.2f}" if voltage is not None else "-"
+            power_str = f"{power:.2f}" if power is not None else "-"
+            flow_rate_str = f"{flow_rate:.2f}" if flow_rate is not None else "-"
+            
             row = [
                 actuator_name,
-                f"{current:.2f}",
-                f"{voltage:.2f}",
-                f"{power:.2f}",
-                f"{flow_rate}" if flow_rate != "-" else "-"
+                current_str,
+                voltage_str,
+                power_str,
+                flow_rate_str
             ]
             rows.append(row)
         
@@ -658,6 +698,83 @@ class HydroponicsConsole(Cmd):
         if func and func.__doc__:
             return (func.__doc__.splitlines()[0])
         return "No documentation available."
+
+    def do_start_feeding_cycle(self, arg):
+        'Start the feeding cycle: start_feeding_cycle'
+        if not self._check_device_selected():
+            return
+        self._post_control_command('start_feeding_cycle')
+
+    def do_stop_feeding_cycle(self, arg):
+        'Stop the feeding cycle: stop_feeding_cycle'
+        if not self._check_device_selected():
+            return
+        self._post_control_command('stop_feeding_cycle')
+
+    def do_start_emptying_water(self, arg):
+        'Start emptying water: start_emptying_water'
+        if not self._check_device_selected():
+            return
+        self._post_control_command('start_emptying_water')
+
+    def do_stop_emptying_water(self, arg):
+        'Stop emptying water: stop_emptying_water'
+        if not self._check_device_selected():
+            return
+        self._post_control_command('stop_emptying_water')
+
+    def _post_control_command(self, command):
+        if self.selected_device not in devices:
+            print(f"Device '{self.selected_device}' is not available.")
+            return
+        device_info = devices[self.selected_device]
+        url = f"https://{device_info['address']}:{device_info['port']}/api/control/{command}"
+        try:
+            response = self.session.post(url, timeout=5)
+            response.raise_for_status()
+            print(response.text)
+        except Exception as e:
+            print(f"Error sending control command '{command}' to device '{self.selected_device}': {e}")
+
+    def poll_sensors(self):
+        while True:
+            time.sleep(self.polling_interval)
+            if not self.selected_device:
+                continue
+            device_info = devices.get(self.selected_device)
+            if not device_info:
+                continue
+            url = f"https://{device_info['address']}:{device_info['port']}/api/sensors"
+            try:
+                response = self.session.get(url, timeout=5)
+                response.raise_for_status()
+                data = response.json()
+
+                # Extract and display system status
+                system_status = data.get('system_status', 'Unknown')
+                if system_status != self.previous_system_status:
+                    self.previous_system_status = system_status
+                    print(f"\nSystem Status Updated: {system_status}")
+
+                # Process flow rates
+                for sensor_data in data.get('sensors_data', []):
+                    flowmeter = sensor_data.get('flowmeter')
+                    flow_rate = sensor_data.get('flow_rate_L_min', 0.0)
+                    previous_status = self.flow_status.get(flowmeter, False)
+                    current_status = flow_rate > 0.0
+
+                    if not previous_status and current_status:
+                        # Flow started
+                        self.flow_status[flowmeter] = True
+                        print(f"\nFlow started on {flowmeter} flowmeter.")
+
+                    elif previous_status and not current_status:
+                        # Flow stopped
+                        self.flow_status[flowmeter] = False
+                        print(f"\nFlow stopped on {flowmeter} flowmeter.")
+
+            except requests.exceptions.RequestException as e:
+                print(f"Error polling sensor data: {e}")
 
 def start_service_discovery(console):
     zeroconf = Zeroconf()

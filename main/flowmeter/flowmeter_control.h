@@ -20,8 +20,9 @@
 // Function prototypes
 esp_err_t flowmeter_init(void);
 void flowmeter_task(void *pvParameter);
-// float get_drain_flow_rate(void);
-// float get_source_flow_rate(void);
-// float get_overflow_flow_rate(void);
+float get_drain_flow_rate(void);
+float get_source_flow_rate(void);
+float get_overflow_flow_rate(void);
+
 
 #endif // FLOWMETER_CONTROL_H

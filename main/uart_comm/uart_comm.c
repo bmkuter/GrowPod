@@ -44,6 +44,9 @@ void uart_comm_init(void) {
  * @brief Console task that handles input and executes commands.
  */
 void uart_console_task(void *pvParameter) {
+
+    vTaskDelay(2500/portTICK_PERIOD_MS);
+
     // Configure the console
     esp_console_config_t console_config = {
         .max_cmdline_args = 8,

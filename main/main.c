@@ -10,6 +10,7 @@
 #include "freertos/task.h"
 #include "esp_log.h"
 #include "mdns.h"
+#include "control_logic.h"
 
 void start_mdns_service(void) {
     // Initialize mDNS
@@ -52,5 +53,11 @@ void app_main(void) {
         xTaskCreate(flowmeter_task, "flowmeter_task", 4096, NULL, 5, NULL);
     } else {
         ESP_LOGE("MAIN", "Failed to initialize flowmeter");
+    }
+
+    // Initialize control logic
+    esp_err_t ret = control_logic_init();
+    if (ret != ESP_OK) {
+        ESP_LOGE("MAIN", "Failed to initialize control logic module");
     }
 }

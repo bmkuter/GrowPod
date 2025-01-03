@@ -9,6 +9,7 @@ idf_component_register(
         "flowmeter/flowmeter_control.c"
         "https_server/https_server.c"
         "Networking/wifi_manager.c"
+        "control_logic/control_logic.c"
     INCLUDE_DIRS
         "."
         "ina260"
@@ -17,6 +18,7 @@ idf_component_register(
         "flowmeter"
         "https_server"
         "Networking"
+        "control_logic"
     # REQUIRES
     #     esp_https_server   # Add this line
     #     esp_wifi           # Include other components as needed
