@@ -18,7 +18,8 @@ static TaskHandle_t control_logic_task_handle = NULL;
 #define WATER_PUMP_FEEDING_PWM 80    // PWM value for water pump during feeding
 #define OVERFLOW_THRESHOLD 1.0f      // Threshold flow rate for overflow detection (L/min)
 #define SOME_MIN_FLOW_RATE 0.1f      // Minimum flow rate to consider as flow stopped
-
+#define DRAIN_OPEN 0
+#define DRAIN_CLOSED 180
 // Function implementations
 
 esp_err_t control_logic_init(void) {
@@ -84,7 +85,7 @@ esp_err_t start_emptying_water(void) {
     set_system_state(SYSTEM_STATE_EMPTYING_WATER);
 
     // Open the drain solenoid valve
-    set_drain_valve_state(true); // Open valve
+    set_drain_valve_angle(DRAIN_OPEN); // Open valve
 
     // Additional logic as needed
     ESP_LOGI(TAG, "Water emptying started");
@@ -98,7 +99,7 @@ esp_err_t stop_emptying_water(void) {
     }
 
     // Close the drain solenoid valve
-    set_drain_valve_state(false); // Close valve
+    set_drain_valve_angle(DRAIN_CLOSED); // Close valve
 
     // Update system state
     set_system_state(SYSTEM_STATE_IDLE);
@@ -119,7 +120,7 @@ esp_err_t handle_overflow_event(void) {
     // Take necessary actions (e.g., stop pumps, open drain)
     set_water_pump_pwm(0);
     set_air_pump_pwm(0);
-    set_drain_valve_state(true); // Open drain valve to prevent overflow
+    set_drain_valve_angle(DRAIN_OPEN); // Open drain valve to prevent overflow
 
     // Notify user or system
     ESP_LOGE(TAG, "Overflow detected! System has been stopped for safety.");
@@ -198,10 +199,19 @@ void control_logic_task(void *pvParameter) {
 //     // e.g., pwm_set_duty(AIR_PUMP_CHANNEL, pwm_value);
 // }
 
-void set_drain_valve_state(bool open) {
-    // Control the drain solenoid valve
-    ESP_LOGI(TAG, "Setting drain valve state to %s", open ? "OPEN" : "CLOSED");
-    // Implement actual GPIO control here
-    // e.g., gpio_set_level(DRAIN_VALVE_GPIO, open ? 1 : 0);
-    set_solenoid_valve(open);
+void set_drain_valve_angle(uint32_t angle_degrees)
+{
+    // Clamp the angle to [0..180]
+    if (angle_degrees > 180) {
+        angle_degrees = 180;
+    }
+
+    ESP_LOGI(TAG, "Setting drain valve angle to %lu degrees", angle_degrees);
+
+    // Send this command to the actuator queue (which will call set_servo_angle internally).
+    actuator_command_t command = {
+        .cmd_type = ACTUATOR_CMD_SERVO_ANGLE,  // or a new enum if needed
+        .value = angle_degrees
+    };
+    xQueueSend(get_actuator_queue(), &command, portMAX_DELAY);
 }

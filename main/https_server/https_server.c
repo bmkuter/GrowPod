@@ -16,7 +16,7 @@ static const char *TAG = "HTTPS_SERVER";
 // Forward declarations of request handlers
 static esp_err_t airpump_post_handler(httpd_req_t *req);
 static esp_err_t waterpump_post_handler(httpd_req_t *req);
-static esp_err_t servo_post_handler(httpd_req_t *req);   // NEW servo endpoint
+static esp_err_t servo_post_handler(httpd_req_t *req);
 static esp_err_t led_post_handler(httpd_req_t *req);
 static esp_err_t sensors_get_handler(httpd_req_t *req);
 

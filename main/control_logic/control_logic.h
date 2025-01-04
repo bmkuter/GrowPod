@@ -29,7 +29,7 @@ typedef enum {
 extern system_state_t current_system_state;
 
 // Function prototypes
-void set_drain_valve_state(bool open);
+void set_drain_valve_angle(uint32_t angle_degrees);
 
 // Initialize the control logic module
 esp_err_t control_logic_init(void);

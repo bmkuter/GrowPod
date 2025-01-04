@@ -12,7 +12,7 @@ static const char *TAG = "UART_COMM";
 // Forward declarations for command handler functions
 static int cmd_airpump(int argc, char **argv);
 static int cmd_waterpump(int argc, char **argv);
-static int cmd_solenoid(int argc, char **argv);
+static int cmd_drain_servo(int argc, char **argv);
 static int cmd_led(int argc, char **argv);
 static int cmd_read_sensors(int argc, char **argv);
 
@@ -132,13 +132,13 @@ static void register_console_commands(void) {
         ESP_ERROR_CHECK(esp_console_cmd_register(&cmd));
     }
 
-    // Solenoid valve command
+    // Drain servo command
     {
         const esp_console_cmd_t cmd = {
-            .command = "solenoid",
-            .help = "Set solenoid valve state (0 or 1)",
+            .command = "drain",
+            .help = "Set drain servo angle (0 to 180)",
             .hint = NULL,
-            .func = &cmd_solenoid,
+            .func = &cmd_drain_servo,
             .argtable = NULL
         };
         ESP_ERROR_CHECK(esp_console_cmd_register(&cmd));
@@ -278,24 +278,29 @@ static int cmd_waterpump(int argc, char **argv) {
 /**
  * @brief Command handler for the 'solenoid' command.
  */
-static int cmd_solenoid(int argc, char **argv) {
+static int cmd_drain_servo(int argc, char **argv)
+{
     if (argc != 2) {
-        ESP_LOGW(TAG, "Usage: solenoid <0|1>");
+        ESP_LOGW(TAG, "Usage: solenoid <angle>");
+        ESP_LOGW(TAG, "Example: solenoid 90 (for 90 degrees)");
         return 1;
     }
 
-    int value = atoi(argv[1]);
-    if (value != 0 && value != 1) {
-        ESP_LOGW(TAG, "Invalid value. Use 0 (off) or 1 (on).");
+    int angle = atoi(argv[1]);
+    // Validate angle
+    if (angle < 0 || angle > 180) {
+        ESP_LOGW(TAG, "Invalid angle. Must be between 0 and 180.");
         return 1;
     }
 
+    // Create an actuator command for servo/valve angle
     actuator_command_t command = {
-        .cmd_type = ACTUATOR_CMD_SOLENOID_VALVE,
-        .value = value
+        .cmd_type = ACTUATOR_CMD_SERVO_ANGLE,  // or a new "drain_valve_angle" if you prefer
+        .value = (uint32_t)angle
     };
     xQueueSend(get_actuator_queue(), &command, portMAX_DELAY);
-    ESP_LOGI(TAG, "Solenoid valve set to %d", value);
+
+    ESP_LOGI(TAG, "Solenoid valve set to angle: %d", angle);
     return 0;
 }
 

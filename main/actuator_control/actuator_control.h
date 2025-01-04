@@ -34,7 +34,7 @@
 typedef enum {
     ACTUATOR_CMD_AIR_PUMP_PWM,
     ACTUATOR_CMD_WATER_PUMP_PWM,
-    ACTUATOR_CMD_SERVO_ANGLE,      // <-- New servo command
+    ACTUATOR_CMD_SERVO_ANGLE, 
     ACTUATOR_CMD_LED_ARRAY_BINARY
 } actuator_cmd_t;
 
