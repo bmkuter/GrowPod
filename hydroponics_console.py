@@ -10,6 +10,7 @@ import json
 from apscheduler.schedulers.background import BackgroundScheduler
 from datetime import datetime
 import time
+import tkinter as tk
 
 # JUST FOR DEBUG, REMOVE ME DURING PRODUCTION
 import urllib3
@@ -42,6 +43,55 @@ devices = {}
 # Initialize the scheduler
 scheduler = BackgroundScheduler()
 scheduler.start()
+
+def prompt_schedule_24(initial_schedule=None):
+    """
+    Opens a Tkinter window with 24 horizontal sliders (one for each hour).
+    Each slider lets the user set a PWM percentage (0..100).
+    Returns a list of 24 integer values if confirmed, or None if cancelled.
+    """
+    result = None
+
+    def on_confirm():
+        nonlocal result
+        result = [scale.get() for scale in scales]
+        root.destroy()
+
+    def on_cancel():
+        nonlocal result
+        result = None
+        root.destroy()
+
+    root = tk.Tk()
+    root.title("24-Hour Schedule Editor")
+
+    scales = []
+    # For each hour, create a row with a label and a slider
+    for hour in range(24):
+        frame = tk.Frame(root)
+        frame.pack(fill="x", padx=10, pady=2)
+
+        label = tk.Label(frame, text=f"{hour:02d}:00", width=5)
+        label.pack(side="left")
+
+        scale = tk.Scale(frame, from_=0, to=100, orient="horizontal", length=300)
+        if initial_schedule and len(initial_schedule) == 24:
+            scale.set(initial_schedule[hour])
+        else:
+            scale.set(0)
+        scale.pack(side="left", fill="x", expand=True)
+        scales.append(scale)
+
+    # Confirm / Cancel
+    button_frame = tk.Frame(root)
+    button_frame.pack(pady=10)
+    confirm_btn = tk.Button(button_frame, text="Confirm", command=on_confirm, width=10)
+    confirm_btn.pack(side="left", padx=5)
+    cancel_btn = tk.Button(button_frame, text="Cancel", command=on_cancel, width=10)
+    cancel_btn.pack(side="left", padx=5)
+
+    root.mainloop()
+    return result
 
 class HydroponicsServiceListener:
     def __init__(self, console):
@@ -79,13 +129,20 @@ class HydroponicsConsole(Cmd):
     def __init__(self):
         super().__init__()
         self.selected_device = None  # Initialize selected_device to None
+
+        # Updated custom commands:
         self.custom_commands = {
             'list': 'List all discovered devices.',
             'select': 'Select a device to interact with: select <device_number>',
+            'routine': 'Send a routine command. Example: routine empty_pod',
+            'routine_status': 'Check routine status by ID.',
             'status': 'Get sensor data from the selected device.',
             'airpump': 'Set air pump PWM value: airpump <value>',
-            'waterpump': 'Set water pump PWM value: waterpump <value>',
-            'servo': 'Set servo angle: servo <0..180>',
+            # Water Pump → Source Pump
+            'sourcepump': 'Set source pump PWM value: sourcepump <value>',
+            'planterpump': 'Set planter pump PWM value: planterpump <value>',
+            # Servo → Drain Pump
+            'drainpump': 'Set drain pump PWM value: drainpump <value>',
             'led': 'Set LED array state: led <on/off>',
             'schedule_actuators': 'Set actuator schedule: schedule_actuators',
             'view_schedules': 'View all actuator schedules: view_schedules',
@@ -96,6 +153,9 @@ class HydroponicsConsole(Cmd):
             'stop_emptying_water': 'Stop emptying water.',
             'exit': 'Exit the console.',
         }
+
+        # Remove references to old waterpump/servo commands from the dictionary if present
+        # (We already replaced them above.)
 
         # Initialize flow status tracking
         self.flow_status = {
@@ -108,13 +168,14 @@ class HydroponicsConsole(Cmd):
         # Track previous system status
         self.previous_system_status = None
 
-        # Start the background polling thread
-        self.polling_thread = threading.Thread(target=self.poll_sensors)
-        self.polling_thread.daemon = True
-        self.polling_thread.start()
+        # # Start the background polling thread
+        # self.polling_thread = threading.Thread(target=self.poll_sensors)
+        # self.polling_thread.daemon = True
+        # self.polling_thread.start()
 
+        # HTTP session config
         self.session = requests.Session()
-        self.session.verify = False  # Disable SSL verification for testing or replace with 'ca_bundle'
+        self.session.verify = False  # In production, use a proper CA bundle
 
         # If mutual TLS is enabled, set client cert and key
         if os.path.exists(client_cert) and os.path.exists(client_key):
@@ -128,14 +189,13 @@ class HydroponicsConsole(Cmd):
 
     def device_added(self, device_name):
         print(f"Handling schedules for newly added device: {device_name}")
-        # Find all schedules associated with this device
+        # Re-schedule any relevant tasks
         for name, details in self.schedules.items():
             if details['device_name'] == device_name:
                 self.schedule_job(name, details)
 
     def device_removed(self, device_name):
         print(f"Handling schedules for removed device: {device_name}")
-        # Optionally, remove or pause schedules associated with this device
         for name, details in self.schedules.items():
             if details['device_name'] == device_name:
                 try:
@@ -243,24 +303,24 @@ class HydroponicsConsole(Cmd):
             except Exception as e:
                 print(f"Error sending command to '{actuator}' for device '{device_name}': {e}")
 
-        # Schedule turning off actuators after the specified duration
+        # Function to turn off the actuators
         def turn_off_actuators():
             print(f"Turning off actuators for schedule '{name}' on device '{device_name}' at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
             for actuator, command in actions.items():
-                if actuator in ['airpump', 'waterpump']:
-                    # Turning off pumps by setting PWM to 0
+                # Rename waterpump -> sourcepump, servo -> drainpump
+                # So if actuator is in these sets, we set them to 0
+                if actuator in ['airpump', 'sourcepump', 'planterpump', 'drainpump']:
                     self._post_actuator_command(actuator, {'value': 0}, device_name)
-                elif actuator in ['led']:
-                    # Turning off binary actuators
+                elif actuator == 'led':
                     self._post_actuator_command(actuator, {'state': 'off'}, device_name)
-                elif actuator in ['servo']:
-                    # Optionally, return servo to 0 degrees or a safe angle
-                    self._post_actuator_command(actuator, {'angle': 0}, device_name)
-        
+
         # Schedule turning off actuators after 'duration' minutes
         if duration > 0:
             threading.Timer(duration * 60, turn_off_actuators).start()
 
+    # --------------------------------------------------------------------------
+    # Basic device listing/selection
+    # --------------------------------------------------------------------------
     def do_list(self, arg):
         'List all discovered devices.'
         if devices:
@@ -283,6 +343,174 @@ class HydroponicsConsole(Cmd):
         except ValueError:
             print("Please provide a valid device number.")
 
+
+    def _prompt_schedule_24(self):
+        """
+        Replaces the console input prompt with a GUI-based editor.
+        Returns a list of 24 integer PWM values or None if cancelled.
+        """
+        try:
+            # Call the GUI editor (blocking until closed)
+            schedule = prompt_schedule_24()
+            if schedule is None:
+                print("Schedule editing cancelled.")
+                return None
+            # Log the returned schedule
+            logger.info("Schedule returned: %s", schedule)
+            return schedule
+        except Exception as e:
+            print(f"Error launching schedule editor: {e}")
+            return None
+        
+    def do_routine(self, arg):
+        """
+        routine <name>
+        - empty_pod
+        - fill_pod
+        - calibrate_pod
+        - light_schedule
+        - planter_pod_schedule
+        - air_pump_schedule
+        If a schedule routine, fetch the current schedule from device, show GUI, post updated.
+        Then poll routine status.
+        """
+        if not self._check_device_selected():
+            return
+        name = arg.strip().lower()
+        if not name:
+            print("Usage: routine <name>")
+            return
+
+        payload = {}
+        # If it's one of the schedule routines, first fetch existing schedule from device
+        if name in ["light_schedule","planter_pod_schedule","air_pump_schedule"]:
+            # deduce type param
+            schedule_type = "light"
+            if name == "planter_pod_schedule":
+                schedule_type = "planter"
+            elif name == "air_pump_schedule":
+                schedule_type = "air"
+
+            # GET /api/routines/saved?type=<light|planter|air>
+            init_sched = self._fetch_saved_schedule(schedule_type)
+            print("DEBUG: Device returned schedule=", init_sched)
+            new_sched = prompt_schedule_24(init_sched)
+            if new_sched is None:
+                print("Schedule editing cancelled.")
+                return
+            logger.info("Schedule returned: %s", new_sched)
+            payload = {"schedule": new_sched}
+
+        # Post the routine
+        routine_id = self._post_routine(name, payload)
+        if routine_id is None:
+            print("Failed to start routine.")
+            return
+
+        print(f"Routine '{name}' started with ID {routine_id}. Polling for status...")
+        self._poll_routine_status(routine_id)
+
+    def _fetch_saved_schedule(self, schedule_type):
+        """
+        Attempts to GET /api/routines/saved?type=<schedule_type>
+        Returns a list of 24 ints or a default [0..0].
+        """
+        if not self.selected_device:
+            return [0]*24
+        devinfo = devices[self.selected_device]
+        url = f"https://{devinfo['address']}:{devinfo['port']}/api/routines/saved?type={schedule_type}"
+        try:
+            resp = self.session.get(url, timeout=5)
+            if resp.status_code==200:
+                data = resp.json()
+                sched = data.get("schedule",[0]*24)
+                if len(sched)<24:
+                    sched = [0]*24
+                return sched
+            else:
+                print(f"Cannot fetch saved schedule: {resp.status_code} {resp.text}")
+        except requests.RequestException as e:
+            print(f"Error fetching saved schedule: {e}")
+        return [0]*24
+
+    def do_routine_status(self, arg):
+        """
+        routine_status <routine_id>
+        """
+        if not self._check_selected():
+            return
+        try:
+            rid = int(arg.strip())
+        except ValueError:
+            print("Usage: routine_status <id>")
+            return
+
+        dev = devices[self.selected_device]
+        url = f"https://{dev['address']}:{dev['port']}/api/routines/status?id={rid}"
+        try:
+            r = self.session.get(url, timeout=5)
+            if r.status_code == 200:
+                data = r.json()
+                print(json.dumps(data, indent=2))
+            else:
+                print(f"Error {r.status_code}: {r.text}")
+        except requests.RequestException as e:
+            print(f"Error: {e}")
+
+    def _check_selected(self):
+        if not self.selected_device:
+            print("No device selected. 'list' then 'select <num>'.")
+            return False
+        if self.selected_device not in devices:
+            print("Selected device not available.")
+            self.selected_device = None
+            return False
+        return True
+
+    def _post_routine(self, routine_name, json_body):
+        dev = devices[self.selected_device]
+        url = f"https://{dev['address']}:{dev['port']}/api/routines/{routine_name}"
+        try:
+            resp = self.session.post(url, json=json_body, timeout=5)
+            if resp.status_code == 200:
+                data = resp.json()
+                rid = data.get("routine_id")
+                msg = data.get("message", "")
+                print(f"Routine '{routine_name}' started. ID={rid}. {msg}")
+                return rid
+            else:
+                print(f"Error {resp.status_code}: {resp.text}")
+        except requests.RequestException as e:
+            print(f"Error sending routine: {e}")
+        return None
+
+    def _poll_routine_status(self, routine_id, timeout=60, interval=2):
+        dev = devices[self.selected_device]
+        url = f"https://{dev['address']}:{dev['port']}/api/routines/status?id={routine_id}"
+        start_time = time.time()
+        while True:
+            try:
+                r = self.session.get(url, timeout=5)
+                if r.status_code == 200:
+                    data = r.json()
+                    status = data.get("status", "")
+                    print(f"Routine {routine_id} status: {status}")
+                    if status != "RUNNING":
+                        print("Final routine status:")
+                        print(json.dumps(data, indent=2))
+                        return
+                else:
+                    print(f"Error polling: {r.status_code}: {r.text}")
+            except requests.RequestException as e:
+                print(f"Error polling: {e}")
+            if time.time() - start_time > timeout:
+                print("Polling timed out.")
+                return
+            time.sleep(interval)
+
+    # --------------------------------------------------------------------------
+    # Sensor Status
+    # --------------------------------------------------------------------------
     def do_status(self, arg):
         'Get sensor data from the selected device.'
         if not self._check_device_selected():
@@ -308,6 +536,9 @@ class HydroponicsConsole(Cmd):
             logger.error(f"Error fetching sensor data: {e}")
             print(f"Error fetching sensor data: {e}")
 
+    # --------------------------------------------------------------------------
+    # Actuator Commands
+    # --------------------------------------------------------------------------
     def do_airpump(self, arg):
         'Set air pump PWM value: airpump <value>'
         if not self._check_device_selected():
@@ -321,8 +552,8 @@ class HydroponicsConsole(Cmd):
         except ValueError:
             print("Please provide a valid integer value.")
 
-    def do_waterpump(self, arg):
-        'Set water pump PWM value: waterpump <value>'
+    def do_sourcepump(self, arg):
+        'Set source pump PWM value: sourcepump <value>'
         if not self._check_device_selected():
             return
         try:
@@ -330,22 +561,35 @@ class HydroponicsConsole(Cmd):
             if value < 0 or value > 100:
                 print("Value must be between 0 and 100.")
                 return
-            self._post_actuator_command('waterpump', {'value': value}, self.selected_device)
+            self._post_actuator_command('sourcepump', {'value': value}, self.selected_device)
         except ValueError:
             print("Please provide a valid integer value.")
 
-    def do_servo(self, arg):
-        'Set servo angle: servo <angle>'
+    def do_planterpump(self, arg):
+        'Set planter pump PWM value: planterpump <value>'
         if not self._check_device_selected():
             return
         try:
-            angle = int(arg.strip())
-            if angle < 0 or angle > 180:
-                print("Angle must be between 0 and 180.")
+            value = int(arg.strip())
+            if value < 0 or value > 100:
+                print("Value must be between 0 and 100.")
                 return
-            self._post_actuator_command('servo', {'angle': angle}, self.selected_device)
+            self._post_actuator_command('planterpump', {'value': value}, self.selected_device)
         except ValueError:
-            print("Please provide a valid integer angle.")
+            print("Please provide a valid integer value.")
+
+    def do_drainpump(self, arg):
+        'Set drain pump PWM value: drainpump <value>'
+        if not self._check_device_selected():
+            return
+        try:
+            value = int(arg.strip())
+            if value < 0 or value > 100:
+                print("Value must be between 0 and 100.")
+                return
+            self._post_actuator_command('drainpump', {'value': value}, self.selected_device)
+        except ValueError:
+            print("Please provide a valid integer value.")
 
     def do_led(self, arg):
         'Set LED array state: led <on/off>'
@@ -357,6 +601,9 @@ class HydroponicsConsole(Cmd):
             return
         self._post_actuator_command('led', {'state': state}, self.selected_device)
 
+    # --------------------------------------------------------------------------
+    # Scheduling Commands
+    # --------------------------------------------------------------------------
     def do_schedule_actuators(self, arg):
         'Set actuator schedule: schedule_actuators'
         if not self._check_device_selected():
@@ -449,29 +696,41 @@ class HydroponicsConsole(Cmd):
             except ValueError:
                 print("Invalid Air Pump value. Skipping Air Pump scheduling.")
         
-        # Water Pump
-        waterpump_choice = self._prompt_input("Schedule Water Pump? (y/n): ").lower()
-        if waterpump_choice == 'y':
+        # Source Pump
+        sourcepump_choice = self._prompt_input("Schedule Source Pump? (y/n): ").lower()
+        if sourcepump_choice == 'y':
             try:
-                waterpump_value = int(self._prompt_input("Enter Water Pump PWM value (0-100): "))
-                if 0 <= waterpump_value <= 100:
-                    actions['waterpump'] = {'value': waterpump_value}
+                sourcepump_value = int(self._prompt_input("Enter Source Pump PWM value (0-100): "))
+                if 0 <= sourcepump_value <= 100:
+                    actions['sourcepump'] = {'value': sourcepump_value}
                 else:
-                    print("Invalid Water Pump value. Skipping Water Pump scheduling.")
+                    print("Invalid Source Pump value. Skipping Source Pump scheduling.")
             except ValueError:
-                print("Invalid Water Pump value. Skipping Water Pump scheduling.")
+                print("Invalid Source Pump value. Skipping Source Pump scheduling.")
 
-        # Servo
-        servo_choice = self._prompt_input("Schedule Servo? (y/n): ").lower()
-        if servo_choice == 'y':
+        # Planter Pump
+        planterpump_choice = self._prompt_input("Schedule Planter Pump? (y/n): ").lower()
+        if planterpump_choice == 'y':
             try:
-                servo_angle = int(self._prompt_input("Enter Servo angle (0-180): "))
-                if 0 <= servo_angle <= 180:
-                    actions['servo'] = {'angle': servo_angle}
+                planterpump_value = int(self._prompt_input("Enter Planter Pump PWM value (0-100): "))
+                if 0 <= planterpump_value <= 100:
+                    actions['planterpump'] = {'value': planterpump_value}
                 else:
-                    print("Invalid Servo angle. Skipping servo scheduling.")
+                    print("Invalid Planter Pump value. Skipping Planter Pump scheduling.")
             except ValueError:
-                print("Invalid Servo angle. Skipping servo scheduling.")
+                print("Invalid Planter Pump value. Skipping Planter Pump scheduling.")
+
+        # Drain Pump
+        drainpump_choice = self._prompt_input("Schedule Drain Pump? (y/n): ").lower()
+        if drainpump_choice == 'y':
+            try:
+                drainpump_value = int(self._prompt_input("Enter Drain Pump PWM value (0-100): "))
+                if 0 <= drainpump_value <= 100:
+                    actions['drainpump'] = {'value': drainpump_value}
+                else:
+                    print("Invalid Drain Pump value. Skipping Drain Pump scheduling.")
+            except ValueError:
+                print("Invalid Drain Pump value. Skipping Drain Pump scheduling.")
         
         if not actions:
             print("No actuators scheduled. Exiting schedule setup.")
@@ -507,9 +766,10 @@ class HydroponicsConsole(Cmd):
             print("No schedules set.")
             return
         
-        # Define table headers
-        headers = ["Name", "Device Name", "Device IP", "Start Time (H:M)", "Duration (H:M)", "Frequency", "Day of Week", "LED", "Air Pump", "Water Pump", "Servo"]
-        col_widths = [15, 15, 15, 15, 15, 10, 15, 10, 10, 12, 10]
+        # Updated table columns to include 'sourcepump' and 'drainpump' instead of 'waterpump'/'servo'
+        headers = ["Name", "Device Name", "Device IP", "Start Time (H:M)", "Duration (H:M)",
+                   "Frequency", "Day of Week", "LED", "Air Pump", "Source Pump", "Planter Pump", "Drain Pump"]
+        col_widths = [15, 15, 15, 15, 15, 10, 15, 10, 10, 12, 12, 11]
         
         # Print header
         header_row = " | ".join([headers[i].ljust(col_widths[i]) for i in range(len(headers))])
@@ -531,11 +791,12 @@ class HydroponicsConsole(Cmd):
             minutes = duration_minutes % 60
             duration_display = f"{hours}:{minutes:02d}"
             
-            # Get actuator commands
+            # Retrieve actuator values
             led = details['actions'].get('led', {}).get('state', '-')
             airpump = str(details['actions'].get('airpump', {}).get('value', '-'))
-            waterpump = str(details['actions'].get('waterpump', {}).get('value', '-'))
-            servo = str(details['actions'].get('servo', {}).get('angle', '-'))
+            sourcepump = str(details['actions'].get('sourcepump', {}).get('value', '-'))
+            planterpump = str(details['actions'].get('planterpump', {}).get('value', '-'))
+            drainpump = str(details['actions'].get('drainpump', {}).get('value', '-'))
             
             row = [
                 name.ljust(col_widths[0]),
@@ -547,11 +808,12 @@ class HydroponicsConsole(Cmd):
                 (day.capitalize() if day != '-' else '-').ljust(col_widths[6]),
                 led.ljust(col_widths[7]),
                 airpump.ljust(col_widths[8]),
-                waterpump.ljust(col_widths[9]),
-                servo.ljust(col_widths[10])
+                sourcepump.ljust(col_widths[9]),
+                planterpump.ljust(col_widths[10]),
+                drainpump.ljust(col_widths[11])
             ]
             print(" | ".join(row))
-        print()  # Newline at the end
+        print()
 
     def do_delete_schedule(self, arg):
         'Delete a schedule: delete_schedule <schedule_name>'
@@ -578,6 +840,9 @@ class HydroponicsConsole(Cmd):
         
         print(f"Schedule '{schedule_name}' has been deleted successfully.")
 
+    # --------------------------------------------------------------------------
+    # Exit / Help
+    # --------------------------------------------------------------------------
     def do_exit(self, arg):
         'Exit the console.'
         print("Exiting Hydroponics console.")
@@ -588,6 +853,9 @@ class HydroponicsConsole(Cmd):
         print("Exiting Hydroponics console.")
         return True
 
+    # --------------------------------------------------------------------------
+    # Internal Command Helpers
+    # --------------------------------------------------------------------------
     def _post_actuator_command(self, actuator, payload, device_name):
         if device_name not in devices:
             print(f"Device '{device_name}' is not available.")
@@ -622,12 +890,12 @@ class HydroponicsConsole(Cmd):
         headers = ["Actuator", "Current (mA)", "Voltage (mV)", "Power (mW)", "Flow Rate (L/min)"]
         rows = []
         
-        for actuator in data.get("sensors_data", []):
-            actuator_name = actuator.get("actuator", "Unknown")
-            current = actuator.get("current_mA", None)
-            voltage = actuator.get("voltage_mV", None)
-            power = actuator.get("power_mW", None)
-            flow_rate = actuator.get("flow_rate_L_min", None)
+        for actuator_data in data.get("sensors_data", []):
+            actuator_name = actuator_data.get("actuator", "Unknown")
+            current = actuator_data.get("current_mA", None)
+            voltage = actuator_data.get("voltage_mV", None)
+            power = actuator_data.get("power_mW", None)
+            flow_rate = actuator_data.get("flow_rate_L_min", None)
             
             # Format the values, handling None types
             current_str = f"{current:.2f}" if current is not None else "-"
@@ -645,7 +913,8 @@ class HydroponicsConsole(Cmd):
             rows.append(row)
         
         # Determine column widths
-        col_widths = [max(len(str(item)) for item in [header] + [row[idx] for row in rows]) for idx, header in enumerate(headers)]
+        col_widths = [max(len(str(item)) for item in [header] + [row[idx] for row in rows]) 
+                      for idx, header in enumerate(headers)]
         
         # Print header
         header_row = " | ".join([headers[i].ljust(col_widths[i]) for i in range(len(headers))])
@@ -656,7 +925,7 @@ class HydroponicsConsole(Cmd):
         # Print rows
         for row in rows:
             print(" | ".join([str(item).ljust(col_widths[idx]) for idx, item in enumerate(row)]))
-        print()  # Newline at the end
+        print()
 
     def save_schedules(self):
         'Save schedules to the JSON file'
@@ -666,6 +935,9 @@ class HydroponicsConsole(Cmd):
         except Exception as e:
             print(f"Error saving schedules: {e}")
 
+    # --------------------------------------------------------------------------
+    # Additional Start/Stop Commands (Feeding, Emptying, etc.)
+    # --------------------------------------------------------------------------
     def do_help(self, arg):
         'Display help for commands, grouped by category.'
         if arg:
@@ -699,6 +971,7 @@ class HydroponicsConsole(Cmd):
             return (func.__doc__.splitlines()[0])
         return "No documentation available."
 
+    # Start/Stop feeding cycle
     def do_start_feeding_cycle(self, arg):
         'Start the feeding cycle: start_feeding_cycle'
         if not self._check_device_selected():
@@ -711,6 +984,7 @@ class HydroponicsConsole(Cmd):
             return
         self._post_control_command('stop_feeding_cycle')
 
+    # Start/Stop emptying water
     def do_start_emptying_water(self, arg):
         'Start emptying water: start_emptying_water'
         if not self._check_device_selected():
@@ -736,6 +1010,9 @@ class HydroponicsConsole(Cmd):
         except Exception as e:
             print(f"Error sending control command '{command}' to device '{self.selected_device}': {e}")
 
+    # --------------------------------------------------------------------------
+    # Background Polling
+    # --------------------------------------------------------------------------
     def poll_sensors(self):
         while True:
             time.sleep(self.polling_interval)
@@ -783,10 +1060,10 @@ def start_service_discovery(console):
     return zeroconf
 
 def main():
-    # Create the console instance first
+    # Create the console instance
     console = HydroponicsConsole()
 
-    # Start mDNS service discovery in a separate thread, passing the console reference
+    # Start mDNS service discovery in a separate thread
     zeroconf = start_service_discovery(console)
     
     try:
@@ -798,4 +1075,9 @@ def main():
         scheduler.shutdown()
 
 if __name__ == '__main__':
+    # schedule = prompt_schedule_24([10] * 24)
+    # if schedule is not None:
+    #     print("Schedule:", schedule)
+    # else:
+    #     print("Cancelled")
     main()

@@ -11,17 +11,15 @@ static const char *TAG = "UART_COMM";
 
 // Forward declarations for command handler functions
 static int cmd_airpump(int argc, char **argv);
-static int cmd_waterpump(int argc, char **argv);
-static int cmd_drain_servo(int argc, char **argv);
+static int cmd_sourcepump(int argc, char **argv);
+static int cmd_planterpump(int argc, char **argv);
+static int cmd_drainpump(int argc, char **argv);
 static int cmd_led(int argc, char **argv);
 static int cmd_read_sensors(int argc, char **argv);
 
 // Function to register console commands
 static void register_console_commands(void);
 
-/**
- * @brief Initialize UART communication.
- */
 void uart_comm_init(void) {
     ESP_LOGI(TAG, "Initializing UART communication");
 
@@ -40,9 +38,6 @@ void uart_comm_init(void) {
     ESP_LOGI(TAG, "UART communication initialized successfully");
 }
 
-/**
- * @brief Console task that handles input and executes commands.
- */
 void uart_console_task(void *pvParameter) {
 
     vTaskDelay(2500/portTICK_PERIOD_MS);
@@ -57,15 +52,14 @@ void uart_console_task(void *pvParameter) {
     };
     ESP_ERROR_CHECK(esp_console_init(&console_config));
 
-    // Configure linenoise line completion library
     linenoiseSetMultiLine(1);
     linenoiseHistorySetMaxLen(100);
     linenoiseAllowEmpty(false);
 
-    // Install UART driver for interrupt-driven reads and writes
+    // Install UART driver for interrupt-driven reads/writes
     esp_vfs_dev_uart_use_driver(UART_PORT_NUM);
 
-    // Set up the UART console
+    // Set up the UART console line endings
     esp_vfs_dev_uart_port_set_rx_line_endings(UART_PORT_NUM, ESP_LINE_ENDINGS_CR);
     esp_vfs_dev_uart_port_set_tx_line_endings(UART_PORT_NUM, ESP_LINE_ENDINGS_CRLF);
 
@@ -86,7 +80,7 @@ void uart_console_task(void *pvParameter) {
             linenoiseHistoryAdd(line);
         }
 
-        // Try to run the command
+        // Execute the command
         int ret;
         esp_err_t err = esp_console_run(line, &ret);
         if (err == ESP_ERR_NOT_FOUND) {
@@ -120,25 +114,37 @@ static void register_console_commands(void) {
         ESP_ERROR_CHECK(esp_console_cmd_register(&cmd));
     }
 
-    // Water pump command
+    // Source pump command (replaces 'waterpump')
     {
         const esp_console_cmd_t cmd = {
-            .command = "waterpump",
-            .help = "Set water pump PWM value (0-100)",
+            .command = "sourcepump",
+            .help = "Set source pump PWM value (0-100)",
             .hint = NULL,
-            .func = &cmd_waterpump,
+            .func = &cmd_sourcepump,
             .argtable = NULL
         };
         ESP_ERROR_CHECK(esp_console_cmd_register(&cmd));
     }
 
-    // Drain servo command
+    // Planter pump command
     {
         const esp_console_cmd_t cmd = {
-            .command = "drain",
-            .help = "Set drain servo angle (0 to 180)",
+            .command = "planterpump",
+            .help = "Set planter pump PWM value (0-100)",
             .hint = NULL,
-            .func = &cmd_drain_servo,
+            .func = &cmd_planterpump,
+            .argtable = NULL
+        };
+        ESP_ERROR_CHECK(esp_console_cmd_register(&cmd));
+    }
+
+    // Drain pump command (replaces the old servo command)
+    {
+        const esp_console_cmd_t cmd = {
+            .command = "drainpump",
+            .help = "Set drain pump PWM value (0-100)",
+            .hint = NULL,
+            .func = &cmd_drainpump,
             .argtable = NULL
         };
         ESP_ERROR_CHECK(esp_console_cmd_register(&cmd));
@@ -148,7 +154,7 @@ static void register_console_commands(void) {
     {
         const esp_console_cmd_t cmd = {
             .command = "led",
-            .help = "Set LED array state (0 or 1)",
+            .help = "Set LED array PWM value (0-100)",
             .hint = NULL,
             .func = &cmd_led,
             .argtable = NULL
@@ -172,57 +178,38 @@ static void register_console_commands(void) {
 /**
  * @brief Command handler for the 'read_sensors' command.
  */
+// Example: cmd_read_sensors() but with only one INA260
 static int cmd_read_sensors(int argc, char **argv) {
     esp_err_t ret;
-    float current_led, voltage_led, power_led;
-    float current_drain, voltage_drain, power_drain;
-    float current_source, voltage_source, power_source;
-    float current_air, voltage_air, power_air;
+    float current_total, voltage_total, power_total;
 
-    // Initialize I2C master
-    ret = i2c_master_init();
+    // 1) Ensure I2C is initialized
+    ret = i2c_master_init(); 
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to initialize I2C master: %s", esp_err_to_name(ret));
+        ESP_LOGE(TAG, "Failed to init I2C: %s", esp_err_to_name(ret));
         return 1;
     }
 
-    // Initialize INA260 sensors
-    ina260_init(INA260_LED_ADDRESS);
-    ina260_init(INA260_DRAIN_ADDRESS);
-    ina260_init(INA260_SOURCE_ADDRESS);
-    ina260_init(INA260_AIR_ADDRESS);
+    // 2) Initialize the single INA260
+    ina260_init(INA260_ADDRESS);
 
-    // Read data from sensors
-    ret = ina260_read_current(INA260_LED_ADDRESS, &current_led);
-    ret |= ina260_read_voltage(INA260_LED_ADDRESS, &voltage_led);
-    ret |= ina260_read_power(INA260_LED_ADDRESS, &power_led);
-
-    ret |= ina260_read_current(INA260_DRAIN_ADDRESS, &current_drain);
-    ret |= ina260_read_voltage(INA260_DRAIN_ADDRESS, &voltage_drain);
-    ret |= ina260_read_power(INA260_DRAIN_ADDRESS, &power_drain);
-
-    ret |= ina260_read_current(INA260_SOURCE_ADDRESS, &current_source);
-    ret |= ina260_read_voltage(INA260_SOURCE_ADDRESS, &voltage_source);
-    ret |= ina260_read_power(INA260_SOURCE_ADDRESS, &power_source);
-
-    ret |= ina260_read_current(INA260_AIR_ADDRESS, &current_air);
-    ret |= ina260_read_voltage(INA260_AIR_ADDRESS, &voltage_air);
-    ret |= ina260_read_power(INA260_AIR_ADDRESS, &power_air);
+    // 3) Read data from the single sensor
+    ret  = ina260_read_current(INA260_ADDRESS, &current_total);
+    ret |= ina260_read_voltage(INA260_ADDRESS, &voltage_total);
+    ret |= ina260_read_power(INA260_ADDRESS,   &power_total);
 
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to read sensor data: %s", esp_err_to_name(ret));
         return 1;
     }
 
-    // Print the results in a row-column view
-    printf("\n---------------------------------------------------------\n");
-    printf("| Lane   | Current (mA) | Voltage (mV) | Power (mW)      |\n");
-    printf("---------------------------------------------------------\n");
-    printf("| LED    | %12.2f | %12.2f | %12.2f   |\n", current_led, voltage_led, power_led);
-    printf("| Drain  | %12.2f | %12.2f | %12.2f   |\n", current_drain, voltage_drain, power_drain);
-    printf("| Source | %12.2f | %12.2f | %12.2f   |\n", current_source, voltage_source, power_source);
-    printf("| Air    | %12.2f | %12.2f | %12.2f   |\n", current_air, voltage_air, power_air);
-    printf("---------------------------------------------------------\n");
+    // 4) Print aggregated results 
+    printf("\n---------------------------------------\n");
+    printf(" Single INA260 @ 0x%02X Reading:\n", INA260_ADDRESS);
+    printf("   Current: %.2f mA\n", current_total);
+    printf("   Voltage: %.2f mV\n", voltage_total);
+    printf("   Power:   %.2f mW\n", power_total);
+    printf("---------------------------------------\n\n");
 
     return 0;
 }
@@ -252,11 +239,11 @@ static int cmd_airpump(int argc, char **argv) {
 }
 
 /**
- * @brief Command handler for the 'waterpump' command.
+ * @brief Command handler for the 'sourcepump' command (formerly 'waterpump').
  */
-static int cmd_waterpump(int argc, char **argv) {
+static int cmd_sourcepump(int argc, char **argv) {
     if (argc != 2) {
-        ESP_LOGW(TAG, "Usage: waterpump <value>");
+        ESP_LOGW(TAG, "Usage: sourcepump <value>");
         return 1;
     }
 
@@ -267,40 +254,64 @@ static int cmd_waterpump(int argc, char **argv) {
     }
 
     actuator_command_t command = {
-        .cmd_type = ACTUATOR_CMD_WATER_PUMP_PWM,
+        .cmd_type = ACTUATOR_CMD_SOURCE_PUMP_PWM,
         .value = value
     };
     xQueueSend(get_actuator_queue(), &command, portMAX_DELAY);
-    ESP_LOGI(TAG, "Water pump PWM set to %d", value);
+    ESP_LOGI(TAG, "Source pump PWM set to %d", value);
     return 0;
 }
 
 /**
- * @brief Command handler for the 'solenoid' command.
+ * @brief Command handler for the 'planterpump' command.
  */
-static int cmd_drain_servo(int argc, char **argv)
+static int cmd_planterpump(int argc, char **argv) {
+    if (argc != 2) {
+        ESP_LOGW(TAG, "Usage: planterpump <value>");
+        return 1;
+    }
+
+    int value = atoi(argv[1]);
+    if (value < 0 || value > 100) {
+        ESP_LOGW(TAG, "Invalid value. Please provide a PWM value between 0 and 100.");
+        return 1;
+    }
+
+    actuator_command_t command = {
+        .cmd_type = ACTUATOR_CMD_PLANTER_PUMP_PWM,
+        .value = value
+    };
+    xQueueSend(get_actuator_queue(), &command, portMAX_DELAY);
+    ESP_LOGI(TAG, "Planter pump PWM set to %d", value);
+    return 0;
+}
+
+/**
+ * @brief Command handler for the 'drainpump' command (replacing servo).
+ */
+static int cmd_drainpump(int argc, char **argv)
 {
     if (argc != 2) {
-        ESP_LOGW(TAG, "Usage: solenoid <angle>");
-        ESP_LOGW(TAG, "Example: solenoid 90 (for 90 degrees)");
+        ESP_LOGW(TAG, "Usage: drainpump <value>");
+        ESP_LOGW(TAG, "Example: drainpump 100 (full duty)");
         return 1;
     }
 
-    int angle = atoi(argv[1]);
-    // Validate angle
-    if (angle < 0 || angle > 180) {
-        ESP_LOGW(TAG, "Invalid angle. Must be between 0 and 180.");
+    int value = atoi(argv[1]);
+    // Validate range
+    if (value < 0 || value > 100) {
+        ESP_LOGW(TAG, "Invalid value. Must be between 0 and 100.");
         return 1;
     }
 
-    // Create an actuator command for servo/valve angle
+    // Create an actuator command for the drain pump
     actuator_command_t command = {
-        .cmd_type = ACTUATOR_CMD_SERVO_ANGLE,  // or a new "drain_valve_angle" if you prefer
-        .value = (uint32_t)angle
+        .cmd_type = ACTUATOR_CMD_DRAIN_PUMP_PWM,  // newly replaced command enum
+        .value = (uint32_t)value
     };
     xQueueSend(get_actuator_queue(), &command, portMAX_DELAY);
 
-    ESP_LOGI(TAG, "Solenoid valve set to angle: %d", angle);
+    ESP_LOGI(TAG, "Drain pump PWM set to %d", value);
     return 0;
 }
 
@@ -309,19 +320,21 @@ static int cmd_drain_servo(int argc, char **argv)
  */
 static int cmd_led(int argc, char **argv) {
     if (argc != 2) {
-        ESP_LOGW(TAG, "Usage: led <0|1>");
+        ESP_LOGW(TAG, "Usage: led <value>");
+        ESP_LOGW(TAG, "Example: led 100 (full duty)");
         return 1;
     }
 
     int value = atoi(argv[1]);
-    if (value != 0 && value != 1) {
-        ESP_LOGW(TAG, "Invalid value. Use 0 (off) or 1 (on).");
+    // Validate range
+    if (value < 0 || value > 100) {
+        ESP_LOGW(TAG, "Invalid value. Must be between 0 and 100.");
         return 1;
     }
 
     actuator_command_t command = {
-        .cmd_type = ACTUATOR_CMD_LED_ARRAY_BINARY,
-        .value = value
+        .cmd_type = ACTUATOR_CMD_LED_ARRAY_PWM,
+        .value = (uint32_t)value
     };
     xQueueSend(get_actuator_queue(), &command, portMAX_DELAY);
     ESP_LOGI(TAG, "LED array set to %d", value);

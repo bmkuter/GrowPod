@@ -1,5 +1,3 @@
-// control_logic.c
-
 #include "control_logic.h"
 #include "esp_log.h"
 #include "flowmeter_control.h"
@@ -14,21 +12,27 @@ system_state_t current_system_state = SYSTEM_STATE_IDLE;
 // Task handle for control logic task
 static TaskHandle_t control_logic_task_handle = NULL;
 
+// -----------------------------------------------------------
 // Constants and thresholds
-#define WATER_PUMP_FEEDING_PWM 80    // PWM value for water pump during feeding
+// -----------------------------------------------------------
+// If you want the drain "open" or "closed" to be just 0/100% PWM:
+#define DRAIN_OPEN_PWM     100   // 100% duty to "open"
+#define DRAIN_CLOSED_PWM   0     // 0% duty to "close"
+
+// For source pump feeding
+#define SOURCE_PUMP_FEEDING_PWM 80
+
 #define OVERFLOW_THRESHOLD 1.0f      // Threshold flow rate for overflow detection (L/min)
 #define SOME_MIN_FLOW_RATE 0.1f      // Minimum flow rate to consider as flow stopped
-#define DRAIN_OPEN 0
-#define DRAIN_CLOSED 180
-// Function implementations
 
+// -----------------------------------------------------------
+// Initialization
+// -----------------------------------------------------------
 esp_err_t control_logic_init(void) {
-    esp_err_t ret = ESP_OK;
-
     // Initialize system state
     current_system_state = SYSTEM_STATE_IDLE;
 
-    // Create control logic task
+    // Create control logic task if not already created
     if (control_logic_task_handle == NULL) {
         xTaskCreate(control_logic_task, "control_logic_task", 4096, NULL, 5, &control_logic_task_handle);
         if (control_logic_task_handle == NULL) {
@@ -38,9 +42,12 @@ esp_err_t control_logic_init(void) {
     }
 
     ESP_LOGI(TAG, "Control logic module initialized");
-    return ret;
+    return ESP_OK;
 }
 
+// -----------------------------------------------------------
+// Start / Stop Feeding Cycle
+// -----------------------------------------------------------
 esp_err_t start_feeding_cycle(void) {
     if (current_system_state != SYSTEM_STATE_IDLE) {
         ESP_LOGW(TAG, "Cannot start feeding cycle: System is not in IDLE state");
@@ -50,23 +57,21 @@ esp_err_t start_feeding_cycle(void) {
     // Update system state
     set_system_state(SYSTEM_STATE_FEEDING_CYCLE_ACTIVE);
 
-    // Activate necessary actuators (e.g., water pump)
-    // Set water pump PWM to desired value
-    set_water_pump_pwm(WATER_PUMP_FEEDING_PWM);
+    // Activate the source pump (formerly water pump) at desired PWM
+    set_source_pump_pwm(SOURCE_PUMP_FEEDING_PWM);
 
-    // Additional logic as needed
     ESP_LOGI(TAG, "Feeding cycle started");
     return ESP_OK;
 }
 
 esp_err_t stop_feeding_cycle(void) {
     if (current_system_state != SYSTEM_STATE_FEEDING_CYCLE_ACTIVE) {
-        ESP_LOGW(TAG, "Cannot stop feeding cycle: Feeding cycle is not active");
+        ESP_LOGW(TAG, "Cannot stop feeding cycle: It is not active");
         return ESP_ERR_INVALID_STATE;
     }
 
-    // Deactivate necessary actuators
-    set_water_pump_pwm(0); // Stop water pump
+    // Deactivate the source pump
+    set_source_pump_pwm(0);
 
     // Update system state
     set_system_state(SYSTEM_STATE_IDLE);
@@ -75,8 +80,14 @@ esp_err_t stop_feeding_cycle(void) {
     return ESP_OK;
 }
 
+// -----------------------------------------------------------
+// Start / Stop Emptying Water
+// -----------------------------------------------------------
 esp_err_t start_emptying_water(void) {
-    if (current_system_state != SYSTEM_STATE_IDLE && current_system_state != SYSTEM_STATE_FEEDING_CYCLE_ACTIVE) {
+    // Optionally allow emptying water from either IDLE or FEEDING_CYCLE_ACTIVE
+    if (current_system_state != SYSTEM_STATE_IDLE &&
+        current_system_state != SYSTEM_STATE_FEEDING_CYCLE_ACTIVE)
+    {
         ESP_LOGW(TAG, "Cannot start emptying water: Invalid system state");
         return ESP_ERR_INVALID_STATE;
     }
@@ -84,22 +95,21 @@ esp_err_t start_emptying_water(void) {
     // Update system state
     set_system_state(SYSTEM_STATE_EMPTYING_WATER);
 
-    // Open the drain solenoid valve
-    set_drain_valve_angle(DRAIN_OPEN); // Open valve
+    // "Open" the drain pump (set to 100% PWM)
+    set_drain_pump_pwm(DRAIN_OPEN_PWM);
 
-    // Additional logic as needed
     ESP_LOGI(TAG, "Water emptying started");
     return ESP_OK;
 }
 
 esp_err_t stop_emptying_water(void) {
     if (current_system_state != SYSTEM_STATE_EMPTYING_WATER) {
-        ESP_LOGW(TAG, "Cannot stop emptying water: Water emptying is not active");
+        ESP_LOGW(TAG, "Cannot stop emptying water: It's not active");
         return ESP_ERR_INVALID_STATE;
     }
 
-    // Close the drain solenoid valve
-    set_drain_valve_angle(DRAIN_CLOSED); // Close valve
+    // "Close" the drain pump (set to 0% PWM)
+    set_drain_pump_pwm(DRAIN_CLOSED_PWM);
 
     // Update system state
     set_system_state(SYSTEM_STATE_IDLE);
@@ -108,6 +118,9 @@ esp_err_t stop_emptying_water(void) {
     return ESP_OK;
 }
 
+// -----------------------------------------------------------
+// Overflow Handling
+// -----------------------------------------------------------
 esp_err_t handle_overflow_event(void) {
     if (current_system_state == SYSTEM_STATE_OVERFLOW_DETECTED) {
         // Overflow already handled
@@ -117,18 +130,20 @@ esp_err_t handle_overflow_event(void) {
     // Update system state
     set_system_state(SYSTEM_STATE_OVERFLOW_DETECTED);
 
-    // Take necessary actions (e.g., stop pumps, open drain)
-    set_water_pump_pwm(0);
+    // Stop relevant pumps to prevent further flooding
+    set_source_pump_pwm(0);
     set_air_pump_pwm(0);
-    set_drain_valve_angle(DRAIN_OPEN); // Open drain valve to prevent overflow
 
-    // Notify user or system
+    // Open the drain pump fully to mitigate overflow
+    set_drain_pump_pwm(DRAIN_OPEN_PWM);
+
     ESP_LOGE(TAG, "Overflow detected! System has been stopped for safety.");
-
-    // Additional actions as needed
     return ESP_OK;
 }
 
+// -----------------------------------------------------------
+// System State Accessors
+// -----------------------------------------------------------
 system_state_t get_system_state(void) {
     return current_system_state;
 }
@@ -157,6 +172,9 @@ const char *get_system_status_string(system_state_t state) {
     }
 }
 
+// -----------------------------------------------------------
+// Control Logic Task
+// -----------------------------------------------------------
 void control_logic_task(void *pvParameter) {
     while (1) {
         // Monitor overflow flowmeter
@@ -175,43 +193,8 @@ void control_logic_task(void *pvParameter) {
             }
         }
 
-        // Add other monitoring and control logic here
-        // For example, monitor feeding cycle completion
+        // Add other monitoring/logic for the feeding cycle, etc.
 
         vTaskDelay(pdMS_TO_TICKS(1000)); // Delay 1 second
     }
-}
-
-// Stub functions for actuator control
-// Implement these functions in your pwm_control or gpio_control module
-
-// void set_water_pump_pwm(uint8_t pwm_value) {
-//     // Set the PWM value for the water pump
-//     ESP_LOGI(TAG, "Setting water pump PWM to %d", pwm_value);
-//     // Implement actual PWM control here
-//     // e.g., pwm_set_duty(WATER_PUMP_CHANNEL, pwm_value);
-// }
-
-// void set_air_pump_pwm(uint8_t pwm_value) {
-//     // Set the PWM value for the air pump
-//     ESP_LOGI(TAG, "Setting air pump PWM to %d", pwm_value);
-//     // Implement actual PWM control here
-//     // e.g., pwm_set_duty(AIR_PUMP_CHANNEL, pwm_value);
-// }
-
-void set_drain_valve_angle(uint32_t angle_degrees)
-{
-    // Clamp the angle to [0..180]
-    if (angle_degrees > 180) {
-        angle_degrees = 180;
-    }
-
-    ESP_LOGI(TAG, "Setting drain valve angle to %lu degrees", angle_degrees);
-
-    // Send this command to the actuator queue (which will call set_servo_angle internally).
-    actuator_command_t command = {
-        .cmd_type = ACTUATOR_CMD_SERVO_ANGLE,  // or a new enum if needed
-        .value = angle_degrees
-    };
-    xQueueSend(get_actuator_queue(), &command, portMAX_DELAY);
 }

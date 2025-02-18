@@ -4,10 +4,7 @@
 #include "driver/i2c_master.h"
 #include "esp_err.h"
 
-#define INA260_LED_ADDRESS    0x40
-#define INA260_DRAIN_ADDRESS  0x44
-#define INA260_SOURCE_ADDRESS 0x41
-#define INA260_AIR_ADDRESS    0x45
+#define INA260_ADDRESS    0x40
 
 // I2C configuration
 #define I2C_MASTER_SCL_IO          18    /*!< GPIO number used for I2C master clock */

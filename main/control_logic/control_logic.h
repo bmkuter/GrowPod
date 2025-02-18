@@ -1,5 +1,3 @@
-// control_logic.h
-
 #ifndef CONTROL_LOGIC_H
 #define CONTROL_LOGIC_H
 
@@ -12,7 +10,7 @@
 #include "uart_comm.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "actuator_control.h" // Include your GPIO control header
+#include "actuator_control.h" // Include your updated actuator control header
 #include "esp_log.h"
 
 // System operational states
@@ -27,9 +25,6 @@ typedef enum {
 
 // Extern declaration of current system state
 extern system_state_t current_system_state;
-
-// Function prototypes
-void set_drain_valve_angle(uint32_t angle_degrees);
 
 // Initialize the control logic module
 esp_err_t control_logic_init(void);

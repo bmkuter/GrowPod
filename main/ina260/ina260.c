@@ -101,48 +101,16 @@ esp_err_t ina260_read_power(uint8_t address, float *power) {
 
 // INA260 task to periodically read current, voltage, and power
 void ina260_task(void *pvParameter) {
-    float current_led, voltage_led, power_led;
-    float current_drain, voltage_drain, power_drain;
-    float current_source, voltage_source, power_source;
-    float current_air, voltage_air, power_air;
+    float current, voltage, power;
     
-    i2c_master_init();
-
-    ina260_init(INA260_LED_ADDRESS);
-    ina260_init(INA260_DRAIN_ADDRESS);
-    ina260_init(INA260_SOURCE_ADDRESS);
-    ina260_init(INA260_AIR_ADDRESS);
+    ina260_init(INA260_ADDRESS);
 
     while (1) {
-        // Read LED Lane
-        ina260_read_current(INA260_LED_ADDRESS, &current_led);
-        ina260_read_voltage(INA260_LED_ADDRESS, &voltage_led);
-        ina260_read_power(INA260_LED_ADDRESS, &power_led);
-
-        // Read Drain Lane
-        ina260_read_current(INA260_DRAIN_ADDRESS, &current_drain);
-        ina260_read_voltage(INA260_DRAIN_ADDRESS, &voltage_drain);
-        ina260_read_power(INA260_DRAIN_ADDRESS, &power_drain);
-
-        // Read Source Lane
-        ina260_read_current(INA260_SOURCE_ADDRESS, &current_source);
-        ina260_read_voltage(INA260_SOURCE_ADDRESS, &voltage_source);
-        ina260_read_power(INA260_SOURCE_ADDRESS, &power_source);
-
-        // Read Air Lane
-        ina260_read_current(INA260_AIR_ADDRESS, &current_air);
-        ina260_read_voltage(INA260_AIR_ADDRESS, &voltage_air);
-        ina260_read_power(INA260_AIR_ADDRESS, &power_air);
-
-        // // Print the results in a row-column view
-        // printf("\n---------------------------------------------------------\n");
-        // printf("| Lane   | Current (mA) | Voltage (mV) | Power (mW)      |\n");
-        // printf("---------------------------------------------------------\n");
-        // printf("| LED    | %12.2f | %12.2f | %12.2f   |\n", current_led, voltage_led, power_led);
-        // printf("| Drain  | %12.2f | %12.2f | %12.2f   |\n", current_drain, voltage_drain, power_drain);
-        // printf("| Source | %12.2f | %12.2f | %12.2f   |\n", current_source, voltage_source, power_source);
-        // printf("| Air    | %12.2f | %12.2f | %12.2f   |\n", current_air, voltage_air, power_air);
-        // printf("---------------------------------------------------------\n");
+        vTaskSuspend(NULL);
+        // Read the sensor
+        ina260_read_current(INA260_ADDRESS, &current);
+        ina260_read_voltage(INA260_ADDRESS, &voltage);
+        ina260_read_power(INA260_ADDRESS, &power);
 
         vTaskDelay(pdMS_TO_TICKS(1000));  // Delay 1 second
     }
