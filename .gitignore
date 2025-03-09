@@ -189,3 +189,4 @@ managed_components/espressif__mdns/tests/unit_test/main/test_mdns.c
 managed_components/espressif__mdns/tests/unit_test/pytest_app_mdns.py
 managed_components/espressif__mdns/tests/unit_test/sdkconfig.ci
 managed_components/espressif__mdns/tests/unit_test/sdkconfig.defaults
+build/*
