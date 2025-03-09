@@ -12,8 +12,8 @@
 // GPIO definitions
 // -------------------------------------------------------------
 #define AIR_PUMP_GPIO       GPIO_NUM_0
-#define SOURCE_PUMP_GPIO    GPIO_NUM_1
-#define DRAIN_PUMP_GPIO     GPIO_NUM_6
+#define SOURCE_PUMP_GPIO    GPIO_NUM_6
+#define DRAIN_PUMP_GPIO     GPIO_NUM_1
 #define LED_ARRAY_GPIO      GPIO_NUM_3
 #define PLANTER_PUMP_GPIO   GPIO_NUM_7
 

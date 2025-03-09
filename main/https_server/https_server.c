@@ -37,10 +37,10 @@ typedef struct {
     routine_status_t status;
 
     // Water-level data: for empty/fill/calibrate
-    float start_height_mm; 
-    float end_height_mm;
-    float min_height_mm;
-    float max_height_mm;
+    int start_height_cm;
+    int end_height_cm;
+    int min_height_cm;
+    int max_height_cm;
 
     // Performance metrics
     float time_elapsed_s;
@@ -587,10 +587,10 @@ static esp_err_t routines_get_handler(httpd_req_t *req)
             }
             cJSON_AddStringToObject(root, "status", status_str);
 
-            cJSON_AddNumberToObject(root, "start_height_mm", rec->start_height_mm);
-            cJSON_AddNumberToObject(root, "end_height_mm",   rec->end_height_mm);
-            cJSON_AddNumberToObject(root, "min_height_mm",   rec->min_height_mm);
-            cJSON_AddNumberToObject(root, "max_height_mm",   rec->max_height_mm);
+            cJSON_AddNumberToObject(root, "start_height_mm", rec->start_height_cm);
+            cJSON_AddNumberToObject(root, "end_height_mm",   rec->end_height_cm);
+            cJSON_AddNumberToObject(root, "min_height_mm",   rec->min_height_cm);
+            cJSON_AddNumberToObject(root, "max_height_mm",   rec->max_height_cm);
             cJSON_AddNumberToObject(root, "time_elapsed_s",  rec->time_elapsed_s);
             cJSON_AddNumberToObject(root, "power_used_mW_s", rec->power_used_mW_s);
 
@@ -665,6 +665,7 @@ static esp_err_t saved_schedule_get_handler(httpd_req_t *req)
  * Routine Tasks Implementation
  * ==========================================
  */
+#define FILL_DRAIN_MAX_TIMER_SEC 60.0f * 4.0f
 
 //------------------------------------------
 // 1) empty_pod
@@ -680,28 +681,38 @@ static void routine_empty_pod_task(void *pvParam)
     rec->status = ROUTINE_STATUS_RUNNING;
     ESP_LOGI(TAG, "[empty_pod] start ID=%d", rid);
 
-    int dist_start = distance_sensor_read_mm();
-    rec->start_height_mm = dist_start < 0 ? -1 : (float)dist_start;
+    int dist_mm = distance_sensor_read_mm();
+    // If dist_mm < 0 => invalid; store -1 in that case
+    int dist_cm = (dist_mm < 0) ? -1 : (dist_mm / 10);  // truncated integer cm
+    rec->start_height_cm = dist_cm;
 
-    set_drain_pump_pwm(100);
+    set_drain_pump_pwm(70);
 
     float t0 = (float)xTaskGetTickCount() / configTICK_RATE_HZ;
     float total_power = 0.0f;
 
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(500));
+
         float cur_mA=0, volt_mV=0, pwr_mW=0;
         ina260_read_current(INA260_ADDRESS, &cur_mA);
         ina260_read_voltage(INA260_ADDRESS, &volt_mV);
         ina260_read_power(INA260_ADDRESS, &pwr_mW);
         total_power += (pwr_mW * 0.5f);
 
-        int dist_mm = distance_sensor_read_mm();
-        if (dist_mm > 150) {
+        dist_mm = distance_sensor_read_mm();
+        dist_cm = (dist_mm < 0) ? -1 : (dist_mm / 10);
+
+        ESP_LOGW(TAG, "DRAINING: Distance: %d cm", dist_cm);
+
+        // Old threshold was dist_mm > 115 => break. 
+        // Now dist_cm > 11 means the same as >110 mm (rounded down).
+        if (dist_cm > 11) {
             break;
         }
+
         float now_s = (float)xTaskGetTickCount() / configTICK_RATE_HZ;
-        if ((now_s - t0) > 30.0f) {
+        if ((now_s - t0) > FILL_DRAIN_MAX_TIMER_SEC) {
             break;
         }
     }
@@ -709,14 +720,22 @@ static void routine_empty_pod_task(void *pvParam)
     set_drain_pump_pwm(0);
 
     float t1 = (float)xTaskGetTickCount() / configTICK_RATE_HZ;
-    rec->end_height_mm = (float)distance_sensor_read_mm();
+
+    dist_mm = distance_sensor_read_mm();
+    dist_cm = (dist_mm < 0) ? -1 : (dist_mm / 10);
+    rec->end_height_cm = dist_cm;
     rec->time_elapsed_s = t1 - t0;
     rec->power_used_mW_s = total_power;
     rec->status = ROUTINE_STATUS_COMPLETED;
 
-    ESP_LOGI(TAG, "[empty_pod] done ID=%d: time=%.1f, power=%.1f mWs", rid, rec->time_elapsed_s, total_power);
+    ESP_LOGI(TAG,
+        "[empty_pod] done ID=%d: time=%.1f s, power=%.1f mW·s, start=%d cm, end=%d cm",
+        rid, rec->time_elapsed_s, total_power,
+        rec->start_height_cm, rec->end_height_cm);
+
     vTaskDelete(NULL);
 }
+
 
 //------------------------------------------
 // 2) fill_pod
@@ -732,28 +751,39 @@ static void routine_fill_pod_task(void *pvParam)
     rec->status = ROUTINE_STATUS_RUNNING;
     ESP_LOGI(TAG, "[fill_pod] start ID=%d", rid);
 
-    int dist_start = distance_sensor_read_mm();
-    rec->start_height_mm = dist_start < 0 ? -1 : (float)dist_start;
+    int dist_mm = distance_sensor_read_mm();
+    int dist_cm = (dist_mm < 0) ? -1 : (dist_mm / 10);
+    rec->start_height_cm = dist_cm;
 
-    set_source_pump_pwm(100);
+    set_source_pump_pwm(70);
 
     float t0 = (float)xTaskGetTickCount() / configTICK_RATE_HZ;
     float total_power = 0.0f;
 
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(500));
+
         float cur_mA=0, volt_mV=0, pwr_mW=0;
         ina260_read_current(INA260_ADDRESS, &cur_mA);
         ina260_read_voltage(INA260_ADDRESS, &volt_mV);
         ina260_read_power(INA260_ADDRESS, &pwr_mW);
         total_power += (pwr_mW * 0.5f);
 
-        int dist_mm = distance_sensor_read_mm();
-        if (dist_mm > 0 && dist_mm < 30) {
+        dist_mm = distance_sensor_read_mm();
+        dist_cm = (dist_mm < 0) ? -1 : (dist_mm / 10);
+
+        ESP_LOGW(TAG, "FILLING: Distance: %d cm", dist_cm);
+
+        // Original check was dist_mm > 0 && dist_mm < 50 => break
+        // Now we do dist_cm > 0 && dist_cm < 5 => break
+        // or if you want to exactly match "less than 50 mm", 
+        // that is truncated to 4 cm for anything < 50 mm.
+        if ((dist_cm > 0) && (dist_cm < 5)) {
             break;
         }
+
         float now_s = (float)xTaskGetTickCount() / configTICK_RATE_HZ;
-        if ((now_s - t0) > 30.0f) {
+        if ((now_s - t0) > FILL_DRAIN_MAX_TIMER_SEC) {
             break;
         }
     }
@@ -761,14 +791,21 @@ static void routine_fill_pod_task(void *pvParam)
     set_source_pump_pwm(0);
 
     float t1 = (float)xTaskGetTickCount() / configTICK_RATE_HZ;
-    rec->end_height_mm = (float)distance_sensor_read_mm();
+    dist_mm = distance_sensor_read_mm();
+    dist_cm = (dist_mm < 0) ? -1 : (dist_mm / 10);
+    rec->end_height_cm = dist_cm;
     rec->time_elapsed_s = t1 - t0;
     rec->power_used_mW_s = total_power;
     rec->status = ROUTINE_STATUS_COMPLETED;
 
-    ESP_LOGI(TAG, "[fill_pod] done ID=%d: time=%.1f, power=%.1f", rid, rec->time_elapsed_s, total_power);
+    ESP_LOGI(TAG,
+        "[fill_pod] done ID=%d: time=%.1f s, power=%.1f mW·s, start=%d cm, end=%d cm",
+        rid, rec->time_elapsed_s, total_power,
+        rec->start_height_cm, rec->end_height_cm);
+
     vTaskDelete(NULL);
 }
+
 
 //------------------------------------------
 // 3) calibrate_pod
@@ -786,11 +823,14 @@ static void routine_calibrate_pod_task(void *pvParam)
 
     float t0 = (float)xTaskGetTickCount() / configTICK_RATE_HZ;
     float total_power = 0.0f;
-    rec->min_height_mm = 999999.0f;
-    rec->max_height_mm = 0.0f;
+
+    // Initialize min/max to large / small integers
+    rec->min_height_cm = 999999;
+    rec->max_height_cm = 0;
 
     for (int i = 0; i < 20; i++) {
         vTaskDelay(pdMS_TO_TICKS(500));
+
         float cur_mA=0, volt_mV=0, pwr_mW=0;
         ina260_read_current(INA260_ADDRESS, &cur_mA);
         ina260_read_voltage(INA260_ADDRESS, &volt_mV);
@@ -799,8 +839,14 @@ static void routine_calibrate_pod_task(void *pvParam)
 
         int dist_mm = distance_sensor_read_mm();
         if (dist_mm > 0) {
-            if (dist_mm < rec->min_height_mm) rec->min_height_mm = dist_mm;
-            if (dist_mm > rec->max_height_mm) rec->max_height_mm = dist_mm;
+            // Truncated integer cm
+            int dist_cm = dist_mm / 10;
+            if (dist_cm < rec->min_height_cm) {
+                rec->min_height_cm = dist_cm;
+            }
+            if (dist_cm > rec->max_height_cm) {
+                rec->max_height_cm = dist_cm;
+            }
         }
     }
 
@@ -809,9 +855,14 @@ static void routine_calibrate_pod_task(void *pvParam)
     rec->power_used_mW_s = total_power;
     rec->status = ROUTINE_STATUS_COMPLETED;
 
-    ESP_LOGI(TAG, "[calibrate_pod] done ID=%d: min=%.1f mm, max=%.1f mm", rid, rec->min_height_mm, rec->max_height_mm);
+    ESP_LOGI(TAG,
+        "[calibrate_pod] done ID=%d: time=%.1f s, power=%.1f mW·s, min=%d cm, max=%d cm",
+        rid, rec->time_elapsed_s, total_power,
+        rec->min_height_cm, rec->max_height_cm);
+
     vTaskDelete(NULL);
 }
+
 
 //------------------------------------------
 // 4) schedule routine task (store schedule)
@@ -901,10 +952,10 @@ static int allocate_routine_slot(const char *routine_name)
             s_routines[i].status = ROUTINE_STATUS_PENDING;
             strncpy(s_routines[i].routine_name, routine_name, sizeof(s_routines[i].routine_name)-1);
             s_routines[i].routine_name[sizeof(s_routines[i].routine_name)-1] = '\0';
-            s_routines[i].start_height_mm = -1;
-            s_routines[i].end_height_mm   = -1;
-            s_routines[i].min_height_mm   = 999999.0f;
-            s_routines[i].max_height_mm   = 0.0f;
+            s_routines[i].start_height_cm = -1;
+            s_routines[i].end_height_cm   = -1;
+            s_routines[i].min_height_cm   = 999999.0f;
+            s_routines[i].max_height_cm   = 0.0f;
             s_routines[i].time_elapsed_s  = 0.0f;
             s_routines[i].power_used_mW_s = 0.0f;
             return i;

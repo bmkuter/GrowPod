@@ -30,12 +30,21 @@ void start_mdns_service(void) {
     ESP_LOGI("MDNS", "mDNS service started");
 }
 
+static void time_sync_notification_cb(struct timeval *tv) {
+    ESP_LOGI(TAG, "Time sync event: %s", asctime(localtime(&tv->tv_sec)));
+}
+
 /**
  * @brief Initialize SNTP.
  */
 void initialize_sntp(void) {
     esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);
-    esp_sntp_setservername(0, "pool.ntp.org");
+    esp_sntp_setservername(0, "time1.google.com");
+    esp_sntp_setservername(1, "time2.google.com");
+    esp_sntp_setservername(2, "time3.google.com");
+    esp_sntp_setservername(3, "time4.google.com");
+    esp_sntp_set_sync_mode(SNTP_SYNC_MODE_IMMED);
+    esp_sntp_set_time_sync_notification_cb(time_sync_notification_cb);
     esp_sntp_init();
 }
 
@@ -66,19 +75,21 @@ void app_main(void) {
 
     i2c_master_init();
     // Initialize Wi-Fi
+    printf("Starting WiFi...\n");
     if (wifi_init() == ESP_OK) {
         // Start mDNS
+        printf("Starting mDNS...\n");
         start_mdns_service();
         // Start HTTPS server
+        printf("Starting https...\n");
         start_https_server();
+        printf("Starting sntp...\n");
+        // Initialize SNTP and wait for time synchronization
+        initialize_sntp();
     } else {
         ESP_LOGE("MAIN", "Failed to initialize Wi-Fi");
     }
 
-    vTaskDelay(1000/portTICK_PERIOD_MS);
-
-    // Initialize SNTP and wait for time synchronization
-    initialize_sntp();
     time_t now = 0;
     struct tm timeinfo = { 0 };
     int retry = 0;

@@ -1,6 +1,7 @@
 #include "ina260.h"
 #include "esp_log.h"
 #include "driver/i2c.h"
+#include "driver/i2c_master.h"
 
 static const char *TAG = "INA260";
 
@@ -35,28 +36,24 @@ esp_err_t i2c_master_init(void) {
 
 // Function to read from INA260 register
 esp_err_t ina260_read_register(uint8_t address, uint8_t reg_addr, uint16_t *data) {
-    i2c_cmd_handle_t cmd = i2c_cmd_link_create();
-    esp_err_t ret;
-
-    // Start I2C communication
-    i2c_master_start(cmd);
-    i2c_master_write_byte(cmd, (address << 1) | I2C_MASTER_WRITE, true);
-    i2c_master_write_byte(cmd, reg_addr, true);
-
-    // Restart and read the register
-    i2c_master_start(cmd);
-    i2c_master_write_byte(cmd, (address << 1) | I2C_MASTER_READ, true);
-    i2c_master_read_byte(cmd, ((uint8_t*)data) + 1, I2C_MASTER_ACK);  // Read MSB
-    i2c_master_read_byte(cmd, ((uint8_t*)data), I2C_MASTER_NACK);     // Read LSB
-
-    // Stop I2C communication
-    i2c_master_stop(cmd);
-
-    ret = i2c_master_cmd_begin(I2C_MASTER_NUM, cmd, pdMS_TO_TICKS(I2C_MASTER_TIMEOUT_MS));
-    i2c_cmd_link_delete(cmd);
-
+    // Read 2 bytes from 'reg_addr' at 'address'
+    uint8_t buf[2];
+    esp_err_t ret = i2c_master_write_read_device(
+        I2C_NUM_0,
+        address,
+        &reg_addr,
+        1,
+        buf,
+        2,
+        pdMS_TO_TICKS(I2C_MASTER_TIMEOUT_MS)
+    );
+    if (ret == ESP_OK) {
+        // Data is MSB:buf[0], LSB:buf[1]
+        *data = ((uint16_t)buf[0] << 8) | buf[1];
+    }
     return ret;
 }
+
 
 // INA260 initialization
 void ina260_init(uint8_t address) {

@@ -2,10 +2,11 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include <string.h>
 
 // Define to use laser sensor or ultrasonic
-// #define USE_LASER_SENSOR 1
-#define USE_ULTRASONIC_SENSOR 1
+#define USE_LASER_SENSOR 1
+// #define USE_ULTRASONIC_SENSOR 1
 
 static const char *TAG = "DIST_SENSOR";
 
@@ -14,81 +15,71 @@ static const char *TAG = "DIST_SENSOR";
 #if defined(USE_LASER_SENSOR)
 
 #include "driver/i2c.h"
+#include "driver/i2c_master.h"
 
 // Laser sensor I2C address
 #define LASER_I2C_ADDRESS   0x74
 
 // Write register helper
-static esp_err_t laser_write_reg(uint8_t reg, const uint8_t *data, size_t len) {
-    i2c_cmd_handle_t cmd = i2c_cmd_link_create();
-    esp_err_t ret;
+static esp_err_t laser_write_reg(uint8_t reg, const uint8_t *data, size_t len)
+{
+    // We need to send [reg][data...]
+    uint8_t buf[len + 1];
+    buf[0] = reg;
+    memcpy(&buf[1], data, len);
 
-    i2c_master_start(cmd);
-    i2c_master_write_byte(cmd, (LASER_I2C_ADDRESS << 1) | I2C_MASTER_WRITE, true);
-    i2c_master_write_byte(cmd, reg, true);
-
-    if (len > 0) {
-        i2c_master_write(cmd, (uint8_t*)data, len, true);
-    }
-
-    i2c_master_stop(cmd);
-    ret = i2c_master_cmd_begin(I2C_NUM_0, cmd, pdMS_TO_TICKS(100));
-    i2c_cmd_link_delete(cmd);
-
-    return ret;
+    // Write to the device in one shot:
+    return i2c_master_write_to_device(
+        I2C_NUM_0,
+        LASER_I2C_ADDRESS, 
+        buf, 
+        len + 1, 
+        pdMS_TO_TICKS(100)
+    );
 }
 
 // Read register helper
-static esp_err_t laser_read_reg(uint8_t reg, uint8_t *data, size_t len) {
-    i2c_cmd_handle_t cmd = i2c_cmd_link_create();
-    esp_err_t ret;
+static esp_err_t laser_read_reg(uint8_t reg, uint8_t *data, size_t len)
+{
+    // 1) Write the register address
+    // 2) Then read 'len' bytes into 'data'
 
-    // Write the register address
-    i2c_master_start(cmd);
-    i2c_master_write_byte(cmd, (LASER_I2C_ADDRESS << 1) | I2C_MASTER_WRITE, true);
-    i2c_master_write_byte(cmd, reg, true);
-    i2c_master_stop(cmd);
-    ret = i2c_master_cmd_begin(I2C_NUM_0, cmd, pdMS_TO_TICKS(100));
-    i2c_cmd_link_delete(cmd);
-    if (ret != ESP_OK) {
-        return ret;
-    }
-
-    // Now read 'len' bytes from that register
-    cmd = i2c_cmd_link_create();
-    i2c_master_start(cmd);
-    i2c_master_write_byte(cmd, (LASER_I2C_ADDRESS << 1) | I2C_MASTER_READ, true);
-    if (len > 1) {
-        i2c_master_read(cmd, data, len - 1, I2C_MASTER_ACK);
-    }
-    i2c_master_read_byte(cmd, data + len - 1, I2C_MASTER_NACK);
-    i2c_master_stop(cmd);
-
-    ret = i2c_master_cmd_begin(I2C_NUM_0, cmd, pdMS_TO_TICKS(100));
-    i2c_cmd_link_delete(cmd);
-    return ret;
+    // The new API does this in one line:
+    return i2c_master_write_read_device(
+        I2C_NUM_0,
+        LASER_I2C_ADDRESS,
+        &reg,  // pointer to register address
+        1,     // size of register address
+        data, 
+        len, 
+        pdMS_TO_TICKS(100)
+    );
 }
 
+
 // One-shot measurement
-static int laser_get_distance_mm(void) {
-    // Similar logic from your example: writeReg(0x10, 0xB0), then readReg(0x02, 2 bytes)
+static int laser_get_distance_mm(void)
+{
+    // Command the laser to start measurement
     uint8_t dat = 0xB0;
     esp_err_t ret = laser_write_reg(0x10, &dat, 1);
     if (ret != ESP_OK) {
-        return -1;
+        return -1; 
     }
-    vTaskDelay(pdMS_TO_TICKS(50)); // Wait for measurement
+    vTaskDelay(pdMS_TO_TICKS(100)); // Wait for measurement to complete
 
-    uint8_t buf[2] = {0};
+    // Read 2 bytes from register 0x02
+    uint8_t buf[2];
     ret = laser_read_reg(0x02, buf, 2);
     if (ret != ESP_OK) {
         return -1;
     }
 
     int distance_mm = ((int)buf[0] << 8) | buf[1];
-    distance_mm += 10; // offset from your example
+    distance_mm += 10; // offset from example
     return distance_mm;
 }
+
 
 static esp_err_t laser_init_hw(void) {
     // Assume i2c_master_init() is already called in app_main
@@ -108,22 +99,23 @@ static esp_err_t laser_init_hw(void) {
 #define ULTRASONIC_UART_RX   5 // sensor TX -> ESP32 RX
 #define ULTRASONIC_UART_TX   4 // sensor RX -> ESP32 TX
 
-static int ultrasonic_get_distance_cm(void)
+static int ultrasonic_get_distance_mm(void)
 {
     uint8_t frame[4];
-    int length = uart_read_bytes(ULTRASONIC_UART_NUM, frame, 4, pdMS_TO_TICKS(100));
+    int length = uart_read_bytes(ULTRASONIC_UART_NUM, frame, 4, pdMS_TO_TICKS(1000));
     if (length == 4) {
         if (frame[0] == 0xFF) {
-            uint8_t csum = (frame[0] + frame[1] + frame[2]) & 0xFF;
+            uint8_t csum = (frame[0] + frame[1] + frame[2]) & 0x00FF;
             if (csum != frame[3]) {
                 return -1;
             }
             // distance in mm
-            uint16_t distance_mm = ((uint16_t)frame[1] << 8) | frame[2];
+            uint16_t distance_mm = (frame[1]<<8) + frame[2];  //((uint16_t)frame[1] << 8) | frame[2];
+            ESP_LOGE(TAG, "mm inside ultrasonic: %u mm", distance_mm);
             if (distance_mm < 30) {
-                return -1;
+                return -2;
             }
-            return distance_mm / 10; // cm
+            return distance_mm;
         }
     }
     return -1;
@@ -183,58 +175,54 @@ esp_err_t distance_sensor_init(void)
 int distance_sensor_read_mm()
 {
 #if defined(USE_LASER_SENSOR)
-    return laser_get_distance_mm();
+    const int avg_count = 3;  // reduce from 8 to 3 or 4
+    int sum = 0;
+    for (int i = 0; i < avg_count; i++) {
+        int tmp = laser_get_distance_mm();
+        if (tmp < 0) {
+            // error or invalid reading - handle as needed
+            return -1;
+        }
+        sum += tmp;
+    }
+    return sum / avg_count;
 #elif defined(USE_ULTRASONIC_SENSOR)
-    return ultrasonic_get_distance_cm() * 10;    
+    return ultrasonic_get_distance_mm();   
 #endif
 }
 
 void distance_sensor_task(void *pvParameters)
 {
     // We want 10 Hz => 100 ms delay
-    const TickType_t delay_ticks = pdMS_TO_TICKS(50);
+    const TickType_t delay_ticks = pdMS_TO_TICKS(500);
 
     while (1) {
         vTaskDelay(delay_ticks);
 
 #if defined(USE_LASER_SENSOR)
-        int dist_mm = laser_get_distance_mm();
+        int dist_mm = distance_sensor_read_mm();
         if (dist_mm > 0) {
-            // Instead of printing the distance, we do an ASCII bar
-            // For example: 30 mm => 1 'X', 300 mm => 10 'X'
-            // Let's do 1 'X' per 30 mm
-            int bar_element_size = 10;
-            int count = dist_mm / bar_element_size;
-            if (count < 1) count = 1;      // at least 1
-            if (count > 80) count = 80;   // clamp so we don't spam too many X's
+            // Convert mm -> integer cm (truncate)
+            int dist_cm = dist_mm / 10;
 
-            // Print line: "<distance_mm>mm [XXXXX...]"
-            printf("%4d mm ", dist_mm);
+            // Example: 1 'X' per 3 cm
+            int bar_element_size = 3;
+            int count = dist_cm / bar_element_size;
+            if (count < 1) count = 1;    // At least 1 'X'
+            if (count > 80) count = 80;  // Clamp maximum
+
+            // Print line: "<distance_cm> cm [XXXXX...]"
+            printf("%4d cm ", dist_cm);
             for (int i = 0; i < count; i++) {
                 printf("X");
             }
             printf("\n");
         } else {
-            printf("---- mm\n");
+            printf("---- cm\n");
         }
-
 #elif defined(USE_ULTRASONIC_SENSOR)
-        int dist_cm = ultrasonic_get_distance_cm();
-        if (dist_cm > 0) {
-            // e.g. 3 cm => 1 'X', 30 cm => 10 'X'
-            // We'll do 1 'X' per 3 cm.
-            int count = dist_cm / 3;
-            if (count < 1) count = 1;
-            if (count > 80) count = 80;
-
-            printf("%3d cm ", dist_cm);
-            for (int i = 0; i < count; i++) {
-                printf("X");
-            }
-            printf("\n");
-        } else {
-            printf("--- cm\n");
-        }
+        int dist_mm = ultrasonic_get_distance_mm();
+        ESP_LOGW(TAG, "mm: %d", dist_mm);
 #endif
     }
 }

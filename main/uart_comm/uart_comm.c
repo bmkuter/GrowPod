@@ -1,6 +1,7 @@
 #include "uart_comm.h"
 #include "actuator_control.h"
 #include "ina260.h"
+#include "distance_sensor.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_vfs_dev.h"
@@ -210,6 +211,9 @@ static int cmd_read_sensors(int argc, char **argv) {
     printf("   Voltage: %.2f mV\n", voltage_total);
     printf("   Power:   %.2f mW\n", power_total);
     printf("---------------------------------------\n\n");
+
+    // 5) Water level
+    printf("Water level: %d cm\n", distance_sensor_read_mm() / 10);
 
     return 0;
 }
