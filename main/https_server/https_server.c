@@ -8,6 +8,7 @@
 #include "esp_sntp.h"
 #include "nvs_flash.h"
 #include "nvs.h"
+#include <esp_wifi.h>
 
 #include "actuator_control.h"   // For set_air_pump_pwm, set_source_pump_pwm, set_drain_pump_pwm, set_planter_pump_pwm, set_led_array_binary (or set_led_array_pwm)
 #include "ina260.h"             // For sensor reading
@@ -94,7 +95,9 @@ static esp_err_t sourcepump_post_handler(httpd_req_t *req);
 static esp_err_t planterpump_post_handler(httpd_req_t *req);
 static esp_err_t drainpump_post_handler(httpd_req_t *req);
 static esp_err_t led_post_handler(httpd_req_t *req);
-static esp_err_t sensors_get_handler(httpd_req_t *req);
+static esp_err_t unit_metrics_get_handler(httpd_req_t *req);
+static esp_err_t hostname_suffix_post_handler(httpd_req_t *req);
+static esp_err_t device_restart_post_handler(httpd_req_t *req);
 
 
 /* ==========================================
@@ -370,13 +373,13 @@ void start_https_server(void) {
         };
         httpd_register_uri_handler(server, &led_post_uri);
         
-        httpd_uri_t sensors_get_uri = {
-            .uri      = "/api/sensors",
-            .method   = HTTP_GET,
-            .handler  = sensors_get_handler,
-            .user_ctx = NULL
+        httpd_uri_t unit_metrics_uri = {
+            .uri       = "/api/unit-metrics",
+            .method    = HTTP_GET,
+            .handler   = unit_metrics_get_handler,
+            .user_ctx  = NULL
         };
-        httpd_register_uri_handler(server, &sensors_get_uri);
+        httpd_register_uri_handler(server, &unit_metrics_uri);
 
         // Example: GET /api/routines/status
         httpd_uri_t routines_status_uri = {
@@ -404,6 +407,21 @@ void start_https_server(void) {
             .user_ctx = NULL
         };
         httpd_register_uri_handler(server, &routines_uri);
+
+        httpd_uri_t suffix_post_uri = {
+            .uri = "/api/hostnameSuffix",
+            .method = HTTP_POST,
+            .handler = hostname_suffix_post_handler
+        };
+        httpd_register_uri_handler(server, &suffix_post_uri);
+
+        httpd_uri_t restart_uri = {
+            .uri      = "/api/restart",
+            .method   = HTTP_POST,
+            .handler  = device_restart_post_handler,
+            .user_ctx = NULL
+        };
+        httpd_register_uri_handler(server, &restart_uri);
 
         ESP_LOGI(TAG, "HTTPS server started successfully");
     } else {
@@ -1170,46 +1188,69 @@ static esp_err_t led_post_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
-//-----------------------------------------------------------------------------------
-// Handler for sensors GET request
-//-----------------------------------------------------------------------------------
-static esp_err_t sensors_get_handler(httpd_req_t *req)
-{
-    // Create JSON response
-    cJSON *json = cJSON_CreateObject();
-    cJSON *table = cJSON_CreateArray();  // JSON array for the table
+static esp_err_t unit_metrics_get_handler(httpd_req_t *req) {
+    cJSON *root = cJSON_CreateObject();
 
-    // Variables to hold sensor data
-    float current = 0.0f, voltage = 0.0f, power = 0.0f;
+    float cur_mA = 0.0f, volt_mV = 0.0f, pwr_mW = 0.0f;
+    ina260_read_current(INA260_ADDRESS, &cur_mA);
+    ina260_read_voltage(INA260_ADDRESS, &volt_mV);
+    ina260_read_power(INA260_ADDRESS, &pwr_mW);
 
-    // Read data for each actuator
-    ina260_read_current(INA260_ADDRESS, &current);
-    ina260_read_voltage(INA260_ADDRESS, &voltage);
-    ina260_read_power(INA260_ADDRESS,   &power);
+    int dist_mm = distance_sensor_read_mm();
+    cJSON_AddNumberToObject(root, "current_mA", cur_mA);
+    cJSON_AddNumberToObject(root, "voltage_mV", volt_mV);
+    cJSON_AddNumberToObject(root, "power_consumption_mW", pwr_mW);
+    cJSON_AddNumberToObject(root, "water_level_mm", (dist_mm >= 0) ? dist_mm : -1);
 
-    // // Flow rates
-    // float drain_flow    = get_drain_flow_rate();
-    // float source_flow   = get_source_flow_rate();
-    // float overflow_flow = get_overflow_flow_rate();
+    // Retrieve MAC address
+    uint8_t mac[6];
+    if (esp_wifi_get_mac(ESP_IF_WIFI_STA, mac) == ESP_OK) {
+        char mac_str[18];
+        snprintf(mac_str, sizeof(mac_str), "%02X:%02X:%02X:%02X:%02X:%02X",
+                 mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+        cJSON_AddStringToObject(root, "mac_address", mac_str);
+    }
 
-    // Add the table to the main JSON object
-    cJSON_AddItemToObject(json, "sensors_data", table);
-
-    // Get current system state
-    system_state_t state = get_system_state();
-    const char *system_status_str = get_system_status_string(state);
-    cJSON_AddStringToObject(json, "system_status", system_status_str);
-
-    // Convert JSON to string
-    char *response = cJSON_PrintUnformatted(json);
-
-    // Send response
+    char *resp = cJSON_PrintUnformatted(root);
     httpd_resp_set_type(req, "application/json");
-    httpd_resp_sendstr(req, response);
-
-    // Clean up
-    cJSON_Delete(json);
-    free(response);
-
+    httpd_resp_sendstr(req, resp);
+    free(resp);
+    cJSON_Delete(root);
     return ESP_OK;
+}
+
+static esp_err_t hostname_suffix_post_handler(httpd_req_t *req) {
+    char body[128] = {0};
+    int ret = httpd_req_recv(req, body, sizeof(body)-1);
+    if (ret <= 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid body");
+        return ESP_FAIL;
+    }
+    cJSON *root = cJSON_Parse(body);
+    if (!root) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Bad JSON");
+        return ESP_FAIL;
+    }
+    cJSON *suffix_item = cJSON_GetObjectItem(root, "suffix");
+    if (!suffix_item || !cJSON_IsString(suffix_item)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "No suffix provided");
+        cJSON_Delete(root);
+        return ESP_FAIL;
+    }
+    
+    printf("Hostname suffix updated to: %s\n", suffix_item->valuestring);
+    nvs_handle_t handle;
+    if (nvs_open("user_settings", NVS_READWRITE, &handle) == ESP_OK) {
+        nvs_set_str(handle, "mdns_suffix", suffix_item->valuestring);
+        nvs_commit(handle);
+        nvs_close(handle);
+    }
+    cJSON_Delete(root);
+    httpd_resp_sendstr(req, "Suffix updated");
+    return ESP_OK;
+}
+
+static esp_err_t device_restart_post_handler(httpd_req_t *req) {
+    esp_restart();
+    return ESP_OK; 
 }

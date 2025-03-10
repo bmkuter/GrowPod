@@ -21,7 +21,18 @@ static const char *TAG = "APP_MAIN";
 void start_mdns_service(void) {
     // Initialize mDNS
     ESP_ERROR_CHECK(mdns_init());
-    ESP_ERROR_CHECK(mdns_hostname_set("hydroponics_device"));
+    char customSuffix[64] = "UNMODIFIED";
+    size_t suffix_len = sizeof(customSuffix);
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open("user_settings", NVS_READONLY, &handle);
+    if (err == ESP_OK) {
+        nvs_get_str(handle, "mdns_suffix", customSuffix, &suffix_len);
+        nvs_close(handle);
+    }
+    char fullHostname[128];
+    snprintf(fullHostname, sizeof(fullHostname), "hydroponics_device_%s", customSuffix);
+    printf("mdns: %s\n", fullHostname);
+    ESP_ERROR_CHECK(mdns_hostname_set(fullHostname));
     ESP_ERROR_CHECK(mdns_instance_name_set("Hydroponics Device"));
 
     // Set service type and port

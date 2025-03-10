@@ -152,6 +152,8 @@ class HydroponicsConsole(Cmd):
             'start_emptying_water': 'Start emptying water.',
             'stop_emptying_water': 'Stop emptying water.',
             'exit': 'Exit the console.',
+            'hostname_suffix': 'Set mDNS suffix: hostname_suffix <suffix>',
+            'rescan': 'Re-initialize Zeroconf to discover devices again.'
         }
 
         # Remove references to old waterpump/servo commands from the dictionary if present
@@ -512,29 +514,57 @@ class HydroponicsConsole(Cmd):
     # Sensor Status
     # --------------------------------------------------------------------------
     def do_status(self, arg):
-        'Get sensor data from the selected device.'
+        'Get sensor data (unit metrics) from the selected device.'
         if not self._check_device_selected():
             return
         device_info = devices[self.selected_device]
-        url = f"https://{device_info['address']}:{device_info['port']}/api/sensors"
+        url = f"https://{device_info['address']}:{device_info['port']}/api/unit-metrics"
         try:
             response = self.session.get(url, timeout=5)
             response.raise_for_status()
             data = response.json()
-            
-            # Display Device Name and IP
-            device_name = self.selected_device
-            device_ip = f"{device_info['address']}:{device_info['port']}"
-            print(f"\nDevice Name: {device_name}")
-            print(f"Device IP: {device_ip}\n")
-            logger.info(f"Fetching status for device '{device_name}' at {device_ip}.")
-            
-            # Print Sensor Data Table
-            self._print_sensor_data_table(data)
-            logger.info(f"Fetched sensor data from device '{device_name}'.")
+            if 'mac_address' in data:
+                devices[self.selected_device]['mac'] = data['mac_address']
+
+            print(f"Device Name: {self.selected_device}")
+            print(f"Device IP: {device_info['address']}")
+            print(f"Device MAC: {device_info.get('mac', 'N/A')}")
+
+            print("\n=== Device Metrics ===")
+            print(f"Current: {data['current_mA']} mA")
+            print(f"Voltage: {data['voltage_mV']} mV")
+            print(f"Power: {data['power_consumption_mW']} mW")
+            print(f"Water Level: {data['water_level_mm']} mm")
         except requests.exceptions.RequestException as e:
+            print(f"Device Name: {self.selected_device}")
+            print(f"Device IP: {device_info['address']}")
             logger.error(f"Error fetching sensor data: {e}")
             print(f"Error fetching sensor data: {e}")
+
+    def do_hostname_suffix(self, arg):
+        'Set mDNS suffix: hostname_suffix <suffix>'
+        if not self._check_device_selected():
+            return
+        device_info = devices[self.selected_device]
+        suffix = arg.strip()
+        if not suffix:
+            print("Please provide a valid suffix.")
+            return
+        url = f"https://{device_info['address']}:{device_info['port']}/api/hostnameSuffix"
+        try:
+            resp = self.session.post(url, json={"suffix": suffix}, timeout=5)
+            if resp.status_code == 200:
+                print("Suffix updated successfully.")
+                reboot_url = f"https://{device_info['address']}:{device_info['port']}/api/restart"
+                try:
+                    self.session.post(reboot_url, timeout=5)
+                    print("Device is rebooting to apply new hostname.")
+                except Exception as e:
+                    print(f"Error rebooting device: {e}")
+            else:
+                print("Error updating suffix:", resp.text)
+        except Exception as e:
+            print(f"Error updating suffix: {e}")
 
     # --------------------------------------------------------------------------
     # Actuator Commands
@@ -1010,6 +1040,19 @@ class HydroponicsConsole(Cmd):
         except Exception as e:
             print(f"Error sending control command '{command}' to device '{self.selected_device}': {e}")
 
+    def do_rescan(self, arg):
+        'Re-initialize Zeroconf to discover devices again.'
+        global devices
+        devices.clear()
+        try:
+            self.zeroconf.close()
+        except:
+            pass
+        self.zeroconf = Zeroconf()
+        self.listener = HydroponicsServiceListener(self)
+        self.browser = ServiceBrowser(self.zeroconf, "_hydroponics._tcp.local.", self.listener)
+        print("Restarted Zeroconf discovery.")
+
     # --------------------------------------------------------------------------
     # Background Polling
     # --------------------------------------------------------------------------
@@ -1057,6 +1100,9 @@ def start_service_discovery(console):
     zeroconf = Zeroconf()
     listener = HydroponicsServiceListener(console)
     browser = ServiceBrowser(zeroconf, "_hydroponics._tcp.local.", listener)
+    console.zeroconf = zeroconf
+    console.listener = listener
+    console.browser = browser
     return zeroconf
 
 def main():
