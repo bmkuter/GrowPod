@@ -128,9 +128,9 @@ static esp_err_t save_schedule_to_nvs(schedule_type_t type, const uint8_t schedu
     }
     const char* key = "";
     switch (type) {
-       case SCHEDULE_TYPE_LIGHT:   key = "light_schedule";   break;
-       case SCHEDULE_TYPE_PLANTER: key = "planter_schedule"; break;
-       case SCHEDULE_TYPE_AIR:     key = "air_schedule";     break;
+       case SCHEDULE_TYPE_LIGHT:   key = "light_sched";   break;
+       case SCHEDULE_TYPE_PLANTER: key = "planter_sched"; break;
+       case SCHEDULE_TYPE_AIR:     key = "air_sched";     break;
        default: nvs_close(my_handle); return ESP_ERR_INVALID_ARG;
     }
     err = nvs_set_blob(my_handle, key, schedule, 24 * sizeof(uint8_t));
@@ -154,9 +154,9 @@ static esp_err_t load_schedule_from_nvs(schedule_type_t type, uint8_t schedule[2
 
     const char* key = "";
     switch (type) {
-       case SCHEDULE_TYPE_LIGHT:   key = "light_schedule";   break;
-       case SCHEDULE_TYPE_PLANTER: key = "planter_schedule"; break;
-       case SCHEDULE_TYPE_AIR:     key = "air_schedule";     break;
+       case SCHEDULE_TYPE_LIGHT:   key = "light_sched";   break;
+       case SCHEDULE_TYPE_PLANTER: key = "planter_sched"; break;
+       case SCHEDULE_TYPE_AIR:     key = "air_sched";     break;
        default:
          nvs_close(my_handle);
          return ESP_ERR_INVALID_ARG;

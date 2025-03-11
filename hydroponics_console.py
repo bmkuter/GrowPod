@@ -153,11 +153,9 @@ class HydroponicsConsole(Cmd):
             'stop_emptying_water': 'Stop emptying water.',
             'exit': 'Exit the console.',
             'hostname_suffix': 'Set mDNS suffix: hostname_suffix <suffix>',
-            'rescan': 'Re-initialize Zeroconf to discover devices again.'
+            'rescan': 'Re-initialize Zeroconf to discover devices again.',
+            'all_schedules' : 'Set schedules for all actuators at once: routine all_schedules'
         }
-
-        # Remove references to old waterpump/servo commands from the dictionary if present
-        # (We already replaced them above.)
 
         # Initialize flow status tracking
         self.flow_status = {
@@ -402,6 +400,26 @@ class HydroponicsConsole(Cmd):
                 return
             logger.info("Schedule returned: %s", new_sched)
             payload = {"schedule": new_sched}
+
+        # 2) Fetch existing schedules
+        if name == "all_schedules":
+            light_sched = self._fetch_saved_schedule("light")
+            planter_sched = self._fetch_saved_schedule("planter")
+            air_sched = self._fetch_saved_schedule("air")
+
+            # 3) Present a multi-schedule GUI or similar
+            updated_light, updated_planter, updated_air = self._prompt_schedule_multi(
+                light_sched, planter_sched, air_sched
+            )
+            if updated_light is None or updated_planter is None or updated_air is None:
+                print("Schedule editing cancelled.")
+                return
+
+            # 4) Post each updated schedule
+            self._post_routine("light_schedule", {"schedule": updated_light})
+            self._post_routine("planter_pod_schedule", {"schedule": updated_planter})
+            self._post_routine("air_pump_schedule", {"schedule": updated_air})
+            return
 
         # Post the routine
         routine_id = self._post_routine(name, payload)
@@ -1095,6 +1113,22 @@ class HydroponicsConsole(Cmd):
 
             except requests.exceptions.RequestException as e:
                 print(f"Error polling sensor data: {e}")
+
+    def _prompt_schedule_multi(self, light_sched, planter_sched, air_sched):
+        '''
+        Prompt the user to edit all schedules together, returning updated schedules.
+        '''
+        try:
+            print("Editing Light Schedule")
+            updated_light = prompt_schedule_24(light_sched)
+            print("Editing Planter Schedule")
+            updated_planter = prompt_schedule_24(planter_sched)
+            print("Editing Air Pump Schedule")
+            updated_air = prompt_schedule_24(air_sched)
+            return updated_light, updated_planter, updated_air
+        except Exception as e:
+            print(f"Error in multi-schedule editing: {e}")
+            return None, None, None
 
 def start_service_discovery(console):
     zeroconf = Zeroconf()
