@@ -47,9 +47,9 @@ void uart_console_task(void *pvParameter) {
     esp_console_config_t console_config = {
         .max_cmdline_args = 8,
         .max_cmdline_length = 256,
-#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)
-        .hint_color = atoi(LOG_COLOR_CYAN)
-#endif
+// #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)
+//         .hint_color = atoi(LOG_COLOR_CYAN)
+// #endif
     };
     ESP_ERROR_CHECK(esp_console_init(&console_config));
 
