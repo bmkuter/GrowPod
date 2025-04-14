@@ -1173,10 +1173,12 @@ static esp_err_t led_post_handler(httpd_req_t *req)
 
     // Set LED array state: "on" -> true, "off" -> false
     if (strcmp(state->valuestring, "on") == 0) {
-        set_led_array_binary(true);
+        set_led_array_pwm(100);
+        // set_led_array_binary(true);
         httpd_resp_sendstr(req, "LED array turned ON");
     } else if (strcmp(state->valuestring, "off") == 0) {
-        set_led_array_binary(false);
+        set_led_array_pwm(0);
+        // set_led_array_binary(false);
         httpd_resp_sendstr(req, "LED array turned OFF");
     } else {
         ESP_LOGE(TAG, "Invalid 'state' value, must be 'on' or 'off'");
