@@ -66,7 +66,7 @@ static int laser_get_distance_mm(void)
     if (ret != ESP_OK) {
         return -1; 
     }
-    vTaskDelay(pdMS_TO_TICKS(100)); // Wait for measurement to complete
+    vTaskDelay(pdMS_TO_TICKS(50)); // Wait for measurement to complete
 
     // Read 2 bytes from register 0x02
     uint8_t buf[2];
@@ -175,7 +175,7 @@ esp_err_t distance_sensor_init(void)
 int distance_sensor_read_mm()
 {
 #if defined(USE_LASER_SENSOR)
-    const int avg_count = 3;  // reduce from 8 to 3 or 4
+    const int avg_count = 8;
     int sum = 0;
     for (int i = 0; i < avg_count; i++) {
         int tmp = laser_get_distance_mm();

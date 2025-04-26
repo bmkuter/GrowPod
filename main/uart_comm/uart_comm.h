@@ -7,6 +7,9 @@
 #include "linenoise/linenoise.h"
 #include "argtable3/argtable3.h"
 
+// expose fill_pod API
+#include "https_server.h"
+
 // UART configurations
 #define UART_PORT_NUM       UART_NUM_0
 #define UART_BAUD_RATE      115200

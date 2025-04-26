@@ -17,6 +17,9 @@ static int cmd_planterpump(int argc, char **argv);
 static int cmd_drainpump(int argc, char **argv);
 static int cmd_led(int argc, char **argv);
 static int cmd_read_sensors(int argc, char **argv);
+static int cmd_fill_pod(int argc, char **argv);
+static int cmd_empty_pod(int argc, char **argv);
+static int cmd_schedule(int argc, char **argv);
 
 // Function to register console commands
 static void register_console_commands(void);
@@ -45,11 +48,8 @@ void uart_console_task(void *pvParameter) {
 
     // Configure the console
     esp_console_config_t console_config = {
-        .max_cmdline_args = 8,
-        .max_cmdline_length = 256,
-// #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)
-//         .hint_color = atoi(LOG_COLOR_CYAN)
-// #endif
+        .max_cmdline_args   = 32,   // allow up to 32 args (schedule needs 26)
+        .max_cmdline_length = 512,  // increase buffer for long lines
     };
     ESP_ERROR_CHECK(esp_console_init(&console_config));
 
@@ -96,83 +96,6 @@ void uart_console_task(void *pvParameter) {
 
         // Free the line buffer
         linenoiseFree(line);
-    }
-}
-
-/**
- * @brief Register console commands.
- */
-static void register_console_commands(void) {
-    // Air pump command
-    {
-        const esp_console_cmd_t cmd = {
-            .command = "airpump",
-            .help = "Set air pump PWM value (0-100)",
-            .hint = NULL,
-            .func = &cmd_airpump,
-            .argtable = NULL
-        };
-        ESP_ERROR_CHECK(esp_console_cmd_register(&cmd));
-    }
-
-    // Source pump command (replaces 'waterpump')
-    {
-        const esp_console_cmd_t cmd = {
-            .command = "sourcepump",
-            .help = "Set source pump PWM value (0-100)",
-            .hint = NULL,
-            .func = &cmd_sourcepump,
-            .argtable = NULL
-        };
-        ESP_ERROR_CHECK(esp_console_cmd_register(&cmd));
-    }
-
-    // Planter pump command
-    {
-        const esp_console_cmd_t cmd = {
-            .command = "planterpump",
-            .help = "Set planter pump PWM value (0-100)",
-            .hint = NULL,
-            .func = &cmd_planterpump,
-            .argtable = NULL
-        };
-        ESP_ERROR_CHECK(esp_console_cmd_register(&cmd));
-    }
-
-    // Drain pump command (replaces the old servo command)
-    {
-        const esp_console_cmd_t cmd = {
-            .command = "drainpump",
-            .help = "Set drain pump PWM value (0-100)",
-            .hint = NULL,
-            .func = &cmd_drainpump,
-            .argtable = NULL
-        };
-        ESP_ERROR_CHECK(esp_console_cmd_register(&cmd));
-    }
-
-    // LED array command
-    {
-        const esp_console_cmd_t cmd = {
-            .command = "led",
-            .help = "Set LED array PWM value (0-100)",
-            .hint = NULL,
-            .func = &cmd_led,
-            .argtable = NULL
-        };
-        ESP_ERROR_CHECK(esp_console_cmd_register(&cmd));
-    }
-
-    // Read sensors command
-    {
-        const esp_console_cmd_t cmd = {
-            .command = "read_sensors",
-            .help = "Read and display INA260 sensor data",
-            .hint = NULL,
-            .func = &cmd_read_sensors,
-            .argtable = NULL
-        };
-        ESP_ERROR_CHECK(esp_console_cmd_register(&cmd));
     }
 }
 
@@ -343,4 +266,153 @@ static int cmd_led(int argc, char **argv) {
     xQueueSend(get_actuator_queue(), &command, portMAX_DELAY);
     ESP_LOGI(TAG, "LED array set to %d", value);
     return 0;
+}
+
+static int cmd_fill_pod(int argc, char **argv)
+{
+    // no args
+    start_fill_pod_routine();
+    return 0;
+}
+
+static int cmd_empty_pod(int argc, char **argv)
+{
+    // no args
+    start_empty_pod_routine();
+    return 0;
+}
+
+static int cmd_schedule(int argc, char **argv) {
+    if (argc != 26) {
+        ESP_LOGW(TAG, "Usage: schedule <light|planter|air> v0 v1 ... v23");
+        return 1;
+    }
+    uint8_t sched[24];
+    for (int i = 0; i < 24; i++) {
+        int v = atoi(argv[i+2]);
+        if (v < 0) v = 0; else if (v > 100) v = 100;
+        sched[i] = v;
+    }
+    if (strcmp(argv[1], "light") == 0) {
+        start_light_schedule(sched);
+    } else if (strcmp(argv[1], "planter") == 0) {
+        start_planter_schedule(sched);
+    } else if (strcmp(argv[1], "air") == 0) {
+        start_air_schedule(sched);
+    } else {
+        ESP_LOGW(TAG, "Unknown schedule type '%s'", argv[1]);
+        return 1;
+    }
+    ESP_LOGI(TAG, "Scheduled %s_schedule", argv[1]);
+    return 0;
+}
+
+static void register_console_commands(void) {
+    // Air pump command
+    {
+        const esp_console_cmd_t cmd = {
+            .command = "airpump",
+            .help = "Set air pump PWM value (0-100)",
+            .hint = NULL,
+            .func = &cmd_airpump,
+            .argtable = NULL
+        };
+        ESP_ERROR_CHECK(esp_console_cmd_register(&cmd));
+    }
+
+    // Source pump command (replaces 'waterpump')
+    {
+        const esp_console_cmd_t cmd = {
+            .command = "sourcepump",
+            .help = "Set source pump PWM value (0-100)",
+            .hint = NULL,
+            .func = &cmd_sourcepump,
+            .argtable = NULL
+        };
+        ESP_ERROR_CHECK(esp_console_cmd_register(&cmd));
+    }
+
+    // Planter pump command
+    {
+        const esp_console_cmd_t cmd = {
+            .command = "planterpump",
+            .help = "Set planter pump PWM value (0-100)",
+            .hint = NULL,
+            .func = &cmd_planterpump,
+            .argtable = NULL
+        };
+        ESP_ERROR_CHECK(esp_console_cmd_register(&cmd));
+    }
+
+    // Drain pump command (replaces the old servo command)
+    {
+        const esp_console_cmd_t cmd = {
+            .command = "drainpump",
+            .help = "Set drain pump PWM value (0-100)",
+            .hint = NULL,
+            .func = &cmd_drainpump,
+            .argtable = NULL
+        };
+        ESP_ERROR_CHECK(esp_console_cmd_register(&cmd));
+    }
+
+    // LED array command
+    {
+        const esp_console_cmd_t cmd = {
+            .command = "led",
+            .help = "Set LED array PWM value (0-100)",
+            .hint = NULL,
+            .func = &cmd_led,
+            .argtable = NULL
+        };
+        ESP_ERROR_CHECK(esp_console_cmd_register(&cmd));
+    }
+
+    // Read sensors command
+    {
+        const esp_console_cmd_t cmd = {
+            .command = "read_sensors",
+            .help = "Read and display INA260 sensor data",
+            .hint = NULL,
+            .func = &cmd_read_sensors,
+            .argtable = NULL
+        };
+        ESP_ERROR_CHECK(esp_console_cmd_register(&cmd));
+    }
+
+    // fill_pod routine
+    {
+        const esp_console_cmd_t cmd = {
+            .command = "fill_pod",
+            .help    = "Start fill_pod routine and log level each second",
+            .hint    = NULL,
+            .func    = &cmd_fill_pod,
+            .argtable= NULL
+        };
+        ESP_ERROR_CHECK(esp_console_cmd_register(&cmd));
+    }
+
+    // empty_pod routine
+    {
+        const esp_console_cmd_t cmd = {
+            .command = "empty_pod",
+            .help    = "Start empty_pod routine and log level each second",
+            .hint    = NULL,
+            .func    = &cmd_empty_pod,
+            .argtable= NULL
+        };
+        ESP_ERROR_CHECK(esp_console_cmd_register(&cmd));
+    }
+
+    // generic schedule routine
+    {
+        const esp_console_cmd_t cmd = {
+            .command = "schedule",
+            .help    = "Start a 24h schedule: schedule <light|planter|air> v0..v23",
+            .hint    = NULL,
+            .func    = &cmd_schedule,
+            .argtable= NULL
+        };
+        ESP_ERROR_CHECK(esp_console_cmd_register(&cmd));
+    }
 }

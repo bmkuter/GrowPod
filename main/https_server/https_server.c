@@ -688,63 +688,65 @@ static esp_err_t saved_schedule_get_handler(httpd_req_t *req)
 //------------------------------------------
 // 1) empty_pod
 //------------------------------------------
+
+// API for console to start the drain routine
+void start_empty_pod_routine(void)
+{
+    int slot = allocate_routine_slot("empty_pod");
+    if (slot < 0) {
+        ESP_LOGE(TAG, "start_empty_pod_routine: no slots");
+        return;
+    }
+    int rid = s_routines[slot].routine_id;
+    s_routines[slot].status = ROUTINE_STATUS_PENDING;
+    xTaskCreate(routine_empty_pod_task, "empty_pod", 4096,
+                (void*)(intptr_t)rid, configMAX_PRIORITIES - 1, NULL);
+}
+
 static void routine_empty_pod_task(void *pvParam)
 {
     int rid = (int)(intptr_t) pvParam;
     routine_record_t *rec = find_routine_by_id(rid);
-    if (!rec) {
-        vTaskDelete(NULL);
-        return;
-    }
+    if (!rec) { vTaskDelete(NULL); return; }
     rec->status = ROUTINE_STATUS_RUNNING;
     ESP_LOGI(TAG, "[empty_pod] start ID=%d", rid);
 
     int dist_mm = distance_sensor_read_mm();
-    // If dist_mm < 0 => invalid; store -1 in that case
-    int dist_cm = (dist_mm < 0) ? -1 : (dist_mm / 10);  // truncated integer cm
-    rec->start_height_cm = dist_cm;
+    rec->start_height_cm = (dist_mm < 0) ? -1 : (dist_mm / 10);
 
     set_drain_pump_pwm(70);
-
     float t0 = (float)xTaskGetTickCount() / configTICK_RATE_HZ;
+    float last_log_s = t0;
     float total_power = 0.0f;
 
     for (;;) {
-        vTaskDelay(pdMS_TO_TICKS(500));
+        vTaskDelay(pdMS_TO_TICKS(250));              // poll every 250 ms
 
         float cur_mA=0, volt_mV=0, pwr_mW=0;
         ina260_read_current(INA260_ADDRESS, &cur_mA);
         ina260_read_voltage(INA260_ADDRESS, &volt_mV);
         ina260_read_power(INA260_ADDRESS, &pwr_mW);
-        total_power += (pwr_mW * 0.5f);
+        total_power += (pwr_mW * 0.25f);             // integrate 0.25 s slices
 
         dist_mm = distance_sensor_read_mm();
-        dist_cm = (dist_mm < 0) ? -1 : (dist_mm / 10);
-
-        ESP_LOGW(TAG, "DRAINING: Distance: %d cm", dist_cm);
-
-        // Old threshold was dist_mm > 115 => break. 
-        // Now dist_cm > 11 means the same as >110 mm (rounded down).
-        if (dist_cm > 11) {
-            break;
-        }
+        int dist_cm = (dist_mm < 0) ? -1 : (dist_mm / 10);
 
         float now_s = (float)xTaskGetTickCount() / configTICK_RATE_HZ;
-        if ((now_s - t0) > FILL_DRAIN_MAX_TIMER_SEC) {
-            break;
+        bool done = (dist_cm > 11);                  // threshold >110 mm
+        if ((now_s - last_log_s >= 1.0f) || done) {
+            ESP_LOGW(TAG, "DRAINING: Distance: %d cm", dist_cm);
+            last_log_s = now_s;
         }
+        if (done || (now_s - t0 > FILL_DRAIN_MAX_TIMER_SEC)) break;
     }
 
     set_drain_pump_pwm(0);
-
     float t1 = (float)xTaskGetTickCount() / configTICK_RATE_HZ;
-
     dist_mm = distance_sensor_read_mm();
-    dist_cm = (dist_mm < 0) ? -1 : (dist_mm / 10);
-    rec->end_height_cm = dist_cm;
-    rec->time_elapsed_s = t1 - t0;
+    rec->end_height_cm   = (dist_mm < 0) ? -1 : (dist_mm / 10);
+    rec->time_elapsed_s  = t1 - t0;
     rec->power_used_mW_s = total_power;
-    rec->status = ROUTINE_STATUS_COMPLETED;
+    rec->status          = ROUTINE_STATUS_COMPLETED;
 
     ESP_LOGI(TAG,
         "[empty_pod] done ID=%d: time=%.1f s, power=%.1f mW·s, start=%d cm, end=%d cm",
@@ -756,16 +758,26 @@ static void routine_empty_pod_task(void *pvParam)
 
 
 //------------------------------------------
-// 2) fill_pod
+// 2) fill_pod (tweaked polling & logging)
 //------------------------------------------
+void start_fill_pod_routine(void)
+{
+    int slot = allocate_routine_slot("fill_pod");
+    if (slot < 0) {
+        ESP_LOGE(TAG, "start_fill_pod_routine: no slots");
+        return;
+    }
+    int rid = s_routines[slot].routine_id;
+    s_routines[slot].status = ROUTINE_STATUS_PENDING;
+    xTaskCreate(routine_fill_pod_task, "fill_pod", 4096,
+                (void*)(intptr_t)rid, configMAX_PRIORITIES - 1, NULL);
+}
+
 static void routine_fill_pod_task(void *pvParam)
 {
     int rid = (int)(intptr_t) pvParam;
     routine_record_t *rec = find_routine_by_id(rid);
-    if (!rec) {
-        vTaskDelete(NULL);
-        return;
-    }
+    if (!rec) { vTaskDelete(NULL); return; }
     rec->status = ROUTINE_STATUS_RUNNING;
     ESP_LOGI(TAG, "[fill_pod] start ID=%d", rid);
 
@@ -776,34 +788,30 @@ static void routine_fill_pod_task(void *pvParam)
     set_source_pump_pwm(70);
 
     float t0 = (float)xTaskGetTickCount() / configTICK_RATE_HZ;
+    float last_log_s = t0;
     float total_power = 0.0f;
 
     for (;;) {
-        vTaskDelay(pdMS_TO_TICKS(500));
+        vTaskDelay(pdMS_TO_TICKS(250));
 
         float cur_mA=0, volt_mV=0, pwr_mW=0;
         ina260_read_current(INA260_ADDRESS, &cur_mA);
         ina260_read_voltage(INA260_ADDRESS, &volt_mV);
         ina260_read_power(INA260_ADDRESS, &pwr_mW);
-        total_power += (pwr_mW * 0.5f);
+        total_power += (pwr_mW * 0.25f);
 
         dist_mm = distance_sensor_read_mm();
         dist_cm = (dist_mm < 0) ? -1 : (dist_mm / 10);
 
-        ESP_LOGW(TAG, "FILLING: Distance: %d cm", dist_cm);
-
-        // Original check was dist_mm > 0 && dist_mm < 50 => break
-        // Now we do dist_cm > 0 && dist_cm < 5 => break
-        // or if you want to exactly match "less than 50 mm", 
-        // that is truncated to 4 cm for anything < 50 mm.
-        if ((dist_cm > 0) && (dist_cm < 5)) {
-            break;
-        }
-
         float now_s = (float)xTaskGetTickCount() / configTICK_RATE_HZ;
-        if ((now_s - t0) > FILL_DRAIN_MAX_TIMER_SEC) {
-            break;
+        bool reached = ((dist_cm > 0) && (dist_cm < 5));
+        if ((now_s - last_log_s >= 1.0f) || reached) {
+            ESP_LOGW(TAG, "FILLING: Distance: %d cm", dist_cm);
+            last_log_s = now_s;
         }
+        if (reached) break;
+
+        if ((now_s - t0) > FILL_DRAIN_MAX_TIMER_SEC) break;
     }
 
     set_source_pump_pwm(0);
@@ -811,10 +819,10 @@ static void routine_fill_pod_task(void *pvParam)
     float t1 = (float)xTaskGetTickCount() / configTICK_RATE_HZ;
     dist_mm = distance_sensor_read_mm();
     dist_cm = (dist_mm < 0) ? -1 : (dist_mm / 10);
-    rec->end_height_cm = dist_cm;
-    rec->time_elapsed_s = t1 - t0;
+    rec->end_height_cm   = dist_cm;
+    rec->time_elapsed_s  = t1 - t0;
     rec->power_used_mW_s = total_power;
-    rec->status = ROUTINE_STATUS_COMPLETED;
+    rec->status          = ROUTINE_STATUS_COMPLETED;
 
     ESP_LOGI(TAG,
         "[fill_pod] done ID=%d: time=%.1f s, power=%.1f mW·s, start=%d cm, end=%d cm",
@@ -897,11 +905,26 @@ static void routine_store_schedule_task(void *pvParam) {
 
     routine_record_t *rec = find_routine_by_id(rid);
     if (!rec) {
-        ESP_LOGE(TAG, "schedule task: invalid routine ID %d", rid);
-        free(p);
-        vTaskDelete(NULL);
-        return;
+        // allocate a persistent slot for this fixed-ID schedule
+        for (int i = 0; i < MAX_ROUTINE_RECORDS; i++) {
+            if (!s_routines[i].in_use) {
+                s_routines[i].in_use = true;
+                s_routines[i].routine_id = rid;
+                s_routines[i].status = ROUTINE_STATUS_PENDING;
+                strncpy(s_routines[i].routine_name, p->name, sizeof(s_routines[i].routine_name)-1);
+                s_routines[i].routine_name[sizeof(s_routines[i].routine_name)-1] = '\0';
+                rec = &s_routines[i];
+                break;
+            }
+        }
+        if (!rec) {
+            ESP_LOGE(TAG, "schedule task: no slots for routine ID %d", rid);
+            free(p);
+            vTaskDelete(NULL);
+            return;
+        }
     }
+
     rec->status = ROUTINE_STATUS_RUNNING;
     float t0 = (float)xTaskGetTickCount() / configTICK_RATE_HZ;
 
@@ -1255,4 +1278,38 @@ static esp_err_t hostname_suffix_post_handler(httpd_req_t *req) {
 static esp_err_t device_restart_post_handler(httpd_req_t *req) {
     esp_restart();
     return ESP_OK; 
+}
+
+// wrappers for console‐driven schedule start
+void start_light_schedule(uint8_t schedule[24])
+{
+    typedef struct { int routine_id; char name[32]; uint8_t sched[24]; } sched_param_t;
+    sched_param_t *p = malloc(sizeof(*p));
+    p->routine_id = LIGHT_SCHEDULE_ID;
+    strcpy(p->name, "light_schedule");
+    memcpy(p->sched, schedule, 24);
+    xTaskCreate(routine_store_schedule_task, "sched_store", 4096,
+                p, configMAX_PRIORITIES - 1, NULL);
+}
+
+void start_planter_schedule(uint8_t schedule[24])
+{
+    typedef struct { int routine_id; char name[32]; uint8_t sched[24]; } sched_param_t;
+    sched_param_t *p = malloc(sizeof(*p));
+    p->routine_id = PLANTER_SCHEDULE_ID;
+    strcpy(p->name, "planter_pod_schedule");
+    memcpy(p->sched, schedule, 24);
+    xTaskCreate(routine_store_schedule_task, "sched_store", 4096,
+                p, configMAX_PRIORITIES - 1, NULL);
+}
+
+void start_air_schedule(uint8_t schedule[24])
+{
+    typedef struct { int routine_id; char name[32]; uint8_t sched[24]; } sched_param_t;
+    sched_param_t *p = malloc(sizeof(*p));
+    p->routine_id = AIR_SCHEDULE_ID;
+    strcpy(p->name, "air_pump_schedule");
+    memcpy(p->sched, schedule, 24);
+    xTaskCreate(routine_store_schedule_task, "sched_store", 4096,
+                p, configMAX_PRIORITIES - 1, NULL);
 }
