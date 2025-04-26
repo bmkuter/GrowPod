@@ -241,8 +241,29 @@ static void schedule_manager_task(void *pvParam) {
             set_led_array_pwm(light_duty);
             ESP_LOGI(TAG, "Schedule Manager: Set LED array to %d%% at hour %d", light_duty, current_hour);
 
-            set_planter_pump_pwm(planter_duty);
-            ESP_LOGI(TAG, "Schedule Manager: Set Planter Pump to %d%% at hour %d", planter_duty, current_hour);
+            // Planter pump: binary ON/OFF for planter_duty% of each hour
+            if (planter_duty == 0) {
+                set_planter_pump_pwm(0);
+            } else if (planter_duty == 100) {
+                set_planter_pump_pwm(100);
+            } else {
+                time_t now2;
+                struct tm tm2;
+                time(&now2);
+                localtime_r(&now2, &tm2);
+                int sec_into_hour = tm2.tm_min * 60 + tm2.tm_sec;
+                int on_seconds     = (planter_duty * 3600) / 100;
+                if (sec_into_hour < on_seconds) {
+                    set_planter_pump_pwm(100);
+                } else {
+                    set_planter_pump_pwm(0);
+                }
+            }
+            ESP_LOGI(TAG,
+                "Schedule Manager: Planter pump scheduled %d%% => binary at hour %d (sec=%d)",
+                planter_duty, current_hour,
+                (int)(time(NULL), ((struct tm){0}).tm_min * 60 + ((struct tm){0}).tm_sec)
+            );
 
             set_air_pump_pwm(air_duty);
             ESP_LOGI(TAG, "Schedule Manager: Set Air Pump to %d%% at hour %d", air_duty, current_hour);
