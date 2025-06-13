@@ -216,8 +216,8 @@ void set_planter_pump_pwm(uint32_t duty_percentage)
     }
     uint32_t duty = (duty_percentage * LEDC_MAX_DUTY_8BIT) / 100; // 0..255
 
-    ESP_LOGI(TAG, "Setting planter pump PWM to %lu%% (duty: %lu)",
-             (unsigned long)duty_percentage, (unsigned long)duty);
+    // ESP_LOGI(TAG, "Setting planter pump PWM to %lu%% (duty: %lu)",
+    //          (unsigned long)duty_percentage, (unsigned long)duty);
 
     ledc_set_duty(PWM_MODE, PLANTER_PUMP_CHANNEL, duty);
     ledc_update_duty(PWM_MODE, PLANTER_PUMP_CHANNEL);

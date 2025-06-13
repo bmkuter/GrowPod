@@ -20,6 +20,7 @@ static int cmd_read_sensors(int argc, char **argv);
 static int cmd_fill_pod(int argc, char **argv);
 static int cmd_empty_pod(int argc, char **argv);
 static int cmd_schedule(int argc, char **argv);
+static int cmd_showschedules(int argc, char **argv); // New forward declaration
 
 // Function to register console commands
 static void register_console_commands(void);
@@ -307,6 +308,12 @@ static int cmd_schedule(int argc, char **argv) {
     return 0;
 }
 
+// Command handler: showschedules
+static int cmd_showschedules(int argc, char **argv) {
+    print_schedules();
+    return 0;
+}
+
 static void register_console_commands(void) {
     // Air pump command
     {
@@ -411,6 +418,17 @@ static void register_console_commands(void) {
             .help    = "Start a 24h schedule: schedule <light|planter|air> v0..v23",
             .hint    = NULL,
             .func    = &cmd_schedule,
+            .argtable= NULL
+        };
+        ESP_ERROR_CHECK(esp_console_cmd_register(&cmd));
+    }
+    // Show schedules command
+    {
+        const esp_console_cmd_t cmd = {
+            .command = "showschedules",
+            .help    = "Print current LED, planter and air schedules",
+            .hint    = NULL,
+            .func    = &cmd_showschedules,
             .argtable= NULL
         };
         ESP_ERROR_CHECK(esp_console_cmd_register(&cmd));

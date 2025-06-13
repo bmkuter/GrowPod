@@ -154,7 +154,8 @@ class HydroponicsConsole(Cmd):
             'exit': 'Exit the console.',
             'hostname_suffix': 'Set mDNS suffix: hostname_suffix <suffix>',
             'rescan': 'Re-initialize Zeroconf to discover devices again.',
-            'all_schedules' : 'Set schedules for all actuators at once: routine all_schedules'
+            'all_schedules' : 'Set schedules for all actuators at once: routine all_schedules',
+            'showschedules'  : 'Print current schedules on device console',
         }
 
         # Initialize flow status tracking
@@ -1129,6 +1130,21 @@ class HydroponicsConsole(Cmd):
         except Exception as e:
             print(f"Error in multi-schedule editing: {e}")
             return None, None, None
+
+    def do_showschedules(self, arg):
+        'Print current LED, planter & air schedules on the selected device'
+        if not self._check_device_selected():
+            return
+        info = devices[self.selected_device]
+        url = f"https://{info['address']}:{info['port']}/api/schedules"
+        try:
+            resp = self.session.get(url, timeout=5)
+            if resp.status_code == 200:
+                print(resp.text)
+            else:
+                print(f"Error {resp.status_code}: {resp.text}")
+        except Exception as e:
+            print(f"Error fetching schedules: {e}")
 
 def start_service_discovery(console):
     zeroconf = Zeroconf()

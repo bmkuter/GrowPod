@@ -19,4 +19,7 @@ void start_empty_pod_routine(void);
 void start_light_schedule(uint8_t schedule[24]);
 void start_planter_schedule(uint8_t schedule[24]);
 void start_air_schedule(uint8_t schedule[24]);
+// Print current LED, planter & air schedules to console log
+void print_schedules(void);
+
 #endif // HTTPS_SERVER_H

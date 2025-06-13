@@ -75,6 +75,10 @@ static uint8_t current_light_schedule[24]   = {0};
 static uint8_t current_planter_schedule[24] = {0};
 static uint8_t current_air_schedule[24]     = {0};
 
+/* Mutexes for schedule access */
+SemaphoreHandle_t schedule_led_mutex;
+SemaphoreHandle_t schedule_planter_mutex;
+SemaphoreHandle_t schedule_air_mutex;
 
 /* ==========================================
  * Forward Declarations
@@ -99,6 +103,10 @@ static esp_err_t unit_metrics_get_handler(httpd_req_t *req);
 static esp_err_t hostname_suffix_post_handler(httpd_req_t *req);
 static esp_err_t device_restart_post_handler(httpd_req_t *req);
 
+static void schedule_air_task(void *pvParam);
+static void schedule_led_task(void *pvParam); 
+static void schedule_planter_task(void *pvParam);
+static esp_err_t schedules_print_get_handler(httpd_req_t *req);
 
 /* ==========================================
  * SNTP-based function to get current hour
@@ -189,7 +197,6 @@ static esp_err_t load_schedule_from_nvs(schedule_type_t type, uint8_t schedule[2
     return err;
 }
 
-
 /* ==========================================
  * Schedule Manager Task
  * ==========================================
@@ -201,72 +208,31 @@ static void schedule_manager_task(void *pvParam) {
     int last_hour = -1;
     schedule_message_t msg;
     while (1) {
-        bool schedule_updated = false;
-
-        // Wait up to 10s for a message
+        // Wait up to 10s for a schedule message and update appropriate global schedule
         if (xQueueReceive(schedule_msg_queue, &msg, pdMS_TO_TICKS(10000)) == pdTRUE) {
             switch (msg.type) {
                 case SCHEDULE_TYPE_LIGHT:
+                    xSemaphoreTake(schedule_led_mutex, portMAX_DELAY);
                     memcpy(current_light_schedule, msg.schedule, 24);
+                    xSemaphoreGive(schedule_led_mutex);
                     ESP_LOGI(TAG, "Schedule Manager: Updated LIGHT schedule");
-                    schedule_updated = true;
-                    // save_schedule_to_nvs() is done by the routine task as well,
-                    // but if you'd prefer, you could do it here.
                     break;
                 case SCHEDULE_TYPE_PLANTER:
+                    xSemaphoreTake(schedule_planter_mutex, portMAX_DELAY);
                     memcpy(current_planter_schedule, msg.schedule, 24);
+                    xSemaphoreGive(schedule_planter_mutex);
                     ESP_LOGI(TAG, "Schedule Manager: Updated PLANTER schedule");
-                    schedule_updated = true;
                     break;
                 case SCHEDULE_TYPE_AIR:
+                    xSemaphoreTake(schedule_air_mutex, portMAX_DELAY);
                     memcpy(current_air_schedule, msg.schedule, 24);
+                    xSemaphoreGive(schedule_air_mutex);
                     ESP_LOGI(TAG, "Schedule Manager: Updated AIR schedule");
-                    schedule_updated = true;
                     break;
                 default:
                     ESP_LOGW(TAG, "Schedule Manager: Unknown schedule type");
                     break;
             }
-        }
-
-        // Check time
-        int current_hour = get_current_hour();
-        if (schedule_updated || (current_hour != -1 && current_hour != last_hour)) {
-            last_hour = current_hour;
-            uint8_t light_duty   = current_light_schedule[current_hour];
-            uint8_t planter_duty = current_planter_schedule[current_hour];
-            uint8_t air_duty     = current_air_schedule[current_hour];
-
-            // Apply them
-            set_led_array_pwm(light_duty);
-            ESP_LOGI(TAG, "Schedule Manager: Set LED array to %d%% at hour %d", light_duty, current_hour);
-
-            // Planter pump: binary ON/OFF for planter_duty% of each hour
-            if (planter_duty == 0) {
-                set_planter_pump_pwm(0);
-            } else if (planter_duty == 100) {
-                set_planter_pump_pwm(100);
-            } else {
-                time_t now2;
-                struct tm tm2;
-                time(&now2);
-                localtime_r(&now2, &tm2);
-                int sec_into_hour = tm2.tm_min * 60 + tm2.tm_sec;
-                int on_seconds     = (planter_duty * 3600) / 100;
-                if (sec_into_hour < on_seconds) {
-                    set_planter_pump_pwm(100);
-                } else {
-                    set_planter_pump_pwm(0);
-                }
-            }
-            ESP_LOGI(TAG,
-                "Schedule Manager: Planter pump scheduled %d%% => binary at hour %d (sec=%d)",
-                planter_duty, current_hour,
-                (int)(time(NULL), ((struct tm){0}).tm_min * 60 + ((struct tm){0}).tm_sec)
-            );
-
-            set_air_pump_pwm(air_duty);
-            ESP_LOGI(TAG, "Schedule Manager: Set Air Pump to %d%% at hour %d", air_duty, current_hour);
         }
     }
 }
@@ -276,6 +242,23 @@ void init_schedule_manager(void)
     schedule_msg_queue = xQueueCreate(10, sizeof(schedule_message_t));
     if (schedule_msg_queue == NULL) {
         ESP_LOGE(TAG, "Failed to create schedule message queue");
+        return;
+    }
+    
+    // Create mutexes for each schedule array
+    schedule_air_mutex = xSemaphoreCreateMutex();
+    if (schedule_air_mutex == NULL) {
+        ESP_LOGE(TAG, "Failed to create air schedule mutex");
+        return;
+    }
+    schedule_planter_mutex = xSemaphoreCreateMutex();
+    if (schedule_planter_mutex == NULL) {
+        ESP_LOGE(TAG, "Failed to create planter schedule mutex");
+        return;
+    }
+    schedule_led_mutex = xSemaphoreCreateMutex();
+    if (schedule_led_mutex == NULL) {
+        ESP_LOGE(TAG, "Failed to create LED schedule mutex");
         return;
     }
 
@@ -289,6 +272,7 @@ void init_schedule_manager(void)
     char buf[128];
     
     // Light schedule
+    xSemaphoreTake(schedule_led_mutex, portMAX_DELAY);
     snprintf(buf, sizeof(buf), 
              "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
              current_light_schedule[0],  current_light_schedule[1],  current_light_schedule[2],  current_light_schedule[3],
@@ -297,9 +281,11 @@ void init_schedule_manager(void)
              current_light_schedule[12], current_light_schedule[13], current_light_schedule[14], current_light_schedule[15],
              current_light_schedule[16], current_light_schedule[17], current_light_schedule[18], current_light_schedule[19],
              current_light_schedule[20], current_light_schedule[21], current_light_schedule[22], current_light_schedule[23]);
+    xSemaphoreGive(schedule_led_mutex);
     ESP_LOGI(TAG, "Light schedule (err=%s): [%s]", esp_err_to_name(err_light), buf);
 
     // Planter schedule
+    xSemaphoreTake(schedule_planter_mutex, portMAX_DELAY);
     snprintf(buf, sizeof(buf),
              "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
              current_planter_schedule[0],  current_planter_schedule[1],  current_planter_schedule[2],  current_planter_schedule[3],
@@ -308,9 +294,11 @@ void init_schedule_manager(void)
              current_planter_schedule[12], current_planter_schedule[13], current_planter_schedule[14], current_planter_schedule[15],
              current_planter_schedule[16], current_planter_schedule[17], current_planter_schedule[18], current_planter_schedule[19],
              current_planter_schedule[20], current_planter_schedule[21], current_planter_schedule[22], current_planter_schedule[23]);
+    xSemaphoreGive(schedule_planter_mutex);
     ESP_LOGI(TAG, "Planter schedule (err=%s): [%s]", esp_err_to_name(err_planter), buf);
 
     // Air schedule
+    xSemaphoreTake(schedule_air_mutex, portMAX_DELAY);
     snprintf(buf, sizeof(buf),
              "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
              current_air_schedule[0],  current_air_schedule[1],  current_air_schedule[2],  current_air_schedule[3],
@@ -319,11 +307,15 @@ void init_schedule_manager(void)
              current_air_schedule[12], current_air_schedule[13], current_air_schedule[14], current_air_schedule[15],
              current_air_schedule[16], current_air_schedule[17], current_air_schedule[18], current_air_schedule[19],
              current_air_schedule[20], current_air_schedule[21], current_air_schedule[22], current_air_schedule[23]);
+    xSemaphoreGive(schedule_air_mutex);
     ESP_LOGI(TAG, "Air schedule (err=%s): [%s]", esp_err_to_name(err_air), buf);
 
     // Finally, create the schedule manager task
     xTaskCreate(schedule_manager_task, "schedule_manager", 4096, NULL,
                 configMAX_PRIORITIES - 2, NULL);
+    xTaskCreate(schedule_air_task, "schedule_air", 2048, NULL, configMAX_PRIORITIES - 3, NULL);
+    xTaskCreate(schedule_led_task, "schedule_led", 2048, NULL, configMAX_PRIORITIES - 3, NULL);
+    xTaskCreate(schedule_planter_task, "schedule_planter", 2048, NULL, configMAX_PRIORITIES - 3, NULL);
 }
 
 
@@ -443,7 +435,14 @@ void start_https_server(void) {
             .user_ctx = NULL
         };
         httpd_register_uri_handler(server, &restart_uri);
-
+       // GET /api/schedules -> print schedules
+       httpd_uri_t schedules_uri = {
+           .uri      = "/api/schedules",
+           .method   = HTTP_GET,
+           .handler  = schedules_print_get_handler,
+           .user_ctx = NULL
+       };
+       httpd_register_uri_handler(server, &schedules_uri);
         ESP_LOGI(TAG, "HTTPS server started successfully");
     } else {
         ESP_LOGE(TAG, "Failed to start HTTPS server");
@@ -971,6 +970,9 @@ static void routine_store_schedule_task(void *pvParam) {
         ESP_LOGW(TAG, "schedule task: Failed to send schedule message");
         rec->status = ROUTINE_STATUS_FAILED;
     }
+    else {
+        ESP_LOGW(TAG, "schedule task: Success to send schedule message!");
+    }
     // Also save to NVS (persist)
     esp_err_t err = ESP_OK;
     switch (sched_msg.type) {
@@ -1037,7 +1039,36 @@ static routine_record_t* find_routine_by_id(int rid)
 }
 
 
-// Old functions:
+// Print current stored schedules (LED, planter, air)
+void print_schedules(void) {
+    ESP_LOGI(TAG, "=== Current LED schedule ===");
+    xSemaphoreTake(schedule_led_mutex, portMAX_DELAY);
+    for (int h=0; h<24; ++h) {
+        ESP_LOGI(TAG, "  Hour %2d: %3d%%", h, current_light_schedule[h]);
+    }
+    xSemaphoreGive(schedule_led_mutex);
+
+    ESP_LOGI(TAG, "=== Current Planter schedule ===");
+    xSemaphoreTake(schedule_planter_mutex, portMAX_DELAY);
+    for (int h=0; h<24; ++h) {
+        ESP_LOGI(TAG, "  Hour %2d: %3d%%", h, current_planter_schedule[h]);
+    }
+    xSemaphoreGive(schedule_planter_mutex);
+
+    ESP_LOGI(TAG, "=== Current Air schedule ===");
+    xSemaphoreTake(schedule_air_mutex, portMAX_DELAY);
+    for (int h=0; h<24; ++h) {
+        ESP_LOGI(TAG, "  Hour %2d: %3d%%", h, current_air_schedule[h]);
+    }
+    xSemaphoreGive(schedule_air_mutex);
+}
+
+static esp_err_t schedules_print_get_handler(httpd_req_t *req) {
+    print_schedules();
+    httpd_resp_sendstr(req, "Schedules printed");
+    return ESP_OK;
+}
+
 /* ==========================================
  * Handler for actuator endpoints (airpump, sourcepump, planterpump, drainpump, led)
  * ========================================== */
@@ -1333,4 +1364,78 @@ void start_air_schedule(uint8_t schedule[24])
     memcpy(p->sched, schedule, 24);
     xTaskCreate(routine_store_schedule_task, "sched_store", 4096,
                 p, configMAX_PRIORITIES - 1, NULL);
+}
+
+// New tasks to update actuators based on schedule with change detection
+
+static void schedule_air_task(void *pvParam) {
+    static uint8_t last_air_duty = 0xFF; // initial invalid value
+    while (1) {
+        int hour = get_current_hour();
+        if (hour >= 0 && hour < 24) {
+            uint8_t duty;
+            xSemaphoreTake(schedule_air_mutex, portMAX_DELAY);
+            duty = current_air_schedule[hour];
+            xSemaphoreGive(schedule_air_mutex);
+            if (duty != last_air_duty) {
+                set_air_pump_pwm(duty);
+                last_air_duty = duty;
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+}
+
+static void schedule_led_task(void *pvParam) {
+    static uint8_t last_led_duty = 0xFF; // initial invalid value
+    while (1) {
+        int hour = get_current_hour();
+        if (hour >= 0 && hour < 24) {
+            uint8_t duty;
+            xSemaphoreTake(schedule_led_mutex, portMAX_DELAY);
+            duty = current_light_schedule[hour];
+            xSemaphoreGive(schedule_led_mutex);
+            if (duty != last_led_duty) {
+                set_led_array_pwm(duty);
+                last_led_duty = duty;
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+}
+
+static void schedule_planter_task(void *pvParam) {
+    static uint8_t last_planter_duty = 0xFF; // initial invalid value
+    while (1) {
+        int hour = get_current_hour();
+        if (hour >= 0 && hour < 24) {
+            uint8_t duty;
+            xSemaphoreTake(schedule_planter_mutex, portMAX_DELAY);
+            duty = current_planter_schedule[hour];
+            xSemaphoreGive(schedule_planter_mutex);
+
+            if (duty == 0) {
+                set_planter_pump_pwm(0);
+            } else if (duty == 100) {
+                set_planter_pump_pwm(100);
+            } else {
+                time_t now;
+                struct tm tm_now;
+                time(&now);
+                localtime_r(&now, &tm_now);
+                int sec_into_hour = tm_now.tm_min * 60 + tm_now.tm_sec;
+                int on_seconds = (duty * 3600) / 100;
+                // If the current time is within the duty cycle, turn on the pump
+                if (sec_into_hour < on_seconds) {
+                    ESP_LOGI(TAG, "Planter duty: %d%%, sec_into_hour: %d, on_seconds: %d", duty, sec_into_hour, on_seconds);
+                    set_planter_pump_pwm(100);
+                } else {
+                    set_planter_pump_pwm(0);
+                }
+            }
+            last_planter_duty = duty;
+            
+        }
+        vTaskDelay(pdMS_TO_TICKS(500));
+    }
 }
