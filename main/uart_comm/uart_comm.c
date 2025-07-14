@@ -130,20 +130,21 @@ static int cmd_read_sensors(int argc, char **argv) {
     ret |= ina260_read_power(INA260_ADDRESS,   &power_total);
 
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to read sensor data: %s", esp_err_to_name(ret));
-        return 1;
+        ESP_LOGE(TAG, "Failed to read power sensor data: %s", esp_err_to_name(ret));
+        // return 1;
+    }
+    else {
+    // 4) Print aggregated results 
+        printf("\n---------------------------------------\n");
+        printf(" Single INA260 @ 0x%02X Reading:\n", INA260_ADDRESS);
+        printf("   Current: %.2f mA\n", current_total);
+        printf("   Voltage: %.2f mV\n", voltage_total);
+        printf("   Power:   %.2f mW\n", power_total);
+        printf("---------------------------------------\n\n");
     }
 
-    // 4) Print aggregated results 
-    printf("\n---------------------------------------\n");
-    printf(" Single INA260 @ 0x%02X Reading:\n", INA260_ADDRESS);
-    printf("   Current: %.2f mA\n", current_total);
-    printf("   Voltage: %.2f mV\n", voltage_total);
-    printf("   Power:   %.2f mW\n", power_total);
-    printf("---------------------------------------\n\n");
-
     // 5) Water level
-    printf("Water level: %d cm\n", distance_sensor_read_mm() / 10);
+    printf("Water level: %d mm\n", distance_sensor_read_mm());
 
     return 0;
 }

@@ -76,7 +76,6 @@ static int laser_get_distance_mm(void)
     }
 
     int distance_mm = ((int)buf[0] << 8) | buf[1];
-    distance_mm += 10; // offset from example
     return distance_mm;
 }
 

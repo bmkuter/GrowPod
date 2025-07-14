@@ -142,8 +142,8 @@ void app_main(void) {
     ESP_ERROR_CHECK(ret);
     ESP_LOGW(TAG, "NVS Status: %d", ret);
 
-    // // Init Screen
-    // init_screen_wrapper();
+    // Init Screen
+    init_screen_wrapper();
 
     i2c_master_init();
     // Initialize Wi-Fi
@@ -204,8 +204,6 @@ log_memory_stats();
     ESP_LOGI(TAG, "Starting planter schedule task");
     xTaskCreate(schedule_planter_task, "schedule_planter", ACTUATOR_TASK_SIZE, NULL, configMAX_PRIORITIES - 3, NULL);
     log_memory_stats();
-
-vTaskSuspend(NULL); // DEBUG HALT
 
     ret = distance_sensor_init();
     // if (ret == ESP_OK) {
