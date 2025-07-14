@@ -7,8 +7,8 @@
 #define INA260_ADDRESS    0x40
 
 // I2C configuration
-#define I2C_MASTER_SCL_IO          18    /*!< GPIO number used for I2C master clock */
-#define I2C_MASTER_SDA_IO          19    /*!< GPIO number used for I2C master data  */
+#define I2C_MASTER_SCL_IO          41    /*!< GPIO number used for I2C master clock */
+#define I2C_MASTER_SDA_IO          42    /*!< GPIO number used for I2C master data  */
 #define I2C_MASTER_NUM             I2C_NUM_0 /*!< I2C port number for master dev */
 #define I2C_MASTER_FREQ_HZ         100000     /*!< I2C master clock frequency */
 #define I2C_MASTER_TIMEOUT_MS      1000

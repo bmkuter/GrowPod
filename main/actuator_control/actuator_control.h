@@ -11,11 +11,11 @@
 // -------------------------------------------------------------
 // GPIO definitions
 // -------------------------------------------------------------
-#define AIR_PUMP_GPIO       GPIO_NUM_0
-#define SOURCE_PUMP_GPIO    GPIO_NUM_6
-#define DRAIN_PUMP_GPIO     GPIO_NUM_1
-#define LED_ARRAY_GPIO      GPIO_NUM_3
-#define PLANTER_PUMP_GPIO   GPIO_NUM_7
+#define AIR_PUMP_GPIO       GPIO_NUM_13
+#define SOURCE_PUMP_GPIO    GPIO_NUM_12
+#define DRAIN_PUMP_GPIO     GPIO_NUM_11
+#define LED_ARRAY_GPIO      GPIO_NUM_10
+#define PLANTER_PUMP_GPIO   GPIO_NUM_9
 
 // -------------------------------------------------------------
 // PWM channel definitions (all at 25 kHz, 8-bit resolution)

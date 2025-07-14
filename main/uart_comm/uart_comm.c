@@ -40,13 +40,15 @@ void uart_comm_init(void) {
     ESP_ERROR_CHECK(uart_param_config(UART_PORT_NUM, &uart_config));
     ESP_ERROR_CHECK(uart_set_pin(UART_PORT_NUM, UART_TX_GPIO, UART_RX_GPIO, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE));
 
+    // Send a test message to verify UART setup
+    const char *test_msg = "UART communication initialized successfully.\r\n";
+    uart_write_bytes(UART_PORT_NUM, test_msg, strlen(test_msg));
+
     ESP_LOGI(TAG, "UART communication initialized successfully");
 }
 
-void uart_console_task(void *pvParameter) {
-
-    vTaskDelay(2500/portTICK_PERIOD_MS);
-
+void uart_console_task(void *pvParameter) 
+{
     // Configure the console
     esp_console_config_t console_config = {
         .max_cmdline_args   = 32,   // allow up to 32 args (schedule needs 26)
@@ -74,6 +76,8 @@ void uart_console_task(void *pvParameter) {
     while (1) {
         char* line = linenoise("hydroponics> ");
         if (line == NULL) { // EOF or error
+            ESP_LOGW(TAG, "No input received, restart console task loop");
+            vTaskDelay(pdMS_TO_TICKS(100));
             continue;
         }
 

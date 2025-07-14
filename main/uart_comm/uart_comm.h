@@ -11,10 +11,10 @@
 #include "https_server.h"
 
 // UART configurations
-#define UART_PORT_NUM       UART_NUM_0
+#define UART_PORT_NUM       UART_NUM_1
 #define UART_BAUD_RATE      115200
-#define UART_TX_GPIO        21
-#define UART_RX_GPIO        20
+#define UART_TX_GPIO        17
+#define UART_RX_GPIO        18
 
 // Function prototypes
 void uart_comm_init(void);

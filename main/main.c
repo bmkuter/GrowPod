@@ -15,6 +15,8 @@
 #include "esp_sntp.h"
 #include "nvs_flash.h"
 #include "nvs.h"
+#include "display.h"
+#include "esp_lvgl_port.h"
 
 static const char *TAG = "APP_MAIN";
 
@@ -72,6 +74,36 @@ void set_timezone_to_boston(void) {
     tzset();
 }
 
+void init_screen_wrapper()
+{
+        /* Initialize LVGL port */
+    lvgl_port_init(&((const lvgl_port_cfg_t) { .task_priority = 4, .task_stack = 4096, .timer_period_ms = 5 }));
+
+    /* Initialize display driver and get handles */
+    esp_lcd_panel_handle_t panel = display_init();
+    esp_lcd_panel_io_handle_t io = display_get_io_handle();
+
+    /* Add display to LVGL port */
+    const lvgl_port_display_cfg_t disp_cfg = {
+        .io_handle = io, // Use initialized IO handle
+        .panel_handle = panel, // Use initialized panel handle
+        .buffer_size = LCD_WIDTH * LCD_HEIGHT,
+        .double_buffer = true,
+        .hres = LCD_WIDTH,
+        .vres = LCD_HEIGHT,
+        .monochrome = false,
+        .rotation = {
+            .swap_xy = true,   // rotate 90° counter-clockwise
+            .mirror_x = false,
+            .mirror_y = true,
+        }
+    };
+    lvgl_port_add_disp(&disp_cfg);
+
+
+    display_lvgl_init();
+}
+
 void app_main(void) {
     vTaskDelay(1000/portTICK_PERIOD_MS);
 
@@ -83,6 +115,9 @@ void app_main(void) {
     }
     ESP_ERROR_CHECK(ret);
     ESP_LOGW(TAG, "NVS Status: %d", ret);
+
+    // Init Screen
+    init_screen_wrapper();
 
     i2c_master_init();
     // Initialize Wi-Fi
@@ -104,10 +139,10 @@ void app_main(void) {
     time_t now = 0;
     struct tm timeinfo = { 0 };
     int retry = 0;
-    const int retry_count = 10;
+    const int retry_count = 40;
     while (time(&now) < 1000000000 && retry < retry_count) {
         ESP_LOGI(TAG, "Waiting for system time to be set... (%d/%d)", retry+1, retry_count);
-        vTaskDelay(pdMS_TO_TICKS(2000));
+        vTaskDelay(pdMS_TO_TICKS(250));
         retry++;
     }
     // Set timezone to US Eastern (Boston) and update local time info
@@ -115,15 +150,19 @@ void app_main(void) {
     localtime_r(&now, &timeinfo);
     ESP_LOGW(TAG, "Time is set: %s", asctime(&timeinfo));
 
-    vTaskDelay(1000/portTICK_PERIOD_MS);
+    vTaskDelay(100/portTICK_PERIOD_MS);
 
-    // Start important peripherals
-
-    uart_comm_init();
-    actuator_control_init();
-    init_schedule_manager();
     // Initialize UART console
+    uart_comm_init();
+
     xTaskCreate(uart_console_task, "uart_console_task", 8192, NULL, 5, NULL);
+
+    actuator_control_init();
+
+    vTaskSuspend(NULL); // DEBUG HALT
+
+    init_schedule_manager();
+
 
     ret = distance_sensor_init();
     // if (ret == ESP_OK) {
@@ -140,12 +179,12 @@ void app_main(void) {
     // Initialize actuators
     xTaskCreate(actuator_control_task, "actuator_control_task", 4096, NULL, 5, NULL);
 
-    // Initialize and start flowmeter task
-    if (flowmeter_init() == ESP_OK) {
-        xTaskCreate(flowmeter_task, "flowmeter_task", 4096, NULL, 5, NULL);
-    } else {
-        ESP_LOGE("MAIN", "Failed to initialize flowmeter");
-    }
+    // // Initialize and start flowmeter task
+    // if (flowmeter_init() == ESP_OK) {
+    //     xTaskCreate(flowmeter_task, "flowmeter_task", 4096, NULL, 5, NULL);
+    // } else {
+    //     ESP_LOGE("MAIN", "Failed to initialize flowmeter");
+    // }
 
     // Initialize control logic
     ret = control_logic_init();
