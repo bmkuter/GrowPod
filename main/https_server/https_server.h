@@ -22,4 +22,9 @@ void start_air_schedule(uint8_t schedule[24]);
 // Print current LED, planter & air schedules to console log
 void print_schedules(void);
 
+extern void schedule_manager_task(void *pvParam);
+extern void schedule_air_task(void *pvParam);
+extern void schedule_led_task(void *pvParam); 
+extern void schedule_planter_task(void *pvParam);
+
 #endif // HTTPS_SERVER_H

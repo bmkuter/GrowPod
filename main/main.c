@@ -18,6 +18,9 @@
 #include "display.h"
 #include "esp_lvgl_port.h"
 
+#define ACTUATOR_TASK_SIZE (1024 * 4) // 4 KB stack size for actuator task
+#define UI_TASK_SIZE (1024 * 4) // 4 KB stack size for UI task
+
 static const char *TAG = "APP_MAIN";
 
 void start_mdns_service(void) {
@@ -104,6 +107,29 @@ void init_screen_wrapper()
     display_lvgl_init();
 }
 
+void log_memory_stats(void)
+{
+    // Default heap (byte-addressable DRAM + PSRAM)
+    size_t free_default = heap_caps_get_free_size(MALLOC_CAP_DEFAULT);
+    // Internal DRAM only
+    size_t free_internal = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    // External PSRAM only
+    size_t free_spiram = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+    // Largest contiguous free block in all DRAM heaps
+    size_t largest_block = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+    // Minimum ever free heap since boot
+    size_t min_ever = heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT);
+
+    ESP_LOGI(TAG, "Free heap (default)      : %u bytes", free_default);
+    ESP_LOGI(TAG, "Free internal DRAM      : %u bytes", free_internal);
+    ESP_LOGI(TAG, "Free PSRAM              : %u bytes", free_spiram);
+    ESP_LOGI(TAG, "Largest free block      : %u bytes", largest_block);
+    ESP_LOGI(TAG, "Minimum ever free heap  : %u bytes", min_ever);
+
+    // Print a detailed breakdown of each heap region
+    heap_caps_print_heap_info(MALLOC_CAP_8BIT);
+}
+
 void app_main(void) {
     vTaskDelay(1000/portTICK_PERIOD_MS);
 
@@ -116,8 +142,8 @@ void app_main(void) {
     ESP_ERROR_CHECK(ret);
     ESP_LOGW(TAG, "NVS Status: %d", ret);
 
-    // Init Screen
-    init_screen_wrapper();
+    // // Init Screen
+    // init_screen_wrapper();
 
     i2c_master_init();
     // Initialize Wi-Fi
@@ -155,14 +181,31 @@ void app_main(void) {
     // Initialize UART console
     uart_comm_init();
 
-    xTaskCreate(uart_console_task, "uart_console_task", 8192, NULL, 5, NULL);
+    xTaskCreate(uart_console_task, "uart_console_task", UI_TASK_SIZE, NULL, 5, NULL);
 
     actuator_control_init();
-
-    vTaskSuspend(NULL); // DEBUG HALT
-
+log_memory_stats();
     init_schedule_manager();
+log_memory_stats();
+// Start schedule manager task
+    ESP_LOGI(TAG, "Starting schedule manager task");
+    xTaskCreate(schedule_manager_task, "schedule_manager", ACTUATOR_TASK_SIZE, NULL,
+                configMAX_PRIORITIES - 2, NULL);
+    log_memory_stats();
+// Start air schedule task
+    ESP_LOGI(TAG, "Starting air schedule task");
+    xTaskCreate(schedule_air_task, "schedule_air", ACTUATOR_TASK_SIZE, NULL, configMAX_PRIORITIES - 3, NULL);
+    log_memory_stats();
+// Start LED schedule task
+    ESP_LOGI(TAG, "Starting LED schedule task");
+    xTaskCreate(schedule_led_task, "schedule_led", ACTUATOR_TASK_SIZE, NULL, configMAX_PRIORITIES - 3, NULL);
+    log_memory_stats();
+// Start planter schedule task
+    ESP_LOGI(TAG, "Starting planter schedule task");
+    xTaskCreate(schedule_planter_task, "schedule_planter", ACTUATOR_TASK_SIZE, NULL, configMAX_PRIORITIES - 3, NULL);
+    log_memory_stats();
 
+vTaskSuspend(NULL); // DEBUG HALT
 
     ret = distance_sensor_init();
     // if (ret == ESP_OK) {

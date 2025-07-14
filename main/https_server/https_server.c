@@ -103,9 +103,11 @@ static esp_err_t unit_metrics_get_handler(httpd_req_t *req);
 static esp_err_t hostname_suffix_post_handler(httpd_req_t *req);
 static esp_err_t device_restart_post_handler(httpd_req_t *req);
 
-static void schedule_air_task(void *pvParam);
-static void schedule_led_task(void *pvParam); 
-static void schedule_planter_task(void *pvParam);
+extern void schedule_manager_task(void *pvParam);
+extern void schedule_air_task(void *pvParam);
+extern void schedule_led_task(void *pvParam); 
+extern void schedule_planter_task(void *pvParam);
+
 static esp_err_t schedules_print_get_handler(httpd_req_t *req);
 
 /* ==========================================
@@ -154,6 +156,8 @@ static esp_err_t save_schedule_to_nvs(schedule_type_t type, const uint8_t schedu
 
 static esp_err_t load_schedule_from_nvs(schedule_type_t type, uint8_t schedule[24]) {
     nvs_handle_t my_handle;
+    // Log type
+    ESP_LOGI(TAG, "Loading schedule from NVS: %d", type);
     esp_err_t err = nvs_open("user_settings", NVS_READONLY, &my_handle);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "NVS open error (read): %s", esp_err_to_name(err));
@@ -204,12 +208,13 @@ static esp_err_t load_schedule_from_nvs(schedule_type_t type, uint8_t schedule[2
  * current schedules, saves to NVS, and
  * applies them if hour changes or schedule updated.
  */
-static void schedule_manager_task(void *pvParam) {
+void schedule_manager_task(void *pvParam) {
     int last_hour = -1;
     schedule_message_t msg;
     while (1) {
         // Wait up to 10s for a schedule message and update appropriate global schedule
         if (xQueueReceive(schedule_msg_queue, &msg, pdMS_TO_TICKS(10000)) == pdTRUE) {
+            ESP_LOGI(TAG, "Schedule Manager: Received schedule update for type %d", msg.type);
             switch (msg.type) {
                 case SCHEDULE_TYPE_LIGHT:
                     xSemaphoreTake(schedule_led_mutex, portMAX_DELAY);
@@ -262,7 +267,8 @@ void init_schedule_manager(void)
         return;
     }
 
-    // Optionally load stored schedules from NVS here for immediate usage
+    // Load stored schedules from NVS:
+    ESP_LOGI(TAG, "Loading schedules from NVS...");
     esp_err_t err_light   = load_schedule_from_nvs(SCHEDULE_TYPE_LIGHT,   current_light_schedule);
     esp_err_t err_planter = load_schedule_from_nvs(SCHEDULE_TYPE_PLANTER, current_planter_schedule);
     esp_err_t err_air     = load_schedule_from_nvs(SCHEDULE_TYPE_AIR,     current_air_schedule);
@@ -309,13 +315,6 @@ void init_schedule_manager(void)
              current_air_schedule[20], current_air_schedule[21], current_air_schedule[22], current_air_schedule[23]);
     xSemaphoreGive(schedule_air_mutex);
     ESP_LOGI(TAG, "Air schedule (err=%s): [%s]", esp_err_to_name(err_air), buf);
-
-    // Finally, create the schedule manager task
-    xTaskCreate(schedule_manager_task, "schedule_manager", 4096, NULL,
-                configMAX_PRIORITIES - 2, NULL);
-    xTaskCreate(schedule_air_task, "schedule_air", 2048, NULL, configMAX_PRIORITIES - 3, NULL);
-    xTaskCreate(schedule_led_task, "schedule_led", 2048, NULL, configMAX_PRIORITIES - 3, NULL);
-    xTaskCreate(schedule_planter_task, "schedule_planter", 2048, NULL, configMAX_PRIORITIES - 3, NULL);
 }
 
 
@@ -344,6 +343,8 @@ void start_https_server(void) {
 
     httpd_handle_t server = NULL;
     esp_err_t ret = httpd_ssl_start(&server, &config);
+    // Log the result
+    ESP_LOGW(TAG, "Starting HTTPS server: %s", esp_err_to_name(ret));
     if (ret == ESP_OK) {
         // Register existing actuator and sensor endpoints
         httpd_uri_t airpump_post_uri = {
@@ -1368,8 +1369,9 @@ void start_air_schedule(uint8_t schedule[24])
 
 // New tasks to update actuators based on schedule with change detection
 
-static void schedule_air_task(void *pvParam) {
+void schedule_air_task(void *pvParam) {
     static uint8_t last_air_duty = 0xFF; // initial invalid value
+    QueueHandle_t actuator_queue = get_actuator_queue();
     while (1) {
         int hour = get_current_hour();
         if (hour >= 0 && hour < 24) {
@@ -1378,7 +1380,8 @@ static void schedule_air_task(void *pvParam) {
             duty = current_air_schedule[hour];
             xSemaphoreGive(schedule_air_mutex);
             if (duty != last_air_duty) {
-                set_air_pump_pwm(duty);
+               actuator_command_t cmd = { .cmd_type = ACTUATOR_CMD_AIR_PUMP_PWM, .value = duty };
+               xQueueSend(actuator_queue, &cmd, portMAX_DELAY);
                 last_air_duty = duty;
             }
         }
@@ -1386,8 +1389,9 @@ static void schedule_air_task(void *pvParam) {
     }
 }
 
-static void schedule_led_task(void *pvParam) {
+void schedule_led_task(void *pvParam) {
     static uint8_t last_led_duty = 0xFF; // initial invalid value
+    QueueHandle_t actuator_queue = get_actuator_queue();
     while (1) {
         int hour = get_current_hour();
         if (hour >= 0 && hour < 24) {
@@ -1396,7 +1400,8 @@ static void schedule_led_task(void *pvParam) {
             duty = current_light_schedule[hour];
             xSemaphoreGive(schedule_led_mutex);
             if (duty != last_led_duty) {
-                set_led_array_pwm(duty);
+               actuator_command_t cmd = { .cmd_type = ACTUATOR_CMD_LED_ARRAY_PWM, .value = duty };
+               xQueueSend(actuator_queue, &cmd, portMAX_DELAY);
                 last_led_duty = duty;
             }
         }
@@ -1404,8 +1409,9 @@ static void schedule_led_task(void *pvParam) {
     }
 }
 
-static void schedule_planter_task(void *pvParam) {
+void schedule_planter_task(void *pvParam) {
     static uint8_t last_planter_duty = 0xFF; // initial invalid value
+    QueueHandle_t actuator_queue = get_actuator_queue();
     while (1) {
         int hour = get_current_hour();
         if (hour >= 0 && hour < 24) {
@@ -1415,9 +1421,9 @@ static void schedule_planter_task(void *pvParam) {
             xSemaphoreGive(schedule_planter_mutex);
 
             if (duty == 0) {
-                set_planter_pump_pwm(0);
+                { actuator_command_t cmd = { .cmd_type = ACTUATOR_CMD_PLANTER_PUMP_PWM, .value = 0 }; xQueueSend(actuator_queue, &cmd, portMAX_DELAY); }
             } else if (duty == 100) {
-                set_planter_pump_pwm(100);
+                { actuator_command_t cmd = { .cmd_type = ACTUATOR_CMD_PLANTER_PUMP_PWM, .value = 100 }; xQueueSend(actuator_queue, &cmd, portMAX_DELAY); }
             } else {
                 time_t now;
                 struct tm tm_now;
@@ -1428,14 +1434,13 @@ static void schedule_planter_task(void *pvParam) {
                 // If the current time is within the duty cycle, turn on the pump
                 if (sec_into_hour < on_seconds) {
                     ESP_LOGI(TAG, "Planter duty: %d%%, sec_into_hour: %d, on_seconds: %d", duty, sec_into_hour, on_seconds);
-                    set_planter_pump_pwm(100);
+                    { actuator_command_t cmd = { .cmd_type = ACTUATOR_CMD_PLANTER_PUMP_PWM, .value = 100 }; xQueueSend(actuator_queue, &cmd, portMAX_DELAY); }
                 } else {
-                    set_planter_pump_pwm(0);
+                    { actuator_command_t cmd = { .cmd_type = ACTUATOR_CMD_PLANTER_PUMP_PWM, .value = 0 }; xQueueSend(actuator_queue, &cmd, portMAX_DELAY); }
                 }
             }
             last_planter_duty = duty;
-            
-        }
-        vTaskDelay(pdMS_TO_TICKS(500));
-    }
+         }
+         vTaskDelay(pdMS_TO_TICKS(500));
+     }
 }
