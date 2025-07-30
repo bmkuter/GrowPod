@@ -3,8 +3,11 @@
 idf_component_register(
     SRCS
         "main.c"
-        "ina260/ina260.c"
+        "ina_power_monitor/ina260.c"
+        "ina_power_monitor/ina219.c"
+        "ina_power_monitor/power_monitor_HAL.c"
         "actuator_control/actuator_control.c"
+        "actuator_control/i2c_motor_driver.c"
         "uart_comm/uart_comm.c"
         "sensors/flowmeter_control.c"
         "sensors/distance_sensor.c"
@@ -14,7 +17,7 @@ idf_component_register(
         "display/display.c"
     INCLUDE_DIRS
         "."
-        "ina260"
+        "ina_power_monitor"
         "actuator_control"
         "uart_comm"
         "sensors"

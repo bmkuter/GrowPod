@@ -11,7 +11,7 @@
 #include <esp_wifi.h>
 
 #include "actuator_control.h"   // For set_air_pump_pwm, set_source_pump_pwm, set_drain_pump_pwm, set_planter_pump_pwm, set_led_array_binary (or set_led_array_pwm)
-#include "ina260.h"             // For sensor reading
+#include "power_monitor_HAL.h"  // For power monitoring abstraction
 #include "flowmeter_control.h"  // For flow rate reading
 #include "control_logic.h"      // For system_state_t, get_system_state, etc.
 #include "distance_sensor.h"    // For distance_sensor_read_mm()
@@ -38,10 +38,10 @@ typedef struct {
     routine_status_t status;
 
     // Water-level data: for empty/fill/calibrate
-    int start_height_cm;
-    int end_height_cm;
-    int min_height_cm;
-    int max_height_cm;
+    int start_height_mm;
+    int end_height_mm;
+    int min_height_mm;
+    int max_height_mm;
 
     // Performance metrics
     float time_elapsed_s;
@@ -626,10 +626,10 @@ static esp_err_t routines_get_handler(httpd_req_t *req)
             }
             cJSON_AddStringToObject(root, "status", status_str);
 
-            cJSON_AddNumberToObject(root, "start_height_mm", rec->start_height_cm);
-            cJSON_AddNumberToObject(root, "end_height_mm",   rec->end_height_cm);
-            cJSON_AddNumberToObject(root, "min_height_mm",   rec->min_height_cm);
-            cJSON_AddNumberToObject(root, "max_height_mm",   rec->max_height_cm);
+            cJSON_AddNumberToObject(root, "start_height_mm", rec->start_height_mm);
+            cJSON_AddNumberToObject(root, "end_height_mm",   rec->end_height_mm);
+            cJSON_AddNumberToObject(root, "min_height_mm",   rec->min_height_mm);
+            cJSON_AddNumberToObject(root, "max_height_mm",   rec->max_height_mm);
             cJSON_AddNumberToObject(root, "time_elapsed_s",  rec->time_elapsed_s);
             cJSON_AddNumberToObject(root, "power_used_mW_s", rec->power_used_mW_s);
 
@@ -733,46 +733,77 @@ static void routine_empty_pod_task(void *pvParam)
     ESP_LOGI(TAG, "[empty_pod] start ID=%d", rid);
 
     int dist_mm = distance_sensor_read_mm();
-    rec->start_height_cm = (dist_mm < 0) ? -1 : (dist_mm / 10);
+    // Store raw mm values
+    rec->start_height_mm = dist_mm;
 
     set_drain_pump_pwm(70);
     float t0 = (float)xTaskGetTickCount() / configTICK_RATE_HZ;
     float last_log_s = t0;
     float total_power = 0.0f;
-
+    
+    // Target threshold for emptying (>110mm)
+    const int TARGET_EMPTY_HEIGHT_MM = 110;
+    // Counter for consecutive valid readings at target
+    int target_readings = 0;
+    const int READINGS_NEEDED = 3;  // Need this many consistent readings to confirm
+    
     for (;;) {
-        vTaskDelay(pdMS_TO_TICKS(250));              // poll every 250 ms
+        vTaskDelay(pdMS_TO_TICKS(250));              // poll every 250 ms
 
         float cur_mA=0, volt_mV=0, pwr_mW=0;
-        ina260_read_current(INA260_ADDRESS, &cur_mA);
-        ina260_read_voltage(INA260_ADDRESS, &volt_mV);
-        ina260_read_power(INA260_ADDRESS, &pwr_mW);
-        total_power += (pwr_mW * 0.25f);             // integrate 0.25 s slices
+        power_monitor_read_current(&cur_mA);
+        power_monitor_read_voltage(&volt_mV);
+        power_monitor_read_power(&pwr_mW);
+        total_power += (pwr_mW * 0.25f);             // integrate 0.25 s slices
 
         dist_mm = distance_sensor_read_mm();
-        int dist_cm = (dist_mm < 0) ? -1 : (dist_mm / 10);
+        if (dist_mm < 0) {
+            // Invalid reading, skip and continue
+            ESP_LOGW(TAG, "DRAINING: Invalid distance reading, skipping");
+            continue;
+        }
 
         float now_s = (float)xTaskGetTickCount() / configTICK_RATE_HZ;
-        bool done = (dist_cm > 11);                  // threshold >110 mm
-        if ((now_s - last_log_s >= 1.0f) || done) {
-            ESP_LOGW(TAG, "DRAINING: Distance: %d cm", dist_cm);
+        bool approaching_target = (dist_mm > TARGET_EMPTY_HEIGHT_MM);
+        
+        if ((now_s - last_log_s >= 1.0f) || approaching_target) {
+            ESP_LOGW(TAG, "DRAINING: Distance: %d mm", dist_mm);
             last_log_s = now_s;
         }
-        if (done || (now_s - t0 > FILL_DRAIN_MAX_TIMER_SEC)) break;
+        
+        // Handle sensor noise when approaching target height
+        if (approaching_target) {
+            target_readings++;
+            if (target_readings >= READINGS_NEEDED) {
+                // Confirmed empty - multiple consistent readings
+                ESP_LOGI(TAG, "Empty confirmed with %d consecutive readings >= %d mm", 
+                         READINGS_NEEDED, TARGET_EMPTY_HEIGHT_MM);
+                break;
+            }
+        } else {
+            // Reset counter if we get inconsistent readings
+            target_readings = 0;
+        }
+
+        // Safety timeout
+        if (now_s - t0 > FILL_DRAIN_MAX_TIMER_SEC) {
+            ESP_LOGW(TAG, "Empty pod timeout reached");
+            break;
+        }
     }
 
     set_drain_pump_pwm(0);
     float t1 = (float)xTaskGetTickCount() / configTICK_RATE_HZ;
     dist_mm = distance_sensor_read_mm();
-    rec->end_height_cm   = (dist_mm < 0) ? -1 : (dist_mm / 10);
+    rec->end_height_mm = dist_mm;
     rec->time_elapsed_s  = t1 - t0;
     rec->power_used_mW_s = total_power;
     rec->status          = ROUTINE_STATUS_COMPLETED;
 
     ESP_LOGI(TAG,
-        "[empty_pod] done ID=%d: time=%.1f s, power=%.1f mW·s, start=%d cm, end=%d cm",
+        "[empty_pod] done ID=%d: time=%.1f s, power=%.1f mW·s, start=%d mm, end=%d mm",
         rid, rec->time_elapsed_s, total_power,
-        rec->start_height_cm, rec->end_height_cm);
+        rec->start_height_mm, rec->end_height_mm);
 
     vTaskDelete(NULL);
 }
@@ -803,52 +834,79 @@ static void routine_fill_pod_task(void *pvParam)
     ESP_LOGI(TAG, "[fill_pod] start ID=%d", rid);
 
     int dist_mm = distance_sensor_read_mm();
-    int dist_cm = (dist_mm < 0) ? -1 : (dist_mm / 10);
-    rec->start_height_cm = dist_cm;
+    // Store raw mm values
+    rec->start_height_mm = dist_mm;
 
     set_source_pump_pwm(70);
 
     float t0 = (float)xTaskGetTickCount() / configTICK_RATE_HZ;
     float last_log_s = t0;
     float total_power = 0.0f;
+    
+    // Target threshold for filling (<30mm)
+    const int TARGET_FILL_HEIGHT_MM = 30;
+    // Counter for consecutive valid readings at target
+    int target_readings = 0;
+    const int READINGS_NEEDED = 3;  // Need this many consistent readings to confirm
 
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(250));
 
         float cur_mA=0, volt_mV=0, pwr_mW=0;
-        ina260_read_current(INA260_ADDRESS, &cur_mA);
-        ina260_read_voltage(INA260_ADDRESS, &volt_mV);
-        ina260_read_power(INA260_ADDRESS, &pwr_mW);
+        power_monitor_read_current(&cur_mA);
+        power_monitor_read_voltage(&volt_mV);
+        power_monitor_read_power(&pwr_mW);
         total_power += (pwr_mW * 0.25f);
 
         dist_mm = distance_sensor_read_mm();
-        dist_cm = (dist_mm < 0) ? -1 : (dist_mm / 10);
+        if (dist_mm < 0) {
+            // Invalid reading, skip and continue
+            ESP_LOGW(TAG, "FILLING: Invalid distance reading, skipping");
+            continue;
+        }
 
         float now_s = (float)xTaskGetTickCount() / configTICK_RATE_HZ;
-        bool reached = ((dist_cm > 0) && (dist_cm < 5));
-        if ((now_s - last_log_s >= 1.0f) || reached) {
-            ESP_LOGW(TAG, "FILLING: Distance: %d cm", dist_cm);
+        bool approaching_target = (dist_mm < TARGET_FILL_HEIGHT_MM);
+        
+        if ((now_s - last_log_s >= 1.0f) || approaching_target) {
+            ESP_LOGW(TAG, "FILLING: Distance: %d mm", dist_mm);
             last_log_s = now_s;
         }
-        if (reached) break;
+        
+        // Handle sensor noise when approaching target height
+        if (approaching_target) {
+            target_readings++;
+            if (target_readings >= READINGS_NEEDED) {
+                // Confirmed filled - multiple consistent readings
+                ESP_LOGI(TAG, "Fill confirmed with %d consecutive readings <= %d mm", 
+                         READINGS_NEEDED, TARGET_FILL_HEIGHT_MM);
+                break;
+            }
+        } else {
+            // Reset counter if we get inconsistent readings
+            target_readings = 0;
+        }
 
-        if ((now_s - t0) > FILL_DRAIN_MAX_TIMER_SEC) break;
+        // Safety timeout
+        if ((now_s - t0) > FILL_DRAIN_MAX_TIMER_SEC) {
+            ESP_LOGW(TAG, "Fill pod timeout reached");
+            break;
+        }
     }
 
     set_source_pump_pwm(0);
 
     float t1 = (float)xTaskGetTickCount() / configTICK_RATE_HZ;
     dist_mm = distance_sensor_read_mm();
-    dist_cm = (dist_mm < 0) ? -1 : (dist_mm / 10);
-    rec->end_height_cm   = dist_cm;
+    rec->end_height_mm = dist_mm;
     rec->time_elapsed_s  = t1 - t0;
     rec->power_used_mW_s = total_power;
     rec->status          = ROUTINE_STATUS_COMPLETED;
 
     ESP_LOGI(TAG,
-        "[fill_pod] done ID=%d: time=%.1f s, power=%.1f mW·s, start=%d cm, end=%d cm",
+        "[fill_pod] done ID=%d: time=%.1f s, power=%.1f mW·s, start=%d mm, end=%d mm",
         rid, rec->time_elapsed_s, total_power,
-        rec->start_height_cm, rec->end_height_cm);
+        rec->start_height_mm, rec->end_height_mm);
 
     vTaskDelete(NULL);
 }
@@ -872,27 +930,25 @@ static void routine_calibrate_pod_task(void *pvParam)
     float total_power = 0.0f;
 
     // Initialize min/max to large / small integers
-    rec->min_height_cm = 999999;
-    rec->max_height_cm = 0;
+    rec->min_height_mm = 999999;
+    rec->max_height_mm = 0;
 
     for (int i = 0; i < 20; i++) {
         vTaskDelay(pdMS_TO_TICKS(500));
 
         float cur_mA=0, volt_mV=0, pwr_mW=0;
-        ina260_read_current(INA260_ADDRESS, &cur_mA);
-        ina260_read_voltage(INA260_ADDRESS, &volt_mV);
-        ina260_read_power(INA260_ADDRESS, &pwr_mW);
+        power_monitor_read_current(&cur_mA);
+        power_monitor_read_voltage(&volt_mV);
+        power_monitor_read_power(&pwr_mW);
         total_power += (pwr_mW * 0.5f);
 
         int dist_mm = distance_sensor_read_mm();
         if (dist_mm > 0) {
-            // Truncated integer cm
-            int dist_cm = dist_mm / 10;
-            if (dist_cm < rec->min_height_cm) {
-                rec->min_height_cm = dist_cm;
+            if (dist_mm < rec->min_height_mm) {
+                rec->min_height_mm = dist_mm;
             }
-            if (dist_cm > rec->max_height_cm) {
-                rec->max_height_cm = dist_cm;
+            if (dist_mm > rec->max_height_mm) {
+                rec->max_height_mm = dist_mm;
             }
         }
     }
@@ -903,9 +959,9 @@ static void routine_calibrate_pod_task(void *pvParam)
     rec->status = ROUTINE_STATUS_COMPLETED;
 
     ESP_LOGI(TAG,
-        "[calibrate_pod] done ID=%d: time=%.1f s, power=%.1f mW·s, min=%d cm, max=%d cm",
+        "[calibrate_pod] done ID=%d: time=%.1f s, power=%.1f mW·s, min=%d mm, max=%d mm",
         rid, rec->time_elapsed_s, total_power,
-        rec->min_height_cm, rec->max_height_cm);
+        rec->min_height_mm, rec->max_height_mm);
 
     vTaskDelete(NULL);
 }
@@ -1017,10 +1073,10 @@ static int allocate_routine_slot(const char *routine_name)
             s_routines[i].status = ROUTINE_STATUS_PENDING;
             strncpy(s_routines[i].routine_name, routine_name, sizeof(s_routines[i].routine_name)-1);
             s_routines[i].routine_name[sizeof(s_routines[i].routine_name)-1] = '\0';
-            s_routines[i].start_height_cm = -1;
-            s_routines[i].end_height_cm   = -1;
-            s_routines[i].min_height_cm   = 999999.0f;
-            s_routines[i].max_height_cm   = 0.0f;
+            s_routines[i].start_height_mm = -1;
+            s_routines[i].end_height_mm   = -1;
+            s_routines[i].min_height_mm   = 999999;
+            s_routines[i].max_height_mm   = 0;
             s_routines[i].time_elapsed_s  = 0.0f;
             s_routines[i].power_used_mW_s = 0.0f;
             return i;
@@ -1270,9 +1326,9 @@ static esp_err_t unit_metrics_get_handler(httpd_req_t *req) {
     cJSON *root = cJSON_CreateObject();
 
     float cur_mA = 0.0f, volt_mV = 0.0f, pwr_mW = 0.0f;
-    ina260_read_current(INA260_ADDRESS, &cur_mA);
-    ina260_read_voltage(INA260_ADDRESS, &volt_mV);
-    ina260_read_power(INA260_ADDRESS, &pwr_mW);
+    power_monitor_read_current(&cur_mA);
+    power_monitor_read_voltage(&volt_mV);
+    power_monitor_read_power(&pwr_mW);
 
     int dist_mm = distance_sensor_read_mm();
     cJSON_AddNumberToObject(root, "current_mA", cur_mA);
@@ -1419,7 +1475,17 @@ void schedule_planter_task(void *pvParam) {
             xSemaphoreTake(schedule_planter_mutex, portMAX_DELAY);
             duty = current_planter_schedule[hour];
             xSemaphoreGive(schedule_planter_mutex);
-
+            if (last_planter_duty == 0xFF) {
+                // First run, set initial duty
+                last_planter_duty = duty;
+            }
+            // If Duty is 0 or 100, and the current duty is the same as last, skip sending command
+            // This avoids unnecessary commands for 0% or 100% duty cycles
+            if ((duty == last_planter_duty) && (duty == 0 || duty == 100)) {
+                // No change, skip sending command
+                vTaskDelay(pdMS_TO_TICKS(500));
+                continue;
+            }
             if (duty == 0) {
                 { actuator_command_t cmd = { .cmd_type = ACTUATOR_CMD_PLANTER_PUMP_PWM, .value = 0 }; xQueueSend(actuator_queue, &cmd, portMAX_DELAY); }
             } else if (duty == 100) {

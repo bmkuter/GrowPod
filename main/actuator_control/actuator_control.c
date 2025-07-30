@@ -69,90 +69,21 @@ void actuator_control_init(void)
     }
 
     // -----------------------------------------------------------
-    // 1) Configure a 25 kHz, 8-bit PWM timer for all pumps
+    // 1) Initialize I2C motor driver
     // -----------------------------------------------------------
-    ledc_timer_config_t pump_timer = {
-        .speed_mode      = PWM_MODE,
-        .timer_num       = PWM_TIMER,         // LEDC_TIMER_0
-        .duty_resolution = LEDC_TIMER_8_BIT,  // 8-bit resolution
-        .freq_hz         = 25000,             // 25 kHz
-        .clk_cfg         = LEDC_AUTO_CLK
-    };
-    ledc_timer_config(&pump_timer);
+    // Note: We're using the shared I2C initialization from power_monitor_HAL
+    // No need to specify GPIO pins or clock speed as they're defined there
+    esp_err_t ret = i2c_motor_driver_init(I2C_MASTER_NUM, I2C_MASTER_SDA_IO, I2C_MASTER_SCL_IO, I2C_MASTER_FREQ_HZ);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to initialize I2C motor driver: %s", esp_err_to_name(ret));
+        return;
+    }
+    
+    // Initialize all motors to stopped state
+    i2c_motor_stop_all();
 
-    // Air Pump channel (Channel 0)
-    ledc_channel_config_t air_pump_channel = {
-        .speed_mode     = PWM_MODE,
-        .channel        = AIR_PUMP_CHANNEL,    // LEDC_CHANNEL_0
-        .timer_sel      = PWM_TIMER,           // LEDC_TIMER_0
-        .intr_type      = LEDC_INTR_DISABLE,
-        .gpio_num       = AIR_PUMP_GPIO,       // GPIO 0
-        .duty           = 0,
-        .hpoint         = 0
-    };
-    ledc_channel_config(&air_pump_channel);
-
-    // Source Pump channel (Channel 1)
-    ledc_channel_config_t source_pump_channel = {
-        .speed_mode     = PWM_MODE,
-        .channel        = SOURCE_PUMP_CHANNEL, // LEDC_CHANNEL_1
-        .timer_sel      = PWM_TIMER,           // LEDC_TIMER_0
-        .intr_type      = LEDC_INTR_DISABLE,
-        .gpio_num       = SOURCE_PUMP_GPIO,    // GPIO 1
-        .duty           = 0,
-        .hpoint         = 0
-    };
-    ledc_channel_config(&source_pump_channel);
-
-    // Drain Pump channel (Channel 2)
-    ledc_channel_config_t drain_pump_channel = {
-        .speed_mode     = PWM_MODE,
-        .channel        = DRAIN_PUMP_CHANNEL,  // LEDC_CHANNEL_2
-        .timer_sel      = PWM_TIMER,           // LEDC_TIMER_0
-        .intr_type      = LEDC_INTR_DISABLE,
-        .gpio_num       = DRAIN_PUMP_GPIO,     // GPIO 6
-        .duty           = 0,
-        .hpoint         = 0
-    };
-    ledc_channel_config(&drain_pump_channel);
-
-    // Planter Pump channel (Channel 3)
-    ledc_channel_config_t planter_pump_channel = {
-        .speed_mode     = PWM_MODE,
-        .channel        = PLANTER_PUMP_CHANNEL, // LEDC_CHANNEL_3
-        .timer_sel      = PWM_TIMER,            // LEDC_TIMER_0
-        .intr_type      = LEDC_INTR_DISABLE,
-        .gpio_num       = PLANTER_PUMP_GPIO,    // GPIO 7
-        .duty           = 0,
-        .hpoint         = 0
-    };
-    ledc_channel_config(&planter_pump_channel);
-
-    // // -----------------------------------------------------------
-    // // 2) Configure GPIO for the LED Array (Binary ON/OFF)
-    // // -----------------------------------------------------------
-    // gpio_config_t io_conf = {
-    //     .pin_bit_mask = (1ULL << LED_ARRAY_GPIO),
-    //     .mode         = GPIO_MODE_OUTPUT,
-    //     .pull_up_en   = GPIO_PULLUP_DISABLE,
-    //     .pull_down_en = GPIO_PULLDOWN_DISABLE,
-    //     .intr_type    = GPIO_INTR_DISABLE
-    // };
-    // gpio_config(&io_conf);
-    // gpio_set_level(LED_ARRAY_GPIO, 0); // OFF by default
-    // -----------------------------------------------------------
-    // 2) Configure LED Array using PWM (instead of simple GPIO)
-    // -----------------------------------------------------------
-    ledc_channel_config_t led_array_channel = {
-        .speed_mode = PWM_MODE,
-        .channel    = LED_ARRAY_CHANNEL,   // e.g., LEDC_CHANNEL_4
-        .timer_sel  = PWM_TIMER,           // same timer as used for pumps (LEDC_TIMER_0)
-        .intr_type  = LEDC_INTR_DISABLE,
-        .gpio_num   = LED_ARRAY_GPIO,       // your LED GPIO
-        .duty       = 0,                    // off by default (0% duty cycle)
-        .hpoint     = 0
-    };
-    ledc_channel_config(&led_array_channel);
+    // NOTE: LED is now controlled through I2C motor driver on channel 4 (previously air pump)
+    // No GPIO configuration needed
 
     ESP_LOGI(TAG, "Actuators initialized.");
 }
@@ -162,19 +93,15 @@ void actuator_control_init(void)
 // -----------------------------------------------------------
 void set_air_pump_pwm(uint32_t duty_percentage)
 {
-    if (duty_percentage > 100) {
-        duty_percentage = 100;
-    }
-    uint32_t duty = (duty_percentage * LEDC_MAX_DUTY_8BIT) / 100;  // 0..255
-
-    ESP_LOGI(TAG, "Setting air pump PWM to %lu%% (duty: %lu)",
-             (unsigned long)duty_percentage, (unsigned long)duty);
-
-    ledc_set_duty(PWM_MODE, AIR_PUMP_CHANNEL, duty);
-    ledc_update_duty(PWM_MODE, AIR_PUMP_CHANNEL);
-
-    // Update our global struct
-    update_actuator_info(ACTUATOR_IDX_AIR_PUMP, (float)duty_percentage);
+    // Air pump functionality has been replaced by LED control
+    // This function is kept for backward compatibility
+    ESP_LOGW(TAG, "Air pump has been replaced by LED control. Use set_led_array_pwm() instead.");
+    
+    // Update our global struct to maintain compatibility
+    update_actuator_info(ACTUATOR_IDX_AIR_PUMP, 0.0f);
+    
+    // Redirect to LED control if needed
+    // set_led_array_pwm(duty_percentage);
 }
 
 void set_source_pump_pwm(uint32_t duty_percentage)
@@ -182,13 +109,19 @@ void set_source_pump_pwm(uint32_t duty_percentage)
     if (duty_percentage > 100) {
         duty_percentage = 100;
     }
-    uint32_t duty = (duty_percentage * LEDC_MAX_DUTY_8BIT) / 100;  // 0..255
 
-    ESP_LOGI(TAG, "Setting source pump PWM to %lu%% (duty: %lu)",
-             (unsigned long)duty_percentage, (unsigned long)duty);
+    ESP_LOGI(TAG, "Setting source pump PWM to %lu%%", (unsigned long)duty_percentage);
 
-    ledc_set_duty(PWM_MODE, SOURCE_PUMP_CHANNEL, duty);
-    ledc_update_duty(PWM_MODE, SOURCE_PUMP_CHANNEL);
+    esp_err_t ret;
+    if (duty_percentage == 0) {
+        ret = i2c_motor_set(MOTOR_SOURCE_PUMP, 0, MOTOR_RELEASE);
+    } else {
+        ret = i2c_motor_set(MOTOR_SOURCE_PUMP, duty_percentage, MOTOR_FORWARD);
+    }
+
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to set source pump: %s", esp_err_to_name(ret));
+    }
 
     update_actuator_info(ACTUATOR_IDX_SOURCE_PUMP, (float)duty_percentage);
 }
@@ -198,13 +131,18 @@ void set_drain_pump_pwm(uint32_t duty_percentage)
     if (duty_percentage > 100) {
         duty_percentage = 100;
     }
-    uint32_t duty = (duty_percentage * LEDC_MAX_DUTY_8BIT) / 100;  // 0..255
+    ESP_LOGI(TAG, "Setting drain pump PWM to %lu%%", (unsigned long)duty_percentage);
 
-    ESP_LOGI(TAG, "Setting drain pump PWM to %lu%% (duty: %lu)",
-             (unsigned long)duty_percentage, (unsigned long)duty);
+    esp_err_t ret;
+    if (duty_percentage == 0) {
+        ret = i2c_motor_set(MOTOR_DRAIN_PUMP, 0, MOTOR_RELEASE);
+    } else {
+        ret = i2c_motor_set(MOTOR_DRAIN_PUMP, duty_percentage, MOTOR_FORWARD);
+    }
 
-    ledc_set_duty(PWM_MODE, DRAIN_PUMP_CHANNEL, duty);
-    ledc_update_duty(PWM_MODE, DRAIN_PUMP_CHANNEL);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to set drain pump: %s", esp_err_to_name(ret));
+    }
 
     update_actuator_info(ACTUATOR_IDX_DRAIN_PUMP, (float)duty_percentage);
 }
@@ -214,13 +152,19 @@ void set_planter_pump_pwm(uint32_t duty_percentage)
     if (duty_percentage > 100) {
         duty_percentage = 100;
     }
-    uint32_t duty = (duty_percentage * LEDC_MAX_DUTY_8BIT) / 100; // 0..255
 
-    // ESP_LOGI(TAG, "Setting planter pump PWM to %lu%% (duty: %lu)",
-    //          (unsigned long)duty_percentage, (unsigned long)duty);
+    ESP_LOGI(TAG, "Setting planter pump PWM to %lu%%", (unsigned long)duty_percentage);
 
-    ledc_set_duty(PWM_MODE, PLANTER_PUMP_CHANNEL, duty);
-    ledc_update_duty(PWM_MODE, PLANTER_PUMP_CHANNEL);
+    esp_err_t ret;
+    if (duty_percentage == 0) {
+        ret = i2c_motor_set(MOTOR_PLANTER_PUMP, 0, MOTOR_RELEASE);
+    } else {
+        ret = i2c_motor_set(MOTOR_PLANTER_PUMP, duty_percentage, MOTOR_FORWARD);
+    }
+
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to set planter pump: %s", esp_err_to_name(ret));
+    }
 
     update_actuator_info(ACTUATOR_IDX_PLANTER_PUMP, (float)duty_percentage);
 }
@@ -230,25 +174,28 @@ void set_led_array_pwm(uint32_t duty_percentage)
     if (duty_percentage > 100) {
         duty_percentage = 100;
     }
-    // Calculate the duty value (0..255 for 8-bit resolution)
-    uint32_t duty = (duty_percentage * LEDC_MAX_DUTY_8BIT) / 100;
+    
+    ESP_LOGI(TAG, "Setting LED array PWM to %lu%%", (unsigned long)duty_percentage);
 
-    ESP_LOGI(TAG, "Setting LED array PWM to %lu%% (duty: %lu)",
-             (unsigned long)duty_percentage, (unsigned long)duty);
+    // Use the I2C motor driver to control the LED
+    esp_err_t ret = i2c_led_set_brightness(duty_percentage);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to set LED brightness: %s", esp_err_to_name(ret));
+    }
 
-    // Set the duty cycle for the LED channel
-    ledc_set_duty(PWM_MODE, LED_ARRAY_CHANNEL, duty);
-    ledc_update_duty(PWM_MODE, LED_ARRAY_CHANNEL);
-
-    // Update actuator info: for the LED array, 0% (off) or 100% (fully on) 
-    // can be treated as before, or you can show the actual percentage
+    // Update actuator info
     update_actuator_info(ACTUATOR_IDX_LED_ARRAY, (float)duty_percentage);
 }
 
 void set_led_array_binary(bool state)
 {
     ESP_LOGI(TAG, "Setting LED array to %s", state ? "ON" : "OFF");
-    gpio_set_level(LED_ARRAY_GPIO, state ? 1 : 0);
+    
+    // Use the I2C motor driver to control the LED (binary on/off)
+    esp_err_t ret = i2c_led_set_brightness(state ? 100 : 0);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to set LED state: %s", esp_err_to_name(ret));
+    }
 
     // For LED array, we treat on=100%, off=0%
     update_actuator_info(ACTUATOR_IDX_LED_ARRAY, state ? 100.0f : 0.0f);

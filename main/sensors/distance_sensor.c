@@ -2,6 +2,7 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/semphr.h"
 #include <string.h>
 
 // Define to use laser sensor or ultrasonic
@@ -9,6 +10,13 @@
 // #define USE_ULTRASONIC_SENSOR 1
 
 static const char *TAG = "DIST_SENSOR";
+
+// Mutex to protect access to the distance sensor
+static SemaphoreHandle_t sensor_mutex = NULL;
+
+// Last valid measurement and timestamp (for caching)
+static int last_valid_distance_mm = -1;
+static uint32_t last_measurement_time = 0;
 
 //===========================================================
 // If using laser sensor (I2C)
@@ -34,7 +42,7 @@ static esp_err_t laser_write_reg(uint8_t reg, const uint8_t *data, size_t len)
         LASER_I2C_ADDRESS, 
         buf, 
         len + 1, 
-        pdMS_TO_TICKS(100)
+        pdMS_TO_TICKS(50)
     );
 }
 
@@ -52,12 +60,11 @@ static esp_err_t laser_read_reg(uint8_t reg, uint8_t *data, size_t len)
         1,     // size of register address
         data, 
         len, 
-        pdMS_TO_TICKS(100)
+        pdMS_TO_TICKS(50)
     );
 }
 
 
-// One-shot measurement
 static int laser_get_distance_mm(void)
 {
     // Command the laser to start measurement
@@ -72,10 +79,13 @@ static int laser_get_distance_mm(void)
     uint8_t buf[2];
     ret = laser_read_reg(0x02, buf, 2);
     if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to read distance from laser sensor: %s", esp_err_to_name(ret));
         return -1;
     }
 
-    int distance_mm = ((int)buf[0] << 8) | buf[1];
+    int distance_mm = (((int)buf[0] << 8) | buf[1]) - 10; // Subtract 10 for calibration
+    // int distance_mm = ((int)buf[0] * 0x100) + buf[1] - 10;
+    // ESP_LOGI(TAG, "Distance reading: %d mm", distance_mm);
     return distance_mm;
 }
 
@@ -158,70 +168,222 @@ static esp_err_t ultrasonic_init_hw(void)
 //===========================================================
 esp_err_t distance_sensor_init(void)
 {
+    uint32_t err = ESP_OK;
+    // Create mutex for thread-safe access to sensor
+    if (sensor_mutex == NULL) {
+        sensor_mutex = xSemaphoreCreateMutex();
+        if (sensor_mutex == NULL) {
+            ESP_LOGE(TAG, "Failed to create sensor mutex");
+            return ESP_FAIL;
+        }
+        ESP_LOGI(TAG, "Sensor access mutex created");
+    }
+    
+    // Initialize hardware
 #if defined(USE_LASER_SENSOR)
     ESP_LOGI(TAG, "Distance sensor: LASER mode, I2C=0x74");
-    return laser_init_hw();
+    err = laser_init_hw();
 #elif defined(USE_ULTRASONIC_SENSOR)
     ESP_LOGI(TAG, "Distance sensor: ULTRASONIC mode, UART pins %d/%d",
              ULTRASONIC_UART_TX, ULTRASONIC_UART_RX);
-    return ultrasonic_init_hw();
+    err = ultrasonic_init_hw();
 #else
     ESP_LOGE(TAG, "No sensor mode defined!");
     return ESP_FAIL;
 #endif
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to initialize distance sensor hardware: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    // Perform a quick test reading to verify everything is working
+    int test_reading = distance_sensor_read_mm();
+
+    if (test_reading < 0) {
+        ESP_LOGE(TAG, "Failed to take initial distance reading: %d", test_reading);
+        return ESP_FAIL;
+    }
+
+    return ESP_OK;
 }
 
-int distance_sensor_read_mm()
+/**
+ * @brief Take an actual reading from the distance sensor hardware
+ * 
+ * This is an internal function that accesses the sensor hardware directly.
+ * It should only be called when the mutex is held to prevent concurrent access.
+ * 
+ * @note This function takes about 400ms to complete (due to averaging multiple readings)
+ * @return Distance in mm, or negative value if error
+ */
+static int distance_sensor_read_mm_actual(void)
 {
 #if defined(USE_LASER_SENSOR)
     const int avg_count = 8;
     int sum = 0;
+    int valid_readings = 0;
+    
+    // Take multiple readings and average them for better accuracy
     for (int i = 0; i < avg_count; i++) {
         int tmp = laser_get_distance_mm();
-        if (tmp < 0) {
-            // error or invalid reading - handle as needed
-            return -1;
+        if (tmp > 0) {  // Valid reading
+            sum += tmp;
+            valid_readings++;
+        } else {
+            ESP_LOGW(TAG, "Invalid laser reading attempt (%d) %d/%d", tmp, i+1, avg_count);
         }
-        sum += tmp;
+        // Small delay between readings
+        vTaskDelay(pdMS_TO_TICKS(5));
     }
-    return sum / avg_count;
+    
+    // Return average if we got at least half of the readings
+    if (valid_readings >= avg_count/2) {
+        return sum / valid_readings;
+    }
+    
+    ESP_LOGE(TAG, "Too many invalid laser readings (%d/%d failed)", 
+             avg_count - valid_readings, avg_count);
+    return -1;
+    
 #elif defined(USE_ULTRASONIC_SENSOR)
     return ultrasonic_get_distance_mm();   
 #endif
 }
 
+int distance_sensor_read_mm(void)
+{
+    uint32_t current_time = xTaskGetTickCount() * portTICK_PERIOD_MS;
+    uint32_t reading_age = current_time - last_measurement_time;
+    
+    // First, check if we have a recent valid reading (within last 500ms)
+    // Use the cached value if it's fresh enough
+    if (last_valid_distance_mm > 0 && reading_age < 500) {
+        ESP_LOGI(TAG, "Using fresh cached reading: %d mm (age: %lu ms)", 
+                 last_valid_distance_mm, reading_age);
+        return last_valid_distance_mm;
+    }
+    
+    int result = -1;
+    
+    // Try to acquire mutex with timeout (1 second max wait)
+    if (xSemaphoreTake(sensor_mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+        // Critical section - only one task can access the sensor at a time
+        ESP_LOGI(TAG, "Acquired sensor mutex, taking new reading");
+        
+        // Check again if another task updated the reading while we were waiting
+        // This prevents redundant readings if multiple tasks requested at the same time
+        uint32_t new_reading_age = xTaskGetTickCount() * portTICK_PERIOD_MS - last_measurement_time;
+        if (last_valid_distance_mm > 0 && new_reading_age < 200) {
+            // Another task just updated the reading, use that instead
+            result = last_valid_distance_mm;
+            ESP_LOGI(TAG, "Another task updated reading while waiting, using that: %d mm", result);
+        } else {
+            // Take a new sensor reading (this takes ~400ms)
+            uint32_t start_time = xTaskGetTickCount() * portTICK_PERIOD_MS;
+            result = distance_sensor_read_mm_actual();
+            uint32_t elapsed = xTaskGetTickCount() * portTICK_PERIOD_MS - start_time;
+            
+            ESP_LOGI(TAG, "Sensor reading took %lu ms, result: %d mm", elapsed, result);
+            
+            // If reading is valid, update the cache
+            if (result > 0) {
+                last_valid_distance_mm = result;
+                last_measurement_time = xTaskGetTickCount() * portTICK_PERIOD_MS;
+            }
+        }
+        
+        // Release mutex
+        xSemaphoreGive(sensor_mutex);
+        ESP_LOGI(TAG, "Released sensor mutex");
+    } else {
+        // Failed to acquire mutex after timeout
+        ESP_LOGW(TAG, "Failed to acquire sensor mutex after 1s timeout");
+        
+        // If we couldn't get mutex access but have a previous valid reading,
+        // return that instead (even if it's older than 500ms)
+        if (last_valid_distance_mm > 0) {
+            ESP_LOGW(TAG, "Using stale cached reading: %d mm (age: %lu ms)", 
+                     last_valid_distance_mm, reading_age);
+            return last_valid_distance_mm;
+        } else {
+            ESP_LOGE(TAG, "No valid reading available and sensor is busy");
+        }
+    }
+    
+    return result;
+}
+
+/**
+ * @brief Get the last valid reading without trying to access the sensor
+ * 
+ * This function is completely non-blocking and returns immediately with the
+ * most recent cached distance value. It's safe to call from any task or ISR.
+ * 
+ * @return Last valid distance in mm, or -1 if no valid reading available
+ */
+int distance_sensor_get_last_reading_mm(void)
+{
+    // Just return the cached value (atomic read for 32-bit value)
+    uint32_t reading_age = xTaskGetTickCount() * portTICK_PERIOD_MS - last_measurement_time;
+    
+    return last_valid_distance_mm;
+}
+
+/**
+ * @brief Background task that periodically updates the distance sensor reading
+ * 
+ * This task runs continuously in the background and:
+ * 1. Updates the cached distance measurement at a regular interval
+ * 2. Logs distance information at appropriate levels
+ * 
+ * @param pvParameters FreeRTOS task parameters (not used)
+ */
 void distance_sensor_task(void *pvParameters)
 {
-    // We want 10 Hz => 100 ms delay
-    const TickType_t delay_ticks = pdMS_TO_TICKS(500);
-
+    // Poll at 1 Hz (every 1000ms)
+    const TickType_t delay_ticks = pdMS_TO_TICKS(200);
+    
+    // Wait a bit before starting to let other initializations complete
+    vTaskDelay(pdMS_TO_TICKS(2000));
+    
+    ESP_LOGI(TAG, "Distance sensor background task started");
+    
+    // Counter for retry attempts when reading fails
+    int retry_count = 0;
+    // Counter for logging (to reduce spam)
+    int log_counter = 0;
+    
     while (1) {
-        vTaskDelay(delay_ticks);
-
-#if defined(USE_LASER_SENSOR)
-        int dist_mm = distance_sensor_read_mm();
-        if (dist_mm > 0) {
-            // Convert mm -> integer cm (truncate)
-            int dist_cm = dist_mm / 10;
-
-            // Example: 1 'X' per 3 cm
-            int bar_element_size = 3;
-            int count = dist_cm / bar_element_size;
-            if (count < 1) count = 1;    // At least 1 'X'
-            if (count > 80) count = 80;  // Clamp maximum
-
-            // Print line: "<distance_cm> cm [XXXXX...]"
-            printf("%4d cm ", dist_cm);
-            for (int i = 0; i < count; i++) {
-                printf("X");
+        // Try to acquire mutex with a shorter timeout since this is a background task
+        if (xSemaphoreTake(sensor_mutex, pdMS_TO_TICKS(500)) == pdTRUE) {
+            // Take a direct sensor reading
+            int dist_mm = distance_sensor_read_mm_actual();
+            
+            if (dist_mm > 0) {
+                // Valid reading - update cached values
+                last_valid_distance_mm = dist_mm;
+                last_measurement_time = xTaskGetTickCount() * portTICK_PERIOD_MS;
+                retry_count = 0; // Reset retry counter
+            } else {
+                // Invalid reading
+                retry_count++;
+                ESP_LOGW(TAG, "Invalid distance reading (%d consecutive failures)", retry_count);
+                
+                // If we've had too many consecutive failures, log an error
+                if (retry_count >= 5) {
+                    ESP_LOGE(TAG, "Distance sensor may be disconnected or faulty");
+                }
             }
-            printf("\n");
+            
+            // Release the mutex
+            xSemaphoreGive(sensor_mutex);
+            
         } else {
-            printf("---- cm\n");
+            // Couldn't acquire mutex - sensor is busy
+            ESP_LOGW(TAG, "Background task couldn't acquire sensor mutex - sensor busy");
         }
-#elif defined(USE_ULTRASONIC_SENSOR)
-        int dist_mm = ultrasonic_get_distance_mm();
-        ESP_LOGW(TAG, "mm: %d", dist_mm);
-#endif
+        
+        // Wait before next reading
+        vTaskDelay(delay_ticks);
     }
 }

@@ -1,8 +1,8 @@
 #ifndef INA260_H
 #define INA260_H
 
-#include "driver/i2c_master.h"
 #include "esp_err.h"
+#include "power_monitor_HAL.h"
 
 #define INA260_ADDRESS    0x40
 
@@ -25,9 +25,7 @@
 #define INA260_SCALING_POWER       10.0  /*!< Power scaling factor (for mW conversion) */
 
 // Function prototypes
-esp_err_t i2c_master_init(void);
 void ina260_init(uint8_t address);
-void ina260_task(void *pvParameter);
 
 // Reading INA260 registers
 esp_err_t ina260_read_register(uint8_t i2c_address, uint8_t reg_addr, uint16_t *data);

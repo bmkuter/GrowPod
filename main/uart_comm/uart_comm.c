@@ -1,6 +1,6 @@
 #include "uart_comm.h"
 #include "actuator_control.h"
-#include "ina260.h"
+#include "power_monitor_HAL.h"
 #include "distance_sensor.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -109,10 +109,11 @@ void uart_console_task(void *pvParameter)
 /**
  * @brief Command handler for the 'read_sensors' command.
  */
-// Example: cmd_read_sensors() but with only one INA260
+// Example: cmd_read_sensors() but with power monitor (INA219 or INA260)
 static int cmd_read_sensors(int argc, char **argv) {
     esp_err_t ret;
     float current_total, voltage_total, power_total;
+    static bool initialized = false;
 
     // 1) Ensure I2C is initialized
     ret = i2c_master_init(); 
@@ -122,12 +123,16 @@ static int cmd_read_sensors(int argc, char **argv) {
     }
 
     // 2) Initialize the single INA260
-    ina260_init(INA260_ADDRESS);
+    if (!initialized) {
+        ESP_LOGI(TAG, "Initializing power monitor (INA219 or INA260)");
+        power_monitor_init(POWER_MONITOR_CHIP_INA219, INA219_ADDRESS);
+        initialized = true;
+    }
 
-    // 3) Read data from the single sensor
-    ret  = ina260_read_current(INA260_ADDRESS, &current_total);
-    ret |= ina260_read_voltage(INA260_ADDRESS, &voltage_total);
-    ret |= ina260_read_power(INA260_ADDRESS,   &power_total);
+    // 3) Read data from the power monitor
+    ret  = power_monitor_read_current(&current_total);
+    ret |= power_monitor_read_voltage(&voltage_total);
+    ret |= power_monitor_read_power(&power_total);
 
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to read power sensor data: %s", esp_err_to_name(ret));
@@ -136,14 +141,14 @@ static int cmd_read_sensors(int argc, char **argv) {
     else {
     // 4) Print aggregated results 
         printf("\n---------------------------------------\n");
-        printf(" Single INA260 @ 0x%02X Reading:\n", INA260_ADDRESS);
+        printf(" Power Monitor Reading:\n");
         printf("   Current: %.2f mA\n", current_total);
         printf("   Voltage: %.2f mV\n", voltage_total);
         printf("   Power:   %.2f mW\n", power_total);
         printf("---------------------------------------\n\n");
     }
 
-    // 5) Water level
+    // 5) Water level (using non-blocking function)
     printf("Water level: %d mm\n", distance_sensor_read_mm());
 
     return 0;
@@ -386,7 +391,7 @@ static void register_console_commands(void) {
     {
         const esp_console_cmd_t cmd = {
             .command = "read_sensors",
-            .help = "Read and display INA260 sensor data",
+            .help = "Read and display power monitor data (INA219 or INA260)",
             .hint = NULL,
             .func = &cmd_read_sensors,
             .argtable = NULL

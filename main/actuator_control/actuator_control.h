@@ -2,42 +2,35 @@
 #define ACTUATOR_CONTROL_H
 
 #include "driver/gpio.h"
-#include "driver/ledc.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include <stdbool.h>
+#include "i2c_motor_driver.h"
+#include "power_monitor_HAL.h"  // For shared I2C definitions
 
 // -------------------------------------------------------------
-// GPIO definitions
+// Note: We're using the I2C definitions from power_monitor_HAL.h:
+// I2C_MASTER_NUM (I2C_NUM_0)
+// I2C_MASTER_SDA_IO (GPIO_NUM_42)
+// I2C_MASTER_SCL_IO (GPIO_NUM_41)
+// I2C_MASTER_FREQ_HZ (100000)
 // -------------------------------------------------------------
-#define AIR_PUMP_GPIO       GPIO_NUM_13
-#define SOURCE_PUMP_GPIO    GPIO_NUM_12
-#define DRAIN_PUMP_GPIO     GPIO_NUM_11
+
+// -------------------------------------------------------------
+// LED Array GPIO definition (for direct GPIO control if needed)
+// -------------------------------------------------------------
 #define LED_ARRAY_GPIO      GPIO_NUM_10
-#define PLANTER_PUMP_GPIO   GPIO_NUM_9
-
-// -------------------------------------------------------------
-// PWM channel definitions (all at 25 kHz, 8-bit resolution)
-// -------------------------------------------------------------
-#define PWM_TIMER           LEDC_TIMER_0
-#define PWM_MODE            LEDC_LOW_SPEED_MODE
-
-#define AIR_PUMP_CHANNEL       LEDC_CHANNEL_0
-#define SOURCE_PUMP_CHANNEL    LEDC_CHANNEL_1
-#define DRAIN_PUMP_CHANNEL     LEDC_CHANNEL_2
-#define PLANTER_PUMP_CHANNEL   LEDC_CHANNEL_3
-#define LED_ARRAY_CHANNEL      LEDC_CHANNEL_4
 
 // -------------------------------------------------------------
 // Command types for the queue
 // -------------------------------------------------------------
 typedef enum {
-    ACTUATOR_CMD_AIR_PUMP_PWM,     // value = 0..100
+    ACTUATOR_CMD_AIR_PUMP_PWM,     // value = 0..100 (NOTE: Air pump has been replaced by LED control)
     ACTUATOR_CMD_SOURCE_PUMP_PWM,  // value = 0..100
     ACTUATOR_CMD_DRAIN_PUMP_PWM,   // value = 0..100
     ACTUATOR_CMD_PLANTER_PUMP_PWM, // value = 0..100
-    ACTUATOR_CMD_LED_ARRAY_PWM     // value = 0..100
+    ACTUATOR_CMD_LED_ARRAY_PWM     // value = 0..100 (Now using I2C motor driver on channel 4)
 } actuator_cmd_t;
 
 // The queue command structure
@@ -52,11 +45,11 @@ typedef struct {
 
 // Identify each actuator with an index in a global array
 typedef enum {
-    ACTUATOR_IDX_AIR_PUMP = 0,
+    ACTUATOR_IDX_AIR_PUMP = 0,    // Note: Air pump has been replaced by LED control
     ACTUATOR_IDX_SOURCE_PUMP,
     ACTUATOR_IDX_DRAIN_PUMP,
     ACTUATOR_IDX_PLANTER_PUMP,
-    ACTUATOR_IDX_LED_ARRAY,
+    ACTUATOR_IDX_LED_ARRAY,       // Now using I2C motor driver on channel 4
     ACTUATOR_IDX_MAX
 } actuator_index_t;
 

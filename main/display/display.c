@@ -11,6 +11,9 @@
 #include <esp_heap_caps.h>
 #include "esp_log.h"
 #include "esp_lvgl_port.h"
+#include "power_monitor_HAL.h"  // For power monitoring
+#include "distance_sensor.h"    // For water level sensor
+#include "actuator_control.h"   
 
 static const char *TAG = "display";
 
@@ -33,24 +36,93 @@ static const char *TAG = "display";
 #define LCD_HEIGHT 135
 
 static esp_lcd_panel_handle_t panel_handle = NULL;
-static lv_obj_t *counter_label;
 static esp_lcd_panel_io_handle_t panel_io_handle = NULL;
 
-// The new task to update the counter
+// UI Labels for sensor data
+static lv_obj_t *title_label;
+static lv_obj_t *current_label;
+static lv_obj_t *voltage_label;
+static lv_obj_t *power_label;
+static lv_obj_t *water_level_label;
+static lv_obj_t *timestamp_label;
+static lv_obj_t *planter_pwm_label;
+static lv_obj_t *led_pwm_label;
+
+// Task to update the display with sensor readings
 static void lvgl_update_task(void *pvParameter)
 {
+    esp_err_t ret;
+    float current_ma, voltage_mv, power_mw;
+    int water_level_mm;
+    // add buffers for actuator text
+    char current_str[32], voltage_str[32], power_str[32],
+         water_level_str[32], timestamp_str[32],
+         planter_pwm_str[32], led_pwm_str[32];
     int counter = 0;
-    char str[12];
+    static bool power_monitor_initialized = false;
+    
+    // Initialize I2C for power monitor
+    ret = i2c_master_init();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to initialize I2C: %s", esp_err_to_name(ret));
+    }
+    
+    // Initialize power monitor
+    if (!power_monitor_initialized) {
+        ret = power_monitor_init(POWER_MONITOR_CHIP_INA219, INA219_ADDRESS);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to initialize power monitor: %s", esp_err_to_name(ret));
+        } else {
+            power_monitor_initialized = true;
+        }
+    }
 
     while (1) {
-        // prepare text
-        snprintf(str, sizeof(str), "%d", counter++);
-        // ESP_LOGI(TAG, "Counter: %s", str);
-        // Set label text
-        lv_label_set_text(counter_label, str);
-        vTaskDelay(pdMS_TO_TICKS(1000));
+        // Read power monitor data
+        ret = power_monitor_read_current(&current_ma);
+        ret |= power_monitor_read_voltage(&voltage_mv);
+        ret |= power_monitor_read_power(&power_mw);
+        
+        if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "Error reading power monitor data: %s", esp_err_to_name(ret));
+            // Use default values if read fails
+            current_ma = 0.0f;
+            voltage_mv = 0.0f;
+            power_mw = 0.0f;
+        }
+        
+        // Read water level sensor (use non-blocking function)
+        water_level_mm = distance_sensor_get_last_reading_mm();
+        
+        // Format strings for display
+        snprintf(current_str, sizeof(current_str), "Current: %.2f mA", current_ma);
+        snprintf(voltage_str, sizeof(voltage_str), "Voltage: %.2f mV", voltage_mv);
+        snprintf(power_str, sizeof(power_str), "Power:   %.2f mW", power_mw);
+        snprintf(water_level_str, sizeof(water_level_str), "Water level: %d mm", water_level_mm);
+        snprintf(timestamp_str, sizeof(timestamp_str), "Updated: %d", (counter)); counter++;
+
+        // Read actuator states
+        const actuator_info_t *act = actuator_control_get_info();
+        float planter_duty = act[ACTUATOR_IDX_PLANTER_PUMP].duty_percentage;
+        float led_duty     = act[ACTUATOR_IDX_LED_ARRAY].duty_percentage;
+        snprintf(planter_pwm_str, sizeof(planter_pwm_str), "Planter: %.0f%%", planter_duty);
+        snprintf(led_pwm_str,     sizeof(led_pwm_str),     "LED: %.0f%%",     led_duty);
+
+        // Update UI labels
+        lv_label_set_text(current_label, current_str);
+        lv_label_set_text(voltage_label, voltage_str);
+        lv_label_set_text(power_label, power_str);
+        lv_label_set_text(water_level_label, water_level_str);
+        lv_label_set_text(timestamp_label, timestamp_str);
+        lv_label_set_text(planter_pwm_label, planter_pwm_str);
+        lv_label_set_text(led_pwm_label,     led_pwm_str);
+
+        vTaskDelay(pdMS_TO_TICKS(250));
     }
 }
+
+#define SIZE_16_FONT  &lv_font_unscii_16
+#define SIZE_8_FONT   &lv_font_unscii_8
 
 void display_lvgl_init(void)
 {
@@ -58,14 +130,64 @@ void display_lvgl_init(void)
     lv_obj_set_style_bg_color(lv_scr_act(), lv_color_black(), 0);
     lv_obj_set_style_bg_opa(lv_scr_act(), LV_OPA_COVER, 0);
 
-    counter_label = lv_label_create(lv_scr_act());
-    /* Set label text color to white */
-    lv_obj_set_style_text_color(counter_label, lv_color_white(), 0);
-    lv_obj_align(counter_label, LV_ALIGN_CENTER, 0, 0);
-    lv_label_set_text(counter_label, "0");
-    lv_obj_set_style_text_font(counter_label, &lv_font_montserrat_24, LV_PART_MAIN);
+    // Create title label (16 px high)
+    title_label = lv_label_create(lv_scr_act());
+    lv_obj_set_style_text_color(title_label, lv_color_white(), 0);
+    lv_obj_set_style_text_font(title_label, SIZE_16_FONT, LV_PART_MAIN);
+    lv_label_set_text(title_label, "GrowPod Sensors");
+    lv_obj_align(title_label, LV_ALIGN_TOP_MID, 0, 5);
 
-    xTaskCreate(lvgl_update_task, "lvgl_update_task", 2048, NULL, 5, NULL);
+    // Row y=25: current measurement
+    current_label = lv_label_create(lv_scr_act());
+    lv_obj_set_style_text_color(current_label, lv_color_white(), 0);
+    lv_obj_set_style_text_font(current_label, SIZE_8_FONT, LV_PART_MAIN);
+    lv_label_set_text(current_label, "Current: 0.00 mA");
+    lv_obj_align(current_label, LV_ALIGN_TOP_LEFT, 5, 25);
+
+    // Row y=37: voltage
+    voltage_label = lv_label_create(lv_scr_act());
+    lv_obj_set_style_text_color(voltage_label, lv_color_white(), 0);
+    lv_obj_set_style_text_font(voltage_label, SIZE_8_FONT, LV_PART_MAIN);
+    lv_label_set_text(voltage_label, "Voltage: 0.00 mV");
+    lv_obj_align(voltage_label, LV_ALIGN_TOP_LEFT, 5, 37);
+
+    // Row y=49: power
+    power_label = lv_label_create(lv_scr_act());
+    lv_obj_set_style_text_color(power_label, lv_color_white(), 0);
+    lv_obj_set_style_text_font(power_label, SIZE_8_FONT, LV_PART_MAIN);
+    lv_label_set_text(power_label, "Power:   0.00 mW");
+    lv_obj_align(power_label, LV_ALIGN_TOP_LEFT, 5, 49);
+
+    // Row y=61: water level
+    water_level_label = lv_label_create(lv_scr_act());
+    lv_obj_set_style_text_color(water_level_label, lv_color_white(), 0);
+    lv_obj_set_style_text_font(water_level_label, SIZE_8_FONT, LV_PART_MAIN);
+    lv_label_set_text(water_level_label, "Water level: 0 mm");
+    lv_obj_align(water_level_label, LV_ALIGN_TOP_LEFT, 5, 61);
+
+    // Row y=73: planter PWM
+    planter_pwm_label = lv_label_create(lv_scr_act());
+    lv_obj_set_style_text_color(planter_pwm_label, lv_color_white(), 0);
+    lv_obj_set_style_text_font(planter_pwm_label, SIZE_8_FONT, LV_PART_MAIN);
+    lv_label_set_text(planter_pwm_label, "Planter: 0%");
+    lv_obj_align(planter_pwm_label, LV_ALIGN_TOP_LEFT, 5, 73);
+
+    // Row y=85: LED PWM
+    led_pwm_label = lv_label_create(lv_scr_act());
+    lv_obj_set_style_text_color(led_pwm_label, lv_color_white(), 0);
+    lv_obj_set_style_text_font(led_pwm_label, SIZE_8_FONT, LV_PART_MAIN);
+    lv_label_set_text(led_pwm_label, "LED: 0%");
+    lv_obj_align(led_pwm_label, LV_ALIGN_TOP_LEFT, 5, 85);
+
+    // Timestamp bottom right
+    timestamp_label = lv_label_create(lv_scr_act());
+    lv_obj_set_style_text_color(timestamp_label, lv_color_white(), 0);
+    lv_obj_set_style_text_font(timestamp_label, SIZE_8_FONT, LV_PART_MAIN);
+    lv_label_set_text(timestamp_label, "Updated: 0 s");
+    lv_obj_align(timestamp_label, LV_ALIGN_BOTTOM_RIGHT, -5, -5);
+
+    // Launch update task
+    xTaskCreate(lvgl_update_task, "lvgl_update_task", 4096, NULL, 5, NULL);
 }
 
 // Helper: fill entire screen with a solid color
@@ -113,7 +235,7 @@ esp_lcd_panel_handle_t display_init(void)
     esp_lcd_panel_io_spi_config_t io_config = {
         .dc_gpio_num = PIN_NUM_DC,
         .cs_gpio_num = PIN_NUM_CS,
-        .pclk_hz = 20 * 1000 * 1000,
+        .pclk_hz = 40 * 1000 * 1000,
         .lcd_cmd_bits = 8,
         .lcd_param_bits = 8,
         .spi_mode = 0,

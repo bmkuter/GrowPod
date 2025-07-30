@@ -3,7 +3,7 @@
 #include "Networking/wifi_manager.h"
 #include "actuator_control.h"
 #include "uart_comm.h"
-#include "ina260.h"
+#include "power_monitor_HAL.h"
 #include "flowmeter_control.h"
 #include "distance_sensor.h"
 #include "https_server/https_server.h"
@@ -192,10 +192,10 @@ log_memory_stats();
     xTaskCreate(schedule_manager_task, "schedule_manager", ACTUATOR_TASK_SIZE, NULL,
                 configMAX_PRIORITIES - 2, NULL);
     log_memory_stats();
-// Start air schedule task
-    ESP_LOGI(TAG, "Starting air schedule task");
-    xTaskCreate(schedule_air_task, "schedule_air", ACTUATOR_TASK_SIZE, NULL, configMAX_PRIORITIES - 3, NULL);
-    log_memory_stats();
+// // Start air schedule task
+//     ESP_LOGI(TAG, "Starting air schedule task");
+//     xTaskCreate(schedule_air_task, "schedule_air", ACTUATOR_TASK_SIZE, NULL, configMAX_PRIORITIES - 3, NULL);
+//     log_memory_stats();
 // Start LED schedule task
     ESP_LOGI(TAG, "Starting LED schedule task");
     xTaskCreate(schedule_led_task, "schedule_led", ACTUATOR_TASK_SIZE, NULL, configMAX_PRIORITIES - 3, NULL);
@@ -206,14 +206,16 @@ log_memory_stats();
     log_memory_stats();
 
     ret = distance_sensor_init();
-    // if (ret == ESP_OK) {
-    //     xTaskCreate(distance_sensor_task, "distance_sensor_task", 2048, NULL, 5, NULL);
-    // } else {
-    //     ESP_LOGE("MAIN", "distance_sensor_init failed: %s", esp_err_to_name(ret));
-    // }
+    if (ret == ESP_OK) {
+        xTaskCreate(distance_sensor_task, "distance_sensor_task", (1024 * 8), NULL, 5, NULL);
+    } else {
+        ESP_LOGE("MAIN", "distance_sensor_init failed: %s", esp_err_to_name(ret));
+    }
 
-    // Start INA260 task
-    xTaskCreate(ina260_task, "ina260_task", 4096, NULL, 5, NULL);
+    // Start Power Monitor task (using INA219 or INA260)
+    // Use INA219 by default
+    power_monitor_init(POWER_MONITOR_CHIP_INA219, INA219_ADDRESS);
+    // xTaskCreate(power_monitor_task, "power_monitor_task", 4096, NULL, 5, NULL);
 
     vTaskDelay(1000/portTICK_PERIOD_MS);
 
@@ -227,9 +229,9 @@ log_memory_stats();
     //     ESP_LOGE("MAIN", "Failed to initialize flowmeter");
     // }
 
-    // Initialize control logic
-    ret = control_logic_init();
-    if (ret != ESP_OK) {
-        ESP_LOGE("MAIN", "Failed to initialize control logic module");
-    }
+    // // Initialize control logic
+    // ret = control_logic_init();
+    // if (ret != ESP_OK) {
+    //     ESP_LOGE("MAIN", "Failed to initialize control logic module");
+    // }
 }
