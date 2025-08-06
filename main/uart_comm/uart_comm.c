@@ -2,6 +2,7 @@
 #include "actuator_control.h"
 #include "power_monitor_HAL.h"
 #include "distance_sensor.h"
+#include "https_server.h"   // For start_calibrate_pod_routine
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_vfs_dev.h"
@@ -19,8 +20,10 @@ static int cmd_led(int argc, char **argv);
 static int cmd_read_sensors(int argc, char **argv);
 static int cmd_fill_pod(int argc, char **argv);
 static int cmd_empty_pod(int argc, char **argv);
+static int cmd_calibrate_pod(int argc, char **argv); 
+static int cmd_confirm_level(int argc, char **argv);  // Command to confirm calibration level
 static int cmd_schedule(int argc, char **argv);
-static int cmd_showschedules(int argc, char **argv); // New forward declaration
+static int cmd_showschedules(int argc, char **argv);
 
 // Function to register console commands
 static void register_console_commands(void);
@@ -281,10 +284,27 @@ static int cmd_led(int argc, char **argv) {
     return 0;
 }
 
+/**
+ * @brief Command handler for 'fill_pod' command.
+ * Usage: fill_pod [target_mm]
+ * @param argc argument count
+ * @param argv argument values
+ * @return 0 on success, non-zero on error
+ */
 static int cmd_fill_pod(int argc, char **argv)
 {
-    // no args
-    start_fill_pod_routine();
+    int target_mm = -1;
+    if (argc == 2) {
+        target_mm = atoi(argv[1]);
+        if (target_mm < 0) {
+            ESP_LOGW(TAG, "Invalid target_mm '%s'. Must be non-negative.", argv[1]);
+            return 1;
+        }
+    } else if (argc > 2) {
+        ESP_LOGW(TAG, "Usage: fill_pod [target_mm]");
+        return 1;
+    }
+    start_fill_pod_routine(target_mm);
     return 0;
 }
 
@@ -292,6 +312,34 @@ static int cmd_empty_pod(int argc, char **argv)
 {
     // no args
     start_empty_pod_routine();
+    return 0;
+}
+
+// Command handler for 'calibrate_pod' command
+static int cmd_calibrate_pod(int argc, char **argv)
+{
+    // no args
+    start_calibrate_pod_routine();
+    return 0;
+}
+
+/**
+ * @brief Command handler for 'confirm_level' command.
+ * Usage: confirm_level <mm>
+ */
+static int cmd_confirm_level(int argc, char **argv)
+{
+    if (argc != 2) {
+        ESP_LOGW(TAG, "Usage: confirm_level <mm>");
+        return 1;
+    }
+    int mm = atoi(argv[1]);
+    if (mm < 0) {
+        ESP_LOGW(TAG, "Invalid level '%s'. Must be non-negative.", argv[1]);
+        return 1;
+    }
+    confirm_level(mm);
+    ESP_LOGI(TAG, "Calibration level confirmed: %d mm", mm);
     return 0;
 }
 
@@ -403,7 +451,7 @@ static void register_console_commands(void) {
     {
         const esp_console_cmd_t cmd = {
             .command = "fill_pod",
-            .help    = "Start fill_pod routine and log level each second",
+            .help    = "Start fill_pod routine (optional target_mm)",
             .hint    = NULL,
             .func    = &cmd_fill_pod,
             .argtable= NULL
@@ -418,6 +466,30 @@ static void register_console_commands(void) {
             .help    = "Start empty_pod routine and log level each second",
             .hint    = NULL,
             .func    = &cmd_empty_pod,
+            .argtable= NULL
+        };
+        ESP_ERROR_CHECK(esp_console_cmd_register(&cmd));
+    }
+
+    // calibrate_pod routine
+    {
+        const esp_console_cmd_t cmd = {
+            .command = "calibrate_pod",
+            .help    = "Calibrate the pod (fill and empty)",
+            .hint    = NULL,
+            .func    = &cmd_calibrate_pod,
+            .argtable= NULL
+        };
+        ESP_ERROR_CHECK(esp_console_cmd_register(&cmd));
+    }
+
+    // confirm_level command for calibration feedback
+    {
+        const esp_console_cmd_t cmd = {
+            .command = "confirm_level",
+            .help    = "Confirm measured water level during calibration (mm)",
+            .hint    = NULL,
+            .func    = &cmd_confirm_level,
             .argtable= NULL
         };
         ESP_ERROR_CHECK(esp_console_cmd_register(&cmd));

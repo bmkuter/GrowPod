@@ -16,7 +16,25 @@
 #include "control_logic.h"      // For system_state_t, get_system_state, etc.
 #include "distance_sensor.h"    // For distance_sensor_read_mm()
 
+/* ==========================================
+ *         WATER LEVEL CONSTANTS
+ * ========================================== */
+
+// Target thresholds for water levels (in mm)
+#define TARGET_EMPTY_HEIGHT_MM    1     // Pod considered empty when water level <= this value
+#define TARGET_FILL_HEIGHT_MM     67    // Pod considered filled when water level >= this value
+#define READINGS_NEEDED           3     // Number of consistent readings to confirm state
+
 static const char *TAG = "HTTPS_SERVER";
+
+// Interactive calibration input (set via UART cmd_confirm_level)
+static volatile int s_confirmed_level_mm = -1;
+
+// Called by console to feed user-confirmed water level during calibration
+void confirm_level(int mm)
+{
+    s_confirmed_level_mm = mm;
+}
 
 /* ==========================================
  *         ROUTINE + SCHEDULE STRUCTS
@@ -66,6 +84,12 @@ typedef struct {
     schedule_type_t type;
     uint8_t schedule[24];  // 24 values (0..100)
 } schedule_message_t;
+
+// New structure for fill pod routine parameters
+typedef struct {
+    int routine_id;
+    int target_mm;  // -1 means use default threshold
+} fill_empty_param_t;
 
 /* Queue for schedule messages */
 static QueueHandle_t schedule_msg_queue = NULL;
@@ -495,6 +519,17 @@ static esp_err_t routines_post_handler(httpd_req_t *req)
                     configMAX_PRIORITIES - 1, NULL);
     }
     else if (strcasecmp(routine_name, "fill_pod") == 0) {
+        // Parse optional target_mm from JSON
+        int target_mm = -1;
+        cJSON *root = cJSON_Parse(content);
+        if (root) {
+            cJSON *t = cJSON_GetObjectItem(root, "target_mm");
+            if (cJSON_IsNumber(t)) {
+                target_mm = t->valueint;
+            }
+            cJSON_Delete(root);
+        }
+
         int slot = allocate_routine_slot(routine_name);
         if (slot < 0) {
             httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "No routine slots left");
@@ -502,8 +537,12 @@ static esp_err_t routines_post_handler(httpd_req_t *req)
         }
         rid = s_routines[slot].routine_id;
         s_routines[slot].status = ROUTINE_STATUS_PENDING;
-        xTaskCreate(routine_fill_pod_task, "fill_pod", 4096, (void*)(intptr_t)rid,
-                    configMAX_PRIORITIES - 1, NULL);
+        // Pass target via parameter block
+        fill_empty_param_t *p = malloc(sizeof(fill_empty_param_t));
+        p->routine_id = rid;
+        p->target_mm = target_mm;
+        xTaskCreate(routine_fill_pod_task, "fill_pod", 4096,
+                    (void*)p, configMAX_PRIORITIES - 1, NULL);
     }
     else if (strcasecmp(routine_name, "calibrate_pod") == 0) {
         int slot = allocate_routine_slot(routine_name);
@@ -704,7 +743,7 @@ static esp_err_t saved_schedule_get_handler(httpd_req_t *req)
  * Routine Tasks Implementation
  * ==========================================
  */
-#define FILL_DRAIN_MAX_TIMER_SEC 60.0f * 4.0f
+#define FILL_DRAIN_MAX_TIMER_SEC 60.0f * 6.0f
 
 //------------------------------------------
 // 1) empty_pod
@@ -741,11 +780,8 @@ static void routine_empty_pod_task(void *pvParam)
     float last_log_s = t0;
     float total_power = 0.0f;
     
-    // Target threshold for emptying (>110mm)
-    const int TARGET_EMPTY_HEIGHT_MM = 110;
     // Counter for consecutive valid readings at target
     int target_readings = 0;
-    const int READINGS_NEEDED = 3;  // Need this many consistent readings to confirm
     
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(250));              // poll every 250 ms
@@ -764,19 +800,20 @@ static void routine_empty_pod_task(void *pvParam)
         }
 
         float now_s = (float)xTaskGetTickCount() / configTICK_RATE_HZ;
-        bool approaching_target = (dist_mm > TARGET_EMPTY_HEIGHT_MM);
+        // Pod is empty when water level <= empty threshold
+        bool approaching_target = (dist_mm <= TARGET_EMPTY_HEIGHT_MM);
         
         if ((now_s - last_log_s >= 1.0f) || approaching_target) {
-            ESP_LOGW(TAG, "DRAINING: Distance: %d mm", dist_mm);
+            ESP_LOGW(TAG, "DRAINING: Water level: %d mm", dist_mm);
             last_log_s = now_s;
         }
         
-        // Handle sensor noise when approaching target height
+        // Handle sensor noise when approaching target water level
         if (approaching_target) {
             target_readings++;
             if (target_readings >= READINGS_NEEDED) {
-                // Confirmed empty - multiple consistent readings
-                ESP_LOGI(TAG, "Empty confirmed with %d consecutive readings >= %d mm", 
+                // Confirmed empty - multiple consistent readings at or below threshold
+                ESP_LOGI(TAG, "Empty confirmed with %d consecutive readings <= %d mm", 
                          READINGS_NEEDED, TARGET_EMPTY_HEIGHT_MM);
                 break;
             }
@@ -802,7 +839,7 @@ static void routine_empty_pod_task(void *pvParam)
 
     ESP_LOGI(TAG,
         "[empty_pod] done ID=%d: time=%.1f s, power=%.1f mW·s, start=%d mm, end=%d mm",
-        rid, rec->time_elapsed_s, total_power,
+        rid, (double)rec->time_elapsed_s, (double)total_power,
         rec->start_height_mm, rec->end_height_mm);
 
     vTaskDelete(NULL);
@@ -812,7 +849,7 @@ static void routine_empty_pod_task(void *pvParam)
 //------------------------------------------
 // 2) fill_pod (tweaked polling & logging)
 //------------------------------------------
-void start_fill_pod_routine(void)
+void start_fill_pod_routine(int target_mm)
 {
     int slot = allocate_routine_slot("fill_pod");
     if (slot < 0) {
@@ -821,13 +858,29 @@ void start_fill_pod_routine(void)
     }
     int rid = s_routines[slot].routine_id;
     s_routines[slot].status = ROUTINE_STATUS_PENDING;
+    // Create parameter block for fill task
+    fill_empty_param_t *p = malloc(sizeof(fill_empty_param_t));
+    p->routine_id = rid;
+    p->target_mm = target_mm;  // provided or -1 for default
     xTaskCreate(routine_fill_pod_task, "fill_pod", 4096,
-                (void*)(intptr_t)rid, configMAX_PRIORITIES - 1, NULL);
+                (void*)p, configMAX_PRIORITIES - 1, NULL);
 }
 
 static void routine_fill_pod_task(void *pvParam)
 {
-    int rid = (int)(intptr_t) pvParam;
+    // Unpack parameters
+    fill_empty_param_t *p = (fill_empty_param_t*) pvParam;
+    int rid = p->routine_id;
+    int target_mm = p->target_mm;
+    free(p);
+    // Validate and clamp target against calibrated range
+    int max_level = distance_sensor_get_max_level_mm();
+    if (target_mm < 0) {
+        target_mm = max_level; // default to full
+    } else if (target_mm > max_level) {
+        ESP_LOGW(TAG, "[fill_pod] Requested target %d mm > calibrated max %d mm; clamping to max", target_mm, max_level);
+        target_mm = max_level;
+    }
     routine_record_t *rec = find_routine_by_id(rid);
     if (!rec) { vTaskDelete(NULL); return; }
     rec->status = ROUTINE_STATUS_RUNNING;
@@ -842,12 +895,9 @@ static void routine_fill_pod_task(void *pvParam)
     float t0 = (float)xTaskGetTickCount() / configTICK_RATE_HZ;
     float last_log_s = t0;
     float total_power = 0.0f;
-    
-    // Target threshold for filling (<30mm)
-    const int TARGET_FILL_HEIGHT_MM = 30;
+
     // Counter for consecutive valid readings at target
     int target_readings = 0;
-    const int READINGS_NEEDED = 3;  // Need this many consistent readings to confirm
 
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(250));
@@ -866,24 +916,26 @@ static void routine_fill_pod_task(void *pvParam)
         }
 
         float now_s = (float)xTaskGetTickCount() / configTICK_RATE_HZ;
-        bool approaching_target = (dist_mm < TARGET_FILL_HEIGHT_MM);
+        // Pod is full when water level reaches the fill threshold
+        int fill_threshold = (target_mm >= 0) ? target_mm : TARGET_FILL_HEIGHT_MM;
+        bool approaching_target = (dist_mm >= fill_threshold);
         
         if ((now_s - last_log_s >= 1.0f) || approaching_target) {
-            ESP_LOGW(TAG, "FILLING: Distance: %d mm", dist_mm);
+            ESP_LOGD(TAG, "FILLING: Water level: %d mm", dist_mm);
             last_log_s = now_s;
         }
         
-        // Handle sensor noise when approaching target height
+        // Handle sensor noise when approaching target water level
         if (approaching_target) {
             target_readings++;
+            ESP_LOGI(TAG, "FILLING: Target readings count: %d/%d", target_readings, READINGS_NEEDED);
             if (target_readings >= READINGS_NEEDED) {
-                // Confirmed filled - multiple consistent readings
-                ESP_LOGI(TAG, "Fill confirmed with %d consecutive readings <= %d mm", 
-                         READINGS_NEEDED, TARGET_FILL_HEIGHT_MM);
+                // Confirmed filled - multiple consistent readings at or above threshold
+                ESP_LOGI(TAG, "Fill confirmed with %d consecutive readings >= %d mm", 
+                         READINGS_NEEDED, fill_threshold);
                 break;
             }
         } else {
-            // Reset counter if we get inconsistent readings
             target_readings = 0;
         }
 
@@ -905,7 +957,7 @@ static void routine_fill_pod_task(void *pvParam)
 
     ESP_LOGI(TAG,
         "[fill_pod] done ID=%d: time=%.1f s, power=%.1f mW·s, start=%d mm, end=%d mm",
-        rid, rec->time_elapsed_s, total_power,
+        rid, (double)rec->time_elapsed_s, (double)total_power,
         rec->start_height_mm, rec->end_height_mm);
 
     vTaskDelete(NULL);
@@ -915,54 +967,71 @@ static void routine_fill_pod_task(void *pvParam)
 //------------------------------------------
 // 3) calibrate_pod
 //------------------------------------------
+void start_calibrate_pod_routine(void)
+{
+    int slot = allocate_routine_slot("calibrate_pod");
+    if (slot < 0) {
+        ESP_LOGE(TAG, "start_calibrate_pod_routine: no slots");
+        return;
+    }
+    int rid = s_routines[slot].routine_id;
+    s_routines[slot].status = ROUTINE_STATUS_PENDING;
+    xTaskCreate(routine_calibrate_pod_task, "calibrate_pod", 4096, (void*)(intptr_t)rid,
+                configMAX_PRIORITIES - 1, NULL);
+}
+
 static void routine_calibrate_pod_task(void *pvParam)
 {
     int rid = (int)(intptr_t) pvParam;
     routine_record_t *rec = find_routine_by_id(rid);
-    if (!rec) {
-        vTaskDelete(NULL);
-        return;
-    }
+    if (!rec) { vTaskDelete(NULL); return; }
     rec->status = ROUTINE_STATUS_RUNNING;
     ESP_LOGI(TAG, "[calibrate_pod] start ID=%d", rid);
 
-    float t0 = (float)xTaskGetTickCount() / configTICK_RATE_HZ;
-    float total_power = 0.0f;
-
-    // Initialize min/max to large / small integers
-    rec->min_height_mm = 999999;
-    rec->max_height_mm = 0;
-
-    for (int i = 0; i < 20; i++) {
+    // Phase 1: Drain until user confirms empty
+    ESP_LOGI(TAG, "[calibrate_pod] Phase 1: Draining pod; please confirm empty level via 'confirm_level <mm>'");
+    set_drain_pump_pwm(90);
+    while (s_confirmed_level_mm < 0) {
         vTaskDelay(pdMS_TO_TICKS(500));
+    }
+    int raw_empty_mm = distance_sensor_read_mm();
+    rec->min_height_mm = raw_empty_mm;
+    ESP_LOGI(TAG, "[calibrate_pod] raw empty sensor distance: %d mm", raw_empty_mm);
+    set_drain_pump_pwm(0);
+    s_confirmed_level_mm = -1;
 
-        float cur_mA=0, volt_mV=0, pwr_mW=0;
-        power_monitor_read_current(&cur_mA);
-        power_monitor_read_voltage(&volt_mV);
-        power_monitor_read_power(&pwr_mW);
-        total_power += (pwr_mW * 0.5f);
-
+    // Phase 2: Fill until headspace threshold or timeout
+    ESP_LOGI(TAG, "[calibrate_pod] Phase 2: Filling pod until headspace threshold (%d mm)", TANK_HEADSPACE_MM);
+    set_source_pump_pwm(85);
+    TickType_t start_tick = xTaskGetTickCount();
+    const TickType_t timeout_ticks = pdMS_TO_TICKS((FILL_DRAIN_MAX_TIMER_SEC * 1000)); // 6-minute timeout
+    while (1) {
+        vTaskDelay(pdMS_TO_TICKS(250));
         int dist_mm = distance_sensor_read_mm();
-        if (dist_mm > 0) {
-            if (dist_mm < rec->min_height_mm) {
-                rec->min_height_mm = dist_mm;
-            }
-            if (dist_mm > rec->max_height_mm) {
-                rec->max_height_mm = dist_mm;
-            }
+        if (dist_mm <= TANK_HEADSPACE_MM) {
+            ESP_LOGI(TAG, "[calibrate_pod] reached headspace threshold: %d mm", dist_mm);
+            break;
+        }
+        if ((xTaskGetTickCount() - start_tick) > timeout_ticks) {
+            ESP_LOGW(TAG, "[calibrate_pod] fill timeout");
+            break;
         }
     }
+    set_source_pump_pwm(0);
 
-    float t1 = (float)xTaskGetTickCount() / configTICK_RATE_HZ;
-    rec->time_elapsed_s = t1 - t0;
-    rec->power_used_mW_s = total_power;
+    // Prompt user to confirm full sensor distance
+    ESP_LOGI(TAG, "[calibrate_pod] Please confirm full sensor distance via 'confirm_level <mm>'");
+    while (s_confirmed_level_mm < 0) {
+        vTaskDelay(pdMS_TO_TICKS(500));
+    }
+    int raw_full_mm = distance_sensor_read_mm();
+    rec->max_height_mm = raw_full_mm;
+    ESP_LOGI(TAG, "[calibrate_pod] raw full sensor distance: %d mm", raw_full_mm);
+    s_confirmed_level_mm = -1;
+
+    // Finalize calibration
     rec->status = ROUTINE_STATUS_COMPLETED;
-
-    ESP_LOGI(TAG,
-        "[calibrate_pod] done ID=%d: time=%.1f s, power=%.1f mW·s, min=%d mm, max=%d mm",
-        rid, rec->time_elapsed_s, total_power,
-        rec->min_height_mm, rec->max_height_mm);
-
+    ESP_LOGI(TAG, "[calibrate_pod] done ID=%d: empty=%d mm, full=%d mm", rid, rec->min_height_mm, rec->max_height_mm);
     vTaskDelete(NULL);
 }
 
@@ -1057,7 +1126,6 @@ static void routine_store_schedule_task(void *pvParam) {
     rec->power_used_mW_s = 0.0f;
     rec->status = ROUTINE_STATUS_COMPLETED;
     ESP_LOGI(TAG, "Schedule task completed for %s (ID=%d)", rec->routine_name, rid);
-    vTaskDelete(NULL);
 }
 
 /* ==========================================
@@ -1073,10 +1141,11 @@ static int allocate_routine_slot(const char *routine_name)
             s_routines[i].status = ROUTINE_STATUS_PENDING;
             strncpy(s_routines[i].routine_name, routine_name, sizeof(s_routines[i].routine_name)-1);
             s_routines[i].routine_name[sizeof(s_routines[i].routine_name)-1] = '\0';
-            s_routines[i].start_height_mm = -1;
-            s_routines[i].end_height_mm   = -1;
-            s_routines[i].min_height_mm   = 999999;
-            s_routines[i].max_height_mm   = 0;
+            // Initialize water level fields
+            s_routines[i].start_height_mm = -1;       // Invalid value indicates not yet measured
+            s_routines[i].end_height_mm   = -1;       // Invalid value indicates not yet measured
+            s_routines[i].min_height_mm   = 999999;   // Min = full height (small distance value)
+            s_routines[i].max_height_mm   = 0;        // Max = empty height (large distance value)
             s_routines[i].time_elapsed_s  = 0.0f;
             s_routines[i].power_used_mW_s = 0.0f;
             return i;
@@ -1500,6 +1569,8 @@ void schedule_planter_task(void *pvParam) {
                 // If the current time is within the duty cycle, turn on the pump
                 if (sec_into_hour < on_seconds) {
                     ESP_LOGI(TAG, "Planter duty: %d%%, sec_into_hour: %d, on_seconds: %d", duty, sec_into_hour, on_seconds);
+
+
                     { actuator_command_t cmd = { .cmd_type = ACTUATOR_CMD_PLANTER_PUMP_PWM, .value = 100 }; xQueueSend(actuator_queue, &cmd, portMAX_DELAY); }
                 } else {
                     { actuator_command_t cmd = { .cmd_type = ACTUATOR_CMD_PLANTER_PUMP_PWM, .value = 0 }; xQueueSend(actuator_queue, &cmd, portMAX_DELAY); }

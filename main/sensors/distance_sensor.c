@@ -4,10 +4,20 @@
 #include "freertos/task.h"
 #include "freertos/semphr.h"
 #include <string.h>
+#include <math.h>  // For sqrtf() in standard deviation calculation
 
-// Define to use laser sensor or ultrasonic
-#define USE_LASER_SENSOR 1
-// #define USE_ULTRASONIC_SENSOR 1
+// NVS for pod calibration persistence
+#include "nvs_flash.h"
+#include "nvs.h"
+
+// Define which sensor implementation to use
+#define USE_LASER_SENSOR 1        // Original laser sensor implementation
+
+// Enable or disable verbose sensor reading logs
+#define SENSOR_VERBOSE_LOGS 1  // Set to 1 to enable detailed sensor logs
+
+// Choose which implementation to use - set only one to 1
+#define ACTIVE_SENSOR USE_LASER_SENSOR
 
 static const char *TAG = "DIST_SENSOR";
 
@@ -15,8 +25,19 @@ static const char *TAG = "DIST_SENSOR";
 static SemaphoreHandle_t sensor_mutex = NULL;
 
 // Last valid measurement and timestamp (for caching)
-static int last_valid_distance_mm = -1;
-static uint32_t last_measurement_time = 0;
+static volatile int last_valid_distance_mm = -1;
+static volatile uint32_t last_measurement_time = 0;
+
+// Last filtered distance measurement
+static volatile int last_filtered_distance_mm = WATER_LEVEL_ERROR_MM;
+
+// Dynamic calibration parameters
+static int sensor_offset_mm = 0;           // default laser offset in mm (fallback until NVS load)
+static int pod_empty_height_mm = TANK_EMPTY_HEIGHT_MM;
+static int pod_full_height_mm = 0;          // set after load or calibration
+
+// Calibration scale factor (actual/raw), default=1.0
+static float sensor_scale_factor = 1.0f;
 
 //===========================================================
 // If using laser sensor (I2C)
@@ -83,10 +104,17 @@ static int laser_get_distance_mm(void)
         return -1;
     }
 
-    int distance_mm = (((int)buf[0] << 8) | buf[1]) - 10; // Subtract 10 for calibration
-    // int distance_mm = ((int)buf[0] * 0x100) + buf[1] - 10;
-    // ESP_LOGI(TAG, "Distance reading: %d mm", distance_mm);
-    return distance_mm;
+    // Get raw value without any calibration
+    int raw = ((int)buf[0] << 8) | buf[1];
+    ESP_LOGD(TAG, "Raw laser sensor reading: %d mm", raw);
+    
+    // Check for obviously invalid readings
+    if (raw <= 0) {
+        ESP_LOGW(TAG, "Invalid sensor raw reading: %d mm", raw);
+        return -1;
+    }
+    
+    return raw;
 }
 
 
@@ -98,77 +126,14 @@ static esp_err_t laser_init_hw(void) {
 #endif // USE_LASER_SENSOR
 
 //===========================================================
-// If using ultrasonic sensor (UART)
-#if defined(USE_ULTRASONIC_SENSOR)
-
-#include "driver/uart.h"
-#include "driver/gpio.h"
-
-#define ULTRASONIC_UART_NUM  UART_NUM_1
-#define ULTRASONIC_UART_RX   5 // sensor TX -> ESP32 RX
-#define ULTRASONIC_UART_TX   4 // sensor RX -> ESP32 TX
-
-static int ultrasonic_get_distance_mm(void)
-{
-    uint8_t frame[4];
-    int length = uart_read_bytes(ULTRASONIC_UART_NUM, frame, 4, pdMS_TO_TICKS(1000));
-    if (length == 4) {
-        if (frame[0] == 0xFF) {
-            uint8_t csum = (frame[0] + frame[1] + frame[2]) & 0x00FF;
-            if (csum != frame[3]) {
-                return -1;
-            }
-            // distance in mm
-            uint16_t distance_mm = (frame[1]<<8) + frame[2];  //((uint16_t)frame[1] << 8) | frame[2];
-            ESP_LOGE(TAG, "mm inside ultrasonic: %u mm", distance_mm);
-            if (distance_mm < 30) {
-                return -2;
-            }
-            return distance_mm;
-        }
-    }
-    return -1;
-}
-
-static esp_err_t ultrasonic_init_hw(void)
-{
-    uart_config_t cfg = {
-        .baud_rate  = 9600,
-        .data_bits  = UART_DATA_8_BITS,
-        .parity     = UART_PARITY_DISABLE,
-        .stop_bits  = UART_STOP_BITS_1,
-        .flow_ctrl  = UART_HW_FLOWCTRL_DISABLE,
-        .source_clk = UART_SCLK_DEFAULT,
-    };
-    ESP_ERROR_CHECK(uart_param_config(ULTRASONIC_UART_NUM, &cfg));
-    ESP_ERROR_CHECK(uart_set_pin(ULTRASONIC_UART_NUM,
-                                 ULTRASONIC_UART_TX,
-                                 ULTRASONIC_UART_RX,
-                                 UART_PIN_NO_CHANGE,
-                                 UART_PIN_NO_CHANGE));
-    ESP_ERROR_CHECK(uart_driver_install(ULTRASONIC_UART_NUM, 1024, 0, 0, NULL, 0));
-
-    // Some sensors require driving TX pin high
-    gpio_config_t io_conf = {
-        .pin_bit_mask = 1ULL << ULTRASONIC_UART_TX,
-        .mode         = GPIO_MODE_OUTPUT,
-        .pull_up_en   = GPIO_PULLUP_ENABLE,
-        .intr_type    = GPIO_INTR_DISABLE
-    };
-    gpio_config(&io_conf);
-    gpio_set_level(ULTRASONIC_UART_TX, 1);
-
-    return ESP_OK;
-}
-
-#endif // USE_ULTRASONIC_SENSOR
-
-//===========================================================
 // Common entry points
 //===========================================================
 esp_err_t distance_sensor_init(void)
 {
     uint32_t err = ESP_OK;
+    // Load calibration first
+    load_pod_settings();
+
     // Create mutex for thread-safe access to sensor
     if (sensor_mutex == NULL) {
         sensor_mutex = xSemaphoreCreateMutex();
@@ -179,14 +144,10 @@ esp_err_t distance_sensor_init(void)
         ESP_LOGI(TAG, "Sensor access mutex created");
     }
     
-    // Initialize hardware
-#if defined(USE_LASER_SENSOR)
-    ESP_LOGI(TAG, "Distance sensor: LASER mode, I2C=0x74");
+    // Initialize hardware based on selected sensor
+#if ACTIVE_SENSOR == USE_LASER_SENSOR
+    ESP_LOGI(TAG, "Distance sensor: LASER mode (legacy), I2C=0x74");
     err = laser_init_hw();
-#elif defined(USE_ULTRASONIC_SENSOR)
-    ESP_LOGI(TAG, "Distance sensor: ULTRASONIC mode, UART pins %d/%d",
-             ULTRASONIC_UART_TX, ULTRASONIC_UART_RX);
-    err = ultrasonic_init_hw();
 #else
     ESP_LOGE(TAG, "No sensor mode defined!");
     return ESP_FAIL;
@@ -195,14 +156,11 @@ esp_err_t distance_sensor_init(void)
         ESP_LOGE(TAG, "Failed to initialize distance sensor hardware: %s", esp_err_to_name(err));
         return err;
     }
-
-    // Perform a quick test reading to verify everything is working
-    int test_reading = distance_sensor_read_mm();
-
-    if (test_reading < 0) {
-        ESP_LOGE(TAG, "Failed to take initial distance reading: %d", test_reading);
-        return ESP_FAIL;
-    }
+    ESP_LOGI(TAG, "Distance sensor initialized");
+    // Load persisted calibration
+    load_pod_settings();    
+    ESP_LOGI(TAG, "Calibration loaded: empty=%d mm, full=%d mm, offset=%d mm, scale=%.3f", 
+            pod_empty_height_mm, pod_full_height_mm, sensor_offset_mm, (double)sensor_scale_factor);
 
     return ESP_OK;
 }
@@ -218,115 +176,196 @@ esp_err_t distance_sensor_init(void)
  */
 static int distance_sensor_read_mm_actual(void)
 {
-#if defined(USE_LASER_SENSOR)
-    const int avg_count = 8;
+    // Per-reading Kalman filter state variables
+    static float reading_kf_x = -1.0f;       // current reading estimate (mm)
+    static float reading_kf_P = 25.0f;       // reading estimate variance (mm^2)
+    static const float reading_kf_Q = 0.01f; // reading process noise variance
+    static const float reading_kf_R = 100.0f; // individual reading noise variance (higher than averaged)
+    static bool reading_kf_initialized = false; // Flag to check if filter is initialized
+
+    const int avg_count = 4;
+    const int max_acceptable_distance = 400; // Maximum acceptable distance in mm
+    const int min_acceptable_distance = 10;  // Minimum acceptable distance in mm
+    
+    int readings[avg_count];  // Store individual readings for analysis
     int sum = 0;
     int valid_readings = 0;
+    int retries = 0;
+    const int max_retries = 3; // Max number of retries for anomalous readings
+
+    #if SENSOR_VERBOSE_LOGS
+    ESP_LOGD(TAG, "Starting laser distance measurement (averaging %d readings)", avg_count);
+    #endif
     
-    // Take multiple readings and average them for better accuracy
+    // Take multiple readings and apply Kalman filter to each one before averaging
     for (int i = 0; i < avg_count; i++) {
-        int tmp = laser_get_distance_mm();
-        if (tmp > 0) {  // Valid reading
-            sum += tmp;
+        int retry_count = 0;
+        int raw_tmp;
+        int filtered_tmp;
+        
+        // Try up to max_retries times to get a reading within acceptable range
+        do {
+            raw_tmp = laser_get_distance_mm();
+            
+            // Apply Kalman filter to each individual raw reading
+            if (raw_tmp > 0) {
+                // Initialize per-reading filter if needed
+                if (!reading_kf_initialized) {
+                    reading_kf_x = (float)raw_tmp;
+                    reading_kf_P = reading_kf_R;
+                    reading_kf_initialized = true;
+                    filtered_tmp = raw_tmp;
+                } else {
+                    // Standard Kalman filter update
+                    float P_pred = reading_kf_P + reading_kf_Q;
+                    float K = P_pred / (P_pred + reading_kf_R);
+                    reading_kf_x = reading_kf_x + K * ((float)raw_tmp - reading_kf_x);
+                    reading_kf_P = (1.0f - K) * P_pred;
+                    filtered_tmp = (int)(reading_kf_x + 0.5f);
+                    
+                    #if SENSOR_VERBOSE_LOGS
+                    ESP_LOGD(TAG, "Reading #%d: RaD=%d mm, K=%.3f, Filtered=%d", 
+                             i+1, raw_tmp, (double)K, filtered_tmp);
+                    #endif
+                }
+            } else {
+                // Invalid reading, pass through
+                filtered_tmp = raw_tmp;
+            }
+            
+            // Check if filtered reading is out of acceptable range but technically valid
+            if (filtered_tmp > 0 && (filtered_tmp > max_acceptable_distance || filtered_tmp < min_acceptable_distance)) {
+                ESP_LOGW(TAG, "Anomalous reading #%d: %d mm (raw=%d mm) (outside %d-%d mm range), retry %d/%d", 
+                        i+1, filtered_tmp, raw_tmp, min_acceptable_distance, max_acceptable_distance, 
+                        retry_count+1, max_retries);
+                
+                // Only count as a retry if it's out of range but > 0
+                retry_count++;
+                retries++;
+                vTaskDelay(pdMS_TO_TICKS(10)); // Slightly longer delay before retry
+            } else {
+                // Either good reading or error (< 0)
+                break;
+            }
+        } while (retry_count < max_retries);
+        
+        if (filtered_tmp > 0 && filtered_tmp <= max_acceptable_distance && filtered_tmp >= min_acceptable_distance) {  
+            // Valid reading within acceptable range
+            readings[valid_readings] = filtered_tmp;
+            sum += filtered_tmp;
             valid_readings++;
+            #if SENSOR_VERBOSE_LOGS
+            ESP_LOGD(TAG, "ReadDng #%d: %d mm (filtered from raw=%d mm) (valid)", 
+                    i+1, filtered_tmp, raw_tmp);
+            #endif
+        } else if (filtered_tmp > 0) {
+            // Still out of range after retries
+            ESP_LOGW(TAG, "Reading #%d: %d mm (filtered from raw=%d mm) (out of range, discarded)", 
+                    i+1, filtered_tmp, raw_tmp);
         } else {
-            ESP_LOGW(TAG, "Invalid laser reading attempt (%d) %d/%d", tmp, i+1, avg_count);
+            // Error reading
+            ESP_LOGW(TAG, "Invalid laser reading attempt (%d) %d/%d", filtered_tmp, i+1, avg_count);
         }
+        
         // Small delay between readings
-        vTaskDelay(pdMS_TO_TICKS(5));
+        vTaskDelay(pdMS_TO_TICKS(1));
     }
     
-    // Return average if we got at least half of the readings
     if (valid_readings >= avg_count/2) {
-        return sum / valid_readings;
+        int raw_result = sum / valid_readings;
+        return raw_result;
+    } else {
+        ESP_LOGW(TAG, "Too few valid readings (%d/%d), returning error", valid_readings, avg_count);
+        return -1;
     }
-    
-    ESP_LOGE(TAG, "Too many invalid laser readings (%d/%d failed)", 
-             avg_count - valid_readings, avg_count);
+    ESP_LOGE(TAG, "Too many invalid readings (%d/%d failed)", avg_count - valid_readings, avg_count);
     return -1;
-    
-#elif defined(USE_ULTRASONIC_SENSOR)
-    return ultrasonic_get_distance_mm();   
-#endif
 }
 
 int distance_sensor_read_mm(void)
 {
-    uint32_t current_time = xTaskGetTickCount() * portTICK_PERIOD_MS;
-    uint32_t reading_age = current_time - last_measurement_time;
-    
-    // First, check if we have a recent valid reading (within last 500ms)
-    // Use the cached value if it's fresh enough
-    if (last_valid_distance_mm > 0 && reading_age < 500) {
-        ESP_LOGI(TAG, "Using fresh cached reading: %d mm (age: %lu ms)", 
-                 last_valid_distance_mm, reading_age);
-        return last_valid_distance_mm;
-    }
-    
-    int result = -1;
-    
-    // Try to acquire mutex with timeout (1 second max wait)
-    if (xSemaphoreTake(sensor_mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
-        // Critical section - only one task can access the sensor at a time
-        ESP_LOGI(TAG, "Acquired sensor mutex, taking new reading");
-        
-        // Check again if another task updated the reading while we were waiting
-        // This prevents redundant readings if multiple tasks requested at the same time
-        uint32_t new_reading_age = xTaskGetTickCount() * portTICK_PERIOD_MS - last_measurement_time;
-        if (last_valid_distance_mm > 0 && new_reading_age < 200) {
-            // Another task just updated the reading, use that instead
-            result = last_valid_distance_mm;
-            ESP_LOGI(TAG, "Another task updated reading while waiting, using that: %d mm", result);
-        } else {
-            // Take a new sensor reading (this takes ~400ms)
-            uint32_t start_time = xTaskGetTickCount() * portTICK_PERIOD_MS;
-            result = distance_sensor_read_mm_actual();
-            uint32_t elapsed = xTaskGetTickCount() * portTICK_PERIOD_MS - start_time;
-            
-            ESP_LOGI(TAG, "Sensor reading took %lu ms, result: %d mm", elapsed, result);
-            
-            // If reading is valid, update the cache
-            if (result > 0) {
-                last_valid_distance_mm = result;
-                last_measurement_time = xTaskGetTickCount() * portTICK_PERIOD_MS;
-            }
-        }
-        
-        // Release mutex
-        xSemaphoreGive(sensor_mutex);
-        ESP_LOGI(TAG, "Released sensor mutex");
-    } else {
-        // Failed to acquire mutex after timeout
-        ESP_LOGW(TAG, "Failed to acquire sensor mutex after 1s timeout");
-        
-        // If we couldn't get mutex access but have a previous valid reading,
-        // return that instead (even if it's older than 500ms)
-        if (last_valid_distance_mm > 0) {
-            ESP_LOGW(TAG, "Using stale cached reading: %d mm (age: %lu ms)", 
-                     last_valid_distance_mm, reading_age);
-            return last_valid_distance_mm;
-        } else {
-            ESP_LOGE(TAG, "No valid reading available and sensor is busy");
-        }
-    }
-    
-    return result;
+    // Return the last processed cached water level
+    return last_filtered_distance_mm;
 }
 
 /**
- * @brief Get the last valid reading without trying to access the sensor
- * 
- * This function is completely non-blocking and returns immediately with the
- * most recent cached distance value. It's safe to call from any task or ISR.
- * 
- * @return Last valid distance in mm, or -1 if no valid reading available
+ * @brief Load pod calibration settings from NVS (pod_settings namespace)
  */
-int distance_sensor_get_last_reading_mm(void)
+esp_err_t load_pod_settings(void)
 {
-    // Just return the cached value (atomic read for 32-bit value)
-    uint32_t reading_age = xTaskGetTickCount() * portTICK_PERIOD_MS - last_measurement_time;
-    
-    return last_valid_distance_mm;
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open("pod_settings", NVS_READONLY, &handle);
+    if (err == ESP_OK) {
+        int32_t empty = pod_empty_height_mm;
+        if (nvs_get_i32(handle, "empty_height", &empty) == ESP_OK) {
+            pod_empty_height_mm = empty;
+            ESP_LOGI(TAG, "Loaded pod empty height: %d mm", pod_empty_height_mm);
+        } else {
+            ESP_LOGW(TAG, "Pod empty height not in NVS, defaulting to %d mm", pod_empty_height_mm);
+        }
+        int32_t full = pod_full_height_mm;
+        if (nvs_get_i32(handle, "full_height", &full) == ESP_OK) {
+            pod_full_height_mm = full;
+            ESP_LOGI(TAG, "Loaded pod full height: %d mm", pod_full_height_mm);
+        } else {
+            ESP_LOGW(TAG, "Pod full height not in NVS, defaulting to %d mm", pod_full_height_mm);
+        }
+        int32_t offset = sensor_offset_mm;
+        if (nvs_get_i32(handle, "offset_mm", &offset) == ESP_OK) {
+            sensor_offset_mm = offset;
+            ESP_LOGI(TAG, "Loaded sensor offset: %d mm", sensor_offset_mm);
+        } else {
+            ESP_LOGW(TAG, "Sensor offset not in NVS, defaulting to %d mm", sensor_offset_mm);
+        }
+        // Load scale factor (stored as int32 scale*1000)
+        int32_t sf = 1000;
+        if (nvs_get_i32(handle, "scale_factor", &sf) == ESP_OK) {
+            sensor_scale_factor = ((float)sf) / 1000.0f;
+            ESP_LOGI(TAG, "Loaded sensor scale factor: %.3f", (double)sensor_scale_factor);
+        } else {
+            ESP_LOGW(TAG, "Sensor scale factor not in NVS, defaulting to %.3f", (double)sensor_scale_factor);
+        }
+        nvs_close(handle);
+    } else {
+        ESP_LOGW(TAG, "Failed to open pod_settings namespace: %s", esp_err_to_name(err));
+    }
+    return err;
+}
+
+/**
+ * @brief Save pod calibration settings to NVS (pod_settings namespace)
+ */
+esp_err_t save_pod_settings(int empty_mm, int full_mm)
+{
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open("pod_settings", NVS_READWRITE, &handle);
+    if (err == ESP_OK) {
+        // Update calibration parameters in RAM
+        // empty_mm is the actual sensor reading when the tank is empty
+        // TANK_EMPTY_HEIGHT_MM is the physical measurement we expect
+        
+        // Store the raw readings
+        pod_empty_height_mm = empty_mm;
+        pod_full_height_mm = full_mm;
+        
+        // Calculate the offset between actual sensor reading and physical expectation
+        // This offset accounts for sensor non-linearity
+        sensor_offset_mm = empty_mm - TANK_EMPTY_HEIGHT_MM;
+        ESP_LOGI(TAG, "Calibration: sensor reads %d mm when physically it's %d mm (offset=%d mm)", 
+                empty_mm, TANK_EMPTY_HEIGHT_MM, sensor_offset_mm);
+        
+        // Save to NVS
+        nvs_set_i32(handle, "empty_height", empty_mm);
+        nvs_set_i32(handle, "full_height", full_mm);
+        nvs_set_i32(handle, "offset_mm", sensor_offset_mm);
+        // Persist scale factor as int thousandths
+        int32_t sf = (int32_t)(sensor_scale_factor * 1000.0f);
+        nvs_set_i32(handle, "scale_factor", sf);
+        ESP_LOGI(TAG, "Saved sensor scale factor: %.3f", (double)sensor_scale_factor);
+        nvs_commit(handle);
+        nvs_close(handle);
+    }
+    return err;
 }
 
 /**
@@ -340,11 +379,11 @@ int distance_sensor_get_last_reading_mm(void)
  */
 void distance_sensor_task(void *pvParameters)
 {
-    // Poll at 1 Hz (every 1000ms)
-    const TickType_t delay_ticks = pdMS_TO_TICKS(200);
+    // Poll at 10 Hz (every 100ms)
+    const TickType_t delay_ticks = pdMS_TO_TICKS(1000);
     
-    // Wait a bit before starting to let other initializations complete
-    vTaskDelay(pdMS_TO_TICKS(2000));
+    // // Wait a bit before starting to let other initializations complete
+    // vTaskDelay(pdMS_TO_TICKS(2000));
     
     ESP_LOGI(TAG, "Distance sensor background task started");
     
@@ -352,22 +391,44 @@ void distance_sensor_task(void *pvParameters)
     int retry_count = 0;
     // Counter for logging (to reduce spam)
     int log_counter = 0;
+    // Variable to track significant distance changes
+    int last_reported_distance = -1;
     
     while (1) {
         // Try to acquire mutex with a shorter timeout since this is a background task
         if (xSemaphoreTake(sensor_mutex, pdMS_TO_TICKS(500)) == pdTRUE) {
-            // Take a direct sensor reading
+            // Take a direct sensor reading (already Kalman filtered internally)
             int dist_mm = distance_sensor_read_mm_actual();
             
-            if (dist_mm > 0) {
-                // Valid reading - update cached values
+            if (dist_mm >= 0) {
+                // Valid raw reading - update cached raw value
                 last_valid_distance_mm = dist_mm;
+                // The water level is now computed directly in distance_sensor_read_mm_actual
+                // No need to recompute - dist_mm already contains final calibrated water level
+                last_filtered_distance_mm = dist_mm;
                 last_measurement_time = xTaskGetTickCount() * portTICK_PERIOD_MS;
                 retry_count = 0; // Reset retry counter
+                
+                // Check for significant distance changes (> 5mm or 5% change)
+                int distance_diff = abs(dist_mm - last_reported_distance);
+                if (last_reported_distance < 0 || 
+                    distance_diff > 5 || 
+                    (last_reported_distance > 0 && distance_diff > (last_reported_distance / 20))) {
+                    
+                    ESP_LOGD(TAG, "Distance change: %d mm (prev=%d mm, diff=%d mm)",
+                             dist_mm, last_reported_distance, distance_diff);
+                    
+                    // TODO: Implement event notification for significant distance changes
+                    // This will allow other subsystems to subscribe to distance change events
+                    // rather than continuously polling the sensor
+                    
+                    last_reported_distance = dist_mm;
+                }
             } else {
                 // Invalid reading
                 retry_count++;
-                ESP_LOGW(TAG, "Invalid distance reading (%d consecutive failures)", retry_count);
+                ESP_LOGW(TAG, "Invalid distance reading: %d (%d consecutive failures)", dist_mm, retry_count);
+                vTaskDelay(pdMS_TO_TICKS(10000)); // Wait before retrying
                 
                 // If we've had too many consecutive failures, log an error
                 if (retry_count >= 5) {
@@ -386,4 +447,99 @@ void distance_sensor_task(void *pvParameters)
         // Wait before next reading
         vTaskDelay(delay_ticks);
     }
+}
+
+/**
+ * @brief Get minimum calibrated water level (empty) in mm
+ * @return Minimum water level (should be 0)
+ */
+int distance_sensor_get_min_level_mm(void)
+{
+    return 0;
+}
+
+/**
+ * @brief Get maximum calibrated water level (full) in mm
+ * @return Maximum water level in mm based on calibration
+ */
+/**
+ * @brief Get maximum calibrated water level in mm, accounting for headspace
+ * 
+ * This function returns the maximum level that should be targeted during
+ * fill operations, which is the actual tank height minus the headspace.
+ * 
+ * @return Maximum safe water level in mm, accounting for headspace
+ */
+int distance_sensor_get_max_level_mm(void)
+{
+    // Set TAG to be function name for logging
+    static const char *LOCAL_TAG = "DIST_SENSOR_MAX_LEVEL";
+
+    // Our physical calibration reference points
+    int raw_empty = pod_empty_height_mm;  // Physical distance when empty
+    
+    // The actual sensor calibration values, which may differ from physical expectations
+    int sensor_empty = raw_empty + sensor_offset_mm;    // Actual sensor reading when empty
+    int sensor_full = pod_full_height_mm;               // Actual sensor reading when full
+    int sensor_range = sensor_empty - sensor_full;      // Actual sensor reading range
+    
+    // Adjust range to account for headspace
+    int adjusted_range = sensor_range;
+    if (sensor_range >= (TANK_EMPTY_HEIGHT_MM - TANK_HEADSPACE_MM)) {
+        adjusted_range = sensor_range - TANK_HEADSPACE_MM;
+        #if SENSOR_VERBOSE_LOGS
+        ESP_LOGI(LOCAL_TAG, "Max fill level accounts for headspace: %d -> %d mm (headspace=%d mm)", 
+                sensor_range, adjusted_range, TANK_HEADSPACE_MM);
+        #endif
+    } else {
+        ESP_LOGW(LOCAL_TAG, "Cannot apply full headspace: range=%d mm < headspace=%d mm", 
+                sensor_range, TANK_HEADSPACE_MM);
+    }
+    
+    // Convert to depth: sensor_empty maps to depth 0, adjusted_range is max depth
+    float depth_mm = (float)adjusted_range;
+    
+    // Apply scale factor (the ratio between actual physical measurements and sensor readings)
+    float max_level = depth_mm * sensor_scale_factor;
+    #if SENSOR_VERBOSE_LOGS
+    ESP_LOGI(LOCAL_TAG, "Max fill level: %d mm (adjusted from %d mm with scale factor %.3f)", 
+            (int)(max_level + 0.5f), adjusted_range, (double)sensor_scale_factor);
+    #endif
+    return (int)(max_level + 0.5f);
+}
+
+/**
+ * @brief Set the global sensor scale factor used for level conversion
+ * @param factor Scale factor (actual/raw)
+ */
+void distance_sensor_set_scale_factor(float factor)
+{
+    sensor_scale_factor = factor;
+}
+
+/**
+ * @brief Get the absolute maximum water level the tank can hold in mm
+ * 
+ * This returns the absolute maximum water level (without considering headspace),
+ * which should only be used for reporting the physical limits. For fill targets,
+ * use distance_sensor_get_max_level_mm() which accounts for the safety headspace.
+ * 
+ * @return Absolute maximum water level in mm (no headspace)
+ */
+int distance_sensor_get_absolute_max_level_mm(void)
+{
+    // Our physical calibration reference points
+    int raw_empty = pod_empty_height_mm;  // Physical distance when empty
+    
+    // The actual sensor calibration values, which may differ from physical expectations
+    int sensor_empty = raw_empty + sensor_offset_mm;  // Actual sensor reading when empty
+    int sensor_full = pod_full_height_mm;            // Actual sensor reading when full
+    int sensor_range = sensor_empty - sensor_full;   // Actual sensor reading range
+    
+    // Convert to depth: sensor_empty maps to depth 0, sensor_range is max depth
+    float depth_mm = (float)sensor_range;
+    
+    // Apply scale factor (the ratio between actual physical measurements and sensor readings)
+    float max_level = depth_mm * sensor_scale_factor;
+    return (int)(max_level + 0.5f);
 }

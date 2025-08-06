@@ -92,7 +92,7 @@ static void lvgl_update_task(void *pvParameter)
         }
         
         // Read water level sensor (use non-blocking function)
-        water_level_mm = distance_sensor_get_last_reading_mm();
+        water_level_mm = distance_sensor_read_mm();
         
         // Format strings for display
         snprintf(current_str, sizeof(current_str), "Current: %.2f mA", current_ma);

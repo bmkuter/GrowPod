@@ -149,7 +149,7 @@ void flowmeter_task(void *pvParameter) {
 
                 // Output flow rate with timestamp
                 ESP_LOGI(TAG, "Flowmeter %d: Time: %.2f s, Flow Rate: %.2f L/min",
-                         flowmeter_id, (current_time - fm->flow_start_time) / 1000000.0f, flow_rate);
+                         flowmeter_id, (double)((current_time - fm->flow_start_time) / 1000000.0f), (double)flow_rate);
 
                 // Reset pulse count and last_calc_time
                 fm->pulse_count = 0;
@@ -171,7 +171,7 @@ void flowmeter_task(void *pvParameter) {
                         // Flow is still considered active, but no pulses in the last interval
                         // Output zero flow rate
                         ESP_LOGI(TAG, "Flowmeter %d: Time: %.2f s, Flow Rate: 0.00 L/min",
-                                 fm->flowmeter_id, (current_time - fm->flow_start_time) / 1000000.0f);
+                                 fm->flowmeter_id, (double)((current_time - fm->flow_start_time) / 1000000.0f));
 
                         // Reset pulse count and last_calc_time
                         fm->pulse_count = 0;

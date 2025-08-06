@@ -184,26 +184,26 @@ void app_main(void) {
     xTaskCreate(uart_console_task, "uart_console_task", UI_TASK_SIZE, NULL, 5, NULL);
 
     actuator_control_init();
-log_memory_stats();
+
     init_schedule_manager();
-log_memory_stats();
+
 // Start schedule manager task
     ESP_LOGI(TAG, "Starting schedule manager task");
     xTaskCreate(schedule_manager_task, "schedule_manager", ACTUATOR_TASK_SIZE, NULL,
                 configMAX_PRIORITIES - 2, NULL);
-    log_memory_stats();
+
 // // Start air schedule task
 //     ESP_LOGI(TAG, "Starting air schedule task");
 //     xTaskCreate(schedule_air_task, "schedule_air", ACTUATOR_TASK_SIZE, NULL, configMAX_PRIORITIES - 3, NULL);
-//     log_memory_stats();
+
+
 // Start LED schedule task
     ESP_LOGI(TAG, "Starting LED schedule task");
     xTaskCreate(schedule_led_task, "schedule_led", ACTUATOR_TASK_SIZE, NULL, configMAX_PRIORITIES - 3, NULL);
-    log_memory_stats();
+
 // Start planter schedule task
     ESP_LOGI(TAG, "Starting planter schedule task");
     xTaskCreate(schedule_planter_task, "schedule_planter", ACTUATOR_TASK_SIZE, NULL, configMAX_PRIORITIES - 3, NULL);
-    log_memory_stats();
 
     ret = distance_sensor_init();
     if (ret == ESP_OK) {
@@ -211,6 +211,7 @@ log_memory_stats();
     } else {
         ESP_LOGE("MAIN", "distance_sensor_init failed: %s", esp_err_to_name(ret));
     }
+    
 
     // Start Power Monitor task (using INA219 or INA260)
     // Use INA219 by default
@@ -234,4 +235,5 @@ log_memory_stats();
     // if (ret != ESP_OK) {
     //     ESP_LOGE("MAIN", "Failed to initialize control logic module");
     // }
+    log_memory_stats();
 }

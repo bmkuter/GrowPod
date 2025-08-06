@@ -3,3 +3,13 @@ main/secrets.h
 main/certs/*
 build/*
 managed_components/*
+
+hydroponics.log
+
+.vscode/
+
+main/actuator_control/reference/
+
+main/sensors/reference/
+
+main/ina_power_monitor/reference/
