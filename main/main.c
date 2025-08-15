@@ -17,6 +17,7 @@
 #include "nvs.h"
 #include "display.h"
 #include "esp_lvgl_port.h"
+#include "pod_state.h"
 
 #define ACTUATOR_TASK_SIZE (1024 * 4) // 4 KB stack size for actuator task
 #define UI_TASK_SIZE (1024 * 4) // 4 KB stack size for UI task
@@ -142,10 +143,11 @@ void app_main(void) {
     ESP_ERROR_CHECK(ret);
     ESP_LOGW(TAG, "NVS Status: %d", ret);
 
+    i2c_master_init();
+
     // Init Screen
     init_screen_wrapper();
-
-    i2c_master_init();
+    
     // Initialize Wi-Fi
     printf("Starting WiFi...\n");
     if (wifi_init() == ESP_OK) {
@@ -219,6 +221,7 @@ void app_main(void) {
     // xTaskCreate(power_monitor_task, "power_monitor_task", 4096, NULL, 5, NULL);
 
     vTaskDelay(1000/portTICK_PERIOD_MS);
+
 
     // Initialize actuators
     xTaskCreate(actuator_control_task, "actuator_control_task", 4096, NULL, 5, NULL);

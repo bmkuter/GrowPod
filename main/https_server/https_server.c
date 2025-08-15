@@ -15,14 +15,14 @@
 #include "flowmeter_control.h"  // For flow rate reading
 #include "control_logic.h"      // For system_state_t, get_system_state, etc.
 #include "distance_sensor.h"    // For distance_sensor_read_mm()
+#include "pod_state.h"  // Add pod_state
 
 /* ==========================================
  *         WATER LEVEL CONSTANTS
  * ========================================== */
 
 // Target thresholds for water levels (in mm)
-#define TARGET_EMPTY_HEIGHT_MM    1     // Pod considered empty when water level <= this value
-#define TARGET_FILL_HEIGHT_MM     67    // Pod considered filled when water level >= this value
+#define TARGET_FILL_HEIGHT_MM     (TANK_EMPTY_HEIGHT_MM - TANK_HEADSPACE_MM)   // Pod considered filled when water level >= this value
 #define READINGS_NEEDED           3     // Number of consistent readings to confirm state
 
 static const char *TAG = "HTTPS_SERVER";
@@ -30,7 +30,7 @@ static const char *TAG = "HTTPS_SERVER";
 // Interactive calibration input (set via UART cmd_confirm_level)
 static volatile int s_confirmed_level_mm = -1;
 
-// Called by console to feed user-confirmed water level during calibration
+// Allow console or other modules to confirm measured water level during calibration
 void confirm_level(int mm)
 {
     s_confirmed_level_mm = mm;
@@ -243,6 +243,14 @@ void schedule_manager_task(void *pvParam) {
                 case SCHEDULE_TYPE_LIGHT:
                     xSemaphoreTake(schedule_led_mutex, portMAX_DELAY);
                     memcpy(current_light_schedule, msg.schedule, 24);
+                    // Log new schedule
+                    ESP_LOGI(TAG, "Schedule Manager: New LIGHT schedule: %d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
+                             current_light_schedule[0],  current_light_schedule[1],  current_light_schedule[2],  current_light_schedule[3],
+                             current_light_schedule[4],  current_light_schedule[5],  current_light_schedule[6],  current_light_schedule[7],
+                             current_light_schedule[8],  current_light_schedule[9],  current_light_schedule[10], current_light_schedule[11],
+                             current_light_schedule[12], current_light_schedule[13], current_light_schedule[14], current_light_schedule[15],
+                             current_light_schedule[16], current_light_schedule[17], current_light_schedule[18], current_light_schedule[19],
+                             current_light_schedule[20], current_light_schedule[21], current_light_schedule[22], current_light_schedule[23]);
                     xSemaphoreGive(schedule_led_mutex);
                     ESP_LOGI(TAG, "Schedule Manager: Updated LIGHT schedule");
                     break;
@@ -508,6 +516,17 @@ static esp_err_t routines_post_handler(httpd_req_t *req)
     int rid = -1;
     // One-shot routines
     if (strcasecmp(routine_name, "empty_pod") == 0) {
+        // Parse optional target_mm from JSON (used as target percentage)
+        int target_pct = -1;
+        cJSON *root = cJSON_Parse(content);
+        if (root) {
+            cJSON *t = cJSON_GetObjectItem(root, "target_mm");
+            if (cJSON_IsNumber(t)) {
+                target_pct = t->valueint;
+            }
+            cJSON_Delete(root);
+        }
+
         int slot = allocate_routine_slot(routine_name);
         if (slot < 0) {
             httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "No routine slots left");
@@ -515,8 +534,14 @@ static esp_err_t routines_post_handler(httpd_req_t *req)
         }
         rid = s_routines[slot].routine_id;
         s_routines[slot].status = ROUTINE_STATUS_PENDING;
-        xTaskCreate(routine_empty_pod_task, "empty_pod", 4096, (void*)(intptr_t)rid,
-                    configMAX_PRIORITIES - 1, NULL);
+        
+        // Pass target via parameter block
+        fill_empty_param_t *p = malloc(sizeof(fill_empty_param_t));
+        p->routine_id = rid;
+        p->target_mm = target_pct;
+        
+        xTaskCreate(routine_empty_pod_task, "empty_pod", 4096,
+                    (void*)p, configMAX_PRIORITIES - 1, NULL);
     }
     else if (strcasecmp(routine_name, "fill_pod") == 0) {
         // Parse optional target_mm from JSON
@@ -749,8 +774,8 @@ static esp_err_t saved_schedule_get_handler(httpd_req_t *req)
 // 1) empty_pod
 //------------------------------------------
 
-// API for console to start the drain routine
-void start_empty_pod_routine(void)
+// API for console to start the drain routine (target_pct < 0 uses default)
+void start_empty_pod_routine(int target_pct)
 {
     int slot = allocate_routine_slot("empty_pod");
     if (slot < 0) {
@@ -759,13 +784,54 @@ void start_empty_pod_routine(void)
     }
     int rid = s_routines[slot].routine_id;
     s_routines[slot].status = ROUTINE_STATUS_PENDING;
+    
+    // Create parameter block for empty task
+    fill_empty_param_t *p = malloc(sizeof(fill_empty_param_t));
+    p->routine_id = rid;
+    p->target_mm = target_pct;  // used as target percentage
+    
     xTaskCreate(routine_empty_pod_task, "empty_pod", 4096,
-                (void*)(intptr_t)rid, configMAX_PRIORITIES - 1, NULL);
+                (void*)p, configMAX_PRIORITIES - 1, NULL);
 }
 
 static void routine_empty_pod_task(void *pvParam)
 {
-    int rid = (int)(intptr_t) pvParam;
+    // Unpack parameters
+    fill_empty_param_t *p = (fill_empty_param_t*) pvParam;
+    int rid = p->routine_id;
+    // Interpret argument as percentage to remain
+    int target_pct = p->target_mm;
+    free(p);
+    
+    // Compute sensor threshold distance (mm) from calibration
+    int empty_raw = s_pod_state.raw_empty_mm;
+    int full_raw = s_pod_state.raw_full_mm;
+    int range = (empty_raw - full_raw);
+    ESP_LOGI(TAG, "[empty_pod] Pod empty raw: %d mm, full raw: %d mm, range: %d mm",
+             empty_raw, full_raw, range);
+
+    // By default, drain completely (0%)
+    if (target_pct < 0) target_pct = 0;
+    else if (target_pct > 100) target_pct = 100;
+    
+    // Calculate target distance for sensor
+    // Higher sensor reading = less fill
+    int target_mm;
+    
+    if (range <= 0 || !s_pod_state.calibrated) {
+        // Fallback defaults if not calibrated
+        ESP_LOGW(TAG, "[empty_pod] Pod not calibrated, using default values");
+        target_mm = TANK_EMPTY_HEIGHT_MM - TANK_DISTANCE_SENSOR_OFFSET_MM;
+    } else {
+        // Calculate target mm based on target percentage
+        // When target_pct = 0, target_mm = empty_raw
+        // When target_pct = 100, target_mm = headspace
+        target_mm = empty_raw - (range * target_pct) / 100;
+    }
+    
+    ESP_LOGI(TAG, "[empty_pod] Target remaining: %d%% -> %d mm sensor threshold", 
+             target_pct, target_mm);
+    
     routine_record_t *rec = find_routine_by_id(rid);
     if (!rec) { vTaskDelete(NULL); return; }
     rec->status = ROUTINE_STATUS_RUNNING;
@@ -775,7 +841,7 @@ static void routine_empty_pod_task(void *pvParam)
     // Store raw mm values
     rec->start_height_mm = dist_mm;
 
-    set_drain_pump_pwm(70);
+    set_drain_pump_pwm(90);
     float t0 = (float)xTaskGetTickCount() / configTICK_RATE_HZ;
     float last_log_s = t0;
     float total_power = 0.0f;
@@ -800,21 +866,23 @@ static void routine_empty_pod_task(void *pvParam)
         }
 
         float now_s = (float)xTaskGetTickCount() / configTICK_RATE_HZ;
-        // Pod is empty when water level <= empty threshold
-        bool approaching_target = (dist_mm <= TARGET_EMPTY_HEIGHT_MM);
-        
+        // Use computed target or default empty threshold
+        bool approaching_target = (dist_mm >= target_mm);
+
         if ((now_s - last_log_s >= 1.0f) || approaching_target) {
-            ESP_LOGW(TAG, "DRAINING: Water level: %d mm", dist_mm);
+            ESP_LOGW(TAG, "DRAINING: Water level: %d mm (target: %d mm)", dist_mm, target_mm);
             last_log_s = now_s;
         }
         
         // Handle sensor noise when approaching target water level
         if (approaching_target) {
             target_readings++;
+            ESP_LOGD(TAG, "DRAINING: Target readings count: %d/%d (dist = %d mm)", 
+                     target_readings, READINGS_NEEDED, dist_mm);
             if (target_readings >= READINGS_NEEDED) {
-                // Confirmed empty - multiple consistent readings at or below threshold
-                ESP_LOGI(TAG, "Empty confirmed with %d consecutive readings <= %d mm", 
-                         READINGS_NEEDED, TARGET_EMPTY_HEIGHT_MM);
+                // Confirmed at target - multiple consistent readings
+                ESP_LOGI(TAG, "Target level confirmed with %d consecutive readings >= %d mm",
+                         READINGS_NEEDED, target_mm);
                 break;
             }
         } else {
@@ -871,16 +939,29 @@ static void routine_fill_pod_task(void *pvParam)
     // Unpack parameters
     fill_empty_param_t *p = (fill_empty_param_t*) pvParam;
     int rid = p->routine_id;
-    int target_mm = p->target_mm;
+    // Interpret argument as percentage full
+    int target_pct = p->target_mm;
     free(p);
-    // Validate and clamp target against calibrated range
-    int max_level = distance_sensor_get_max_level_mm();
-    if (target_mm < 0) {
-        target_mm = max_level; // default to full
-    } else if (target_mm > max_level) {
-        ESP_LOGW(TAG, "[fill_pod] Requested target %d mm > calibrated max %d mm; clamping to max", target_mm, max_level);
-        target_mm = max_level;
+    // Compute sensor threshold distance (mm) from calibration
+    int empty_raw = s_pod_state.raw_empty_mm;
+    int full_raw  = s_pod_state.raw_full_mm;
+    int range     = (empty_raw - full_raw);
+    // Print pod state
+    ESP_LOGI(TAG, "[fill_pod] Pod state: empty=%d mm, full=%d mm, range=%d mm",
+             empty_raw, full_raw, range);
+    if (range <= 0) {
+        // Fallback defaults
+        empty_raw = TANK_EMPTY_HEIGHT_MM;
+        full_raw  = TANK_HEADSPACE_MM;
+        range     = empty_raw - full_raw;
     }
+    // Clamp percentage
+    if (target_pct < 0)        target_pct = 100;
+    else if (target_pct > 100) target_pct = 100;
+    // Lower sensor reading = more fill
+    int target_mm = empty_raw - (range * target_pct) / 100;
+    ESP_LOGI(TAG, "[fill_pod] Target fill: %d%% -> %d mm sensor threshold", target_pct, target_mm);
+
     routine_record_t *rec = find_routine_by_id(rid);
     if (!rec) { vTaskDelete(NULL); return; }
     rec->status = ROUTINE_STATUS_RUNNING;
@@ -916,23 +997,21 @@ static void routine_fill_pod_task(void *pvParam)
         }
 
         float now_s = (float)xTaskGetTickCount() / configTICK_RATE_HZ;
-        // Pod is full when water level reaches the fill threshold
-        int fill_threshold = (target_mm >= 0) ? target_mm : TARGET_FILL_HEIGHT_MM;
-        bool approaching_target = (dist_mm >= fill_threshold);
-        
+        // Use computed sensor threshold
+        int fill_threshold = target_mm;
+        bool approaching_target = (dist_mm <= fill_threshold);
+
         if ((now_s - last_log_s >= 1.0f) || approaching_target) {
             ESP_LOGD(TAG, "FILLING: Water level: %d mm", dist_mm);
             last_log_s = now_s;
         }
-        
+
         // Handle sensor noise when approaching target water level
         if (approaching_target) {
             target_readings++;
-            ESP_LOGI(TAG, "FILLING: Target readings count: %d/%d", target_readings, READINGS_NEEDED);
+            ESP_LOGI(TAG, "FILLING: Target readings count: %d/%d (dist = %d mm)", target_readings, READINGS_NEEDED, dist_mm);
             if (target_readings >= READINGS_NEEDED) {
-                // Confirmed filled - multiple consistent readings at or above threshold
-                ESP_LOGI(TAG, "Fill confirmed with %d consecutive readings >= %d mm", 
-                         READINGS_NEEDED, fill_threshold);
+                ESP_LOGI(TAG, "Fill confirmed with %d consecutive readings <= %d mm", READINGS_NEEDED, fill_threshold);
                 break;
             }
         } else {
@@ -1029,6 +1108,14 @@ static void routine_calibrate_pod_task(void *pvParam)
     ESP_LOGI(TAG, "[calibrate_pod] raw full sensor distance: %d mm", raw_full_mm);
     s_confirmed_level_mm = -1;
 
+    // Initialize pod state with new calibration
+    pod_state_init(&s_pod_state, raw_empty_mm, raw_full_mm, raw_full_mm);
+    ESP_LOGI(TAG, "[calibrate_pod] Pod state initialized: empty_raw=%d mm, full_raw=%d mm", raw_empty_mm, raw_full_mm);
+
+    // Persist calibration to NVS
+    pod_state_save_settings(&s_pod_state, raw_empty_mm, raw_full_mm);
+    ESP_LOGI(TAG, "[calibrate_pod] Calibration saved to NVS");
+
     // Finalize calibration
     rec->status = ROUTINE_STATUS_COMPLETED;
     ESP_LOGI(TAG, "[calibrate_pod] done ID=%d: empty=%d mm, full=%d mm", rid, rec->min_height_mm, rec->max_height_mm);
@@ -1048,6 +1135,10 @@ static void routine_store_schedule_task(void *pvParam) {
 
     sched_param_t *p = (sched_param_t*) pvParam;
     int rid = p->routine_id;
+
+    // Short delay before processing to allow system stabilization
+    // This helps prevent crashes when schedules are sent in quick succession
+    vTaskDelay(pdMS_TO_TICKS(100));
 
     routine_record_t *rec = find_routine_by_id(rid);
     if (!rec) {
@@ -1091,16 +1182,31 @@ static void routine_store_schedule_task(void *pvParam) {
     }
     memcpy(sched_msg.schedule, p->sched, 24);
 
-    // Send to schedule manager
-    if (xQueueSend(schedule_msg_queue, &sched_msg, pdMS_TO_TICKS(1000)) != pdTRUE) {
-        ESP_LOGW(TAG, "schedule task: Failed to send schedule message");
+    // Send to schedule manager with longer timeout
+    ESP_LOGI(TAG, "Sending schedule to manager for %s...", p->name);
+    if (xQueueSend(schedule_msg_queue, &sched_msg, pdMS_TO_TICKS(2000)) != pdTRUE) {
+        ESP_LOGW(TAG, "schedule task: Failed to send schedule message - queue might be full");
         rec->status = ROUTINE_STATUS_FAILED;
+        free(p);
+        float t1 = (float)xTaskGetTickCount() / configTICK_RATE_HZ;
+        rec->time_elapsed_s = t1 - t0;
+        vTaskDelete(NULL);
+        return;
     }
     else {
-        ESP_LOGW(TAG, "schedule task: Success to send schedule message!");
+        ESP_LOGI(TAG, "schedule task: Successfully sent schedule message to queue");
     }
+    
+    // Small delay to allow schedule manager to process the queue message
+    vTaskDelay(pdMS_TO_TICKS(200));
+    
     // Also save to NVS (persist)
     esp_err_t err = ESP_OK;
+    
+    // Add a small delay before NVS operations to reduce contention
+    vTaskDelay(pdMS_TO_TICKS(100));
+    
+    ESP_LOGI(TAG, "Saving schedule to NVS for %s...", p->name);
     switch (sched_msg.type) {
         case SCHEDULE_TYPE_LIGHT:
             err = save_schedule_to_nvs(SCHEDULE_TYPE_LIGHT, sched_msg.schedule);
@@ -1113,19 +1219,23 @@ static void routine_store_schedule_task(void *pvParam) {
             break;
     }
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "schedule task: Failed to save schedule to NVS");
+        ESP_LOGW(TAG, "schedule task: Failed to save schedule to NVS: %s", esp_err_to_name(err));
         rec->status = ROUTINE_STATUS_FAILED;
     }
-    else
-    {
-        ESP_LOGW(TAG, "schedule task: Success to save schedule to NVS!");
+    else {
+        ESP_LOGI(TAG, "schedule task: Successfully saved schedule to NVS");
     }
+    
+    // Clean up and mark as completed
     free(p);
     float t1 = (float)xTaskGetTickCount() / configTICK_RATE_HZ;
     rec->time_elapsed_s = t1 - t0;
     rec->power_used_mW_s = 0.0f;
     rec->status = ROUTINE_STATUS_COMPLETED;
     ESP_LOGI(TAG, "Schedule task completed for %s (ID=%d)", rec->routine_name, rid);
+
+    // Close out task
+    vTaskDelete(NULL);
 }
 
 /* ==========================================
@@ -1461,6 +1571,7 @@ static esp_err_t device_restart_post_handler(httpd_req_t *req) {
 // wrappers for console‐driven schedule start
 void start_light_schedule(uint8_t schedule[24])
 {
+    ESP_LOGI(TAG, "Starting light schedule with %d entries", 24);
     typedef struct { int routine_id; char name[32]; uint8_t sched[24]; } sched_param_t;
     sched_param_t *p = malloc(sizeof(*p));
     p->routine_id = LIGHT_SCHEDULE_ID;
@@ -1472,6 +1583,7 @@ void start_light_schedule(uint8_t schedule[24])
 
 void start_planter_schedule(uint8_t schedule[24])
 {
+    ESP_LOGI(TAG, "Starting planter schedule with %d entries", 24);
     typedef struct { int routine_id; char name[32]; uint8_t sched[24]; } sched_param_t;
     sched_param_t *p = malloc(sizeof(*p));
     p->routine_id = PLANTER_SCHEDULE_ID;
@@ -1483,6 +1595,7 @@ void start_planter_schedule(uint8_t schedule[24])
 
 void start_air_schedule(uint8_t schedule[24])
 {
+    ESP_LOGI(TAG, "Starting air schedule with %d entries", 24);
     typedef struct { int routine_id; char name[32]; uint8_t sched[24]; } sched_param_t;
     sched_param_t *p = malloc(sizeof(*p));
     p->routine_id = AIR_SCHEDULE_ID;
@@ -1571,7 +1684,7 @@ void schedule_planter_task(void *pvParam) {
                     ESP_LOGI(TAG, "Planter duty: %d%%, sec_into_hour: %d, on_seconds: %d", duty, sec_into_hour, on_seconds);
 
 
-                    { actuator_command_t cmd = { .cmd_type = ACTUATOR_CMD_PLANTER_PUMP_PWM, .value = 100 }; xQueueSend(actuator_queue, &cmd, portMAX_DELAY); }
+                    { actuator_command_t cmd = { .cmd_type = ACTUATOR_CMD_PLANTER_PUMP_PWM, .value = 65 }; xQueueSend(actuator_queue, &cmd, portMAX_DELAY); }
                 } else {
                     { actuator_command_t cmd = { .cmd_type = ACTUATOR_CMD_PLANTER_PUMP_PWM, .value = 0 }; xQueueSend(actuator_queue, &cmd, portMAX_DELAY); }
                 }

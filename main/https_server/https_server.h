@@ -13,8 +13,8 @@ int  get_current_hour(void);
 
 // allow console to start the fill_pod routine (target_mm < 0 uses default)
 void start_fill_pod_routine(int target_mm);
-// allow console to start the empty_pod routine
-void start_empty_pod_routine(void);
+// allow console to start the empty_pod routine (target_pct < 0 uses default)
+void start_empty_pod_routine(int target_pct);
 // allow console to start the calibrate_pod routine
 void start_calibrate_pod_routine(void);
 // allow console to start a 24‑h schedule routine

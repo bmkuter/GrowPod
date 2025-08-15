@@ -2,6 +2,7 @@
 #define DISTANCE_SENSOR_H
 
 #include "esp_err.h"
+#include "pod_state.h"  // For pod state management
 
 #ifdef __cplusplus
 extern "C" {
@@ -9,6 +10,7 @@ extern "C" {
 
 // Height from sensor to bottom of tank (empty), mm
 #define TANK_EMPTY_HEIGHT_MM 87
+#define TANK_DISTANCE_SENSOR_OFFSET_MM 20
 
 // Headspace to maintain at top of tank (mm)
 #define TANK_HEADSPACE_MM 25

@@ -50,12 +50,12 @@ esp_err_t power_monitor_init(power_monitor_chip_t chip_type, uint8_t i2c_address
     current_chip_type = chip_type;
     current_i2c_address = i2c_address;
     
-    // Initialize I2C
-    ret = i2c_master_init();
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to initialize I2C");
-        return ret;
-    }
+    // // Initialize I2C
+    // ret = i2c_master_init();
+    // if (ret != ESP_OK) {
+    //     ESP_LOGE(TAG, "Failed to initialize I2C");
+    //     return ret;
+    // }
     
     // Initialize the appropriate chip
     if (chip_type == POWER_MONITOR_CHIP_INA260) {

@@ -14,6 +14,7 @@
 #include "power_monitor_HAL.h"  // For power monitoring
 #include "distance_sensor.h"    // For water level sensor
 #include "actuator_control.h"   
+#include "pod_state.h"          // For pod state and fill percent
 
 static const char *TAG = "display";
 
@@ -61,12 +62,6 @@ static void lvgl_update_task(void *pvParameter)
     int counter = 0;
     static bool power_monitor_initialized = false;
     
-    // Initialize I2C for power monitor
-    ret = i2c_master_init();
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to initialize I2C: %s", esp_err_to_name(ret));
-    }
-    
     // Initialize power monitor
     if (!power_monitor_initialized) {
         ret = power_monitor_init(POWER_MONITOR_CHIP_INA219, INA219_ADDRESS);
@@ -98,7 +93,13 @@ static void lvgl_update_task(void *pvParameter)
         snprintf(current_str, sizeof(current_str), "Current: %.2f mA", current_ma);
         snprintf(voltage_str, sizeof(voltage_str), "Voltage: %.2f mV", voltage_mv);
         snprintf(power_str, sizeof(power_str), "Power:   %.2f mW", power_mw);
-        snprintf(water_level_str, sizeof(water_level_str), "Water level: %d mm", water_level_mm);
+        // Show water level as percent and then raw mm in ()
+        int fill_percent = pod_state_calc_fill_percent_int(&s_pod_state);
+        if (fill_percent >= 0) {
+            snprintf(water_level_str, sizeof(water_level_str), "Water level: %d mm (%d%%)", water_level_mm, fill_percent);
+        } else {
+            snprintf(water_level_str, sizeof(water_level_str), "Water level: %d mm (Not cal)", water_level_mm);
+        }
         snprintf(timestamp_str, sizeof(timestamp_str), "Updated: %d", (counter)); counter++;
 
         // Read actuator states
@@ -186,8 +187,8 @@ void display_lvgl_init(void)
     lv_label_set_text(timestamp_label, "Updated: 0 s");
     lv_obj_align(timestamp_label, LV_ALIGN_BOTTOM_RIGHT, -5, -5);
 
-    // Launch update task
-    xTaskCreate(lvgl_update_task, "lvgl_update_task", 4096, NULL, 5, NULL);
+    // Launch update task, pinned to core 1
+    xTaskCreatePinnedToCore(lvgl_update_task, "lvgl_update_task", 4096, NULL, 5, NULL, 1);
 }
 
 // Helper: fill entire screen with a solid color

@@ -8,6 +8,7 @@
 #include "esp_vfs_dev.h"
 #include <stdio.h>
 #include <string.h>
+#include "pod_state.h"
 
 static const char *TAG = "UART_COMM";
 
@@ -151,8 +152,16 @@ static int cmd_read_sensors(int argc, char **argv) {
         printf("---------------------------------------\n\n");
     }
 
-    // 5) Water level (using non-blocking function)
-    printf("Water level: %d mm\n", distance_sensor_read_mm());
+    // 5) Water level (using non-blocking function) and percent full
+    int dist_mm = distance_sensor_read_mm();
+    printf("Water level: %d mm\n", dist_mm);
+    
+    int fill_percent = pod_state_calc_fill_percent_int(&s_pod_state);
+    if (fill_percent >= 0) {
+        printf("Percent full: %d%%\n", fill_percent);
+    } else {
+        printf("Percent full: Not calibrated\n");
+    }
 
     return 0;
 }
@@ -310,8 +319,16 @@ static int cmd_fill_pod(int argc, char **argv)
 
 static int cmd_empty_pod(int argc, char **argv)
 {
-    // no args
-    start_empty_pod_routine();
+    int target_pct = -1; // default to empty completely
+
+    if (argc > 1) {
+        target_pct = atoi(argv[1]);
+        printf("Emptying pod to %d%% remaining\n", target_pct);
+    } else {
+        printf("Emptying pod completely\n");
+    }
+    
+    start_empty_pod_routine(target_pct);
     return 0;
 }
 
@@ -463,7 +480,7 @@ static void register_console_commands(void) {
     {
         const esp_console_cmd_t cmd = {
             .command = "empty_pod",
-            .help    = "Start empty_pod routine and log level each second",
+            .help    = "Start empty_pod routine with optional target percentage (0-100). Usage: empty_pod [percent]",
             .hint    = NULL,
             .func    = &cmd_empty_pod,
             .argtable= NULL

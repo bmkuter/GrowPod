@@ -153,7 +153,7 @@ void set_planter_pump_pwm(uint32_t duty_percentage)
         duty_percentage = 100;
     }
 
-    ESP_LOGI(TAG, "Setting planter pump PWM to %lu%%", (unsigned long)duty_percentage);
+    // ESP_LOGI(TAG, "Setting planter pump PWM to %lu%%", (unsigned long)duty_percentage);
 
     esp_err_t ret;
     if (duty_percentage == 0) {

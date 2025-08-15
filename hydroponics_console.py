@@ -492,7 +492,7 @@ class HydroponicsConsole(Cmd):
         dev = devices[self.selected_device]
         url = f"https://{dev['address']}:{dev['port']}/api/routines/{routine_name}"
         try:
-            resp = self.session.post(url, json=json_body, timeout=5)
+            resp = self.session.post(url, json=json_body, timeout=50)
             if resp.status_code == 200:
                 data = resp.json()
                 rid = data.get("routine_id")

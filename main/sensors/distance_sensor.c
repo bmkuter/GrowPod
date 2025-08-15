@@ -131,8 +131,10 @@ static esp_err_t laser_init_hw(void) {
 esp_err_t distance_sensor_init(void)
 {
     uint32_t err = ESP_OK;
-    // Load calibration first
-    load_pod_settings();
+    // Load calibration first for global pod state
+    pod_state_load_settings(&s_pod_state);
+    ESP_LOGI(TAG, "Pod state initialized: empty_raw=%d mm, full_raw=%d mm, headspace_raw=%d mm",
+             s_pod_state.raw_empty_mm, s_pod_state.raw_full_mm, s_pod_state.raw_headspace_mm);
 
     // Create mutex for thread-safe access to sensor
     if (sensor_mutex == NULL) {
@@ -157,10 +159,9 @@ esp_err_t distance_sensor_init(void)
         return err;
     }
     ESP_LOGI(TAG, "Distance sensor initialized");
-    // Load persisted calibration
-    load_pod_settings();    
-    ESP_LOGI(TAG, "Calibration loaded: empty=%d mm, full=%d mm, offset=%d mm, scale=%.3f", 
-            pod_empty_height_mm, pod_full_height_mm, sensor_offset_mm, (double)sensor_scale_factor);
+    // Load persisted calibration (already done at start of this function)
+    ESP_LOGI(TAG, "Calibration loaded: empty=%d mm, full=%d mm, headspace=%d mm", 
+            s_pod_state.raw_empty_mm, s_pod_state.raw_full_mm, s_pod_state.raw_headspace_mm);
 
     return ESP_OK;
 }
@@ -177,10 +178,10 @@ esp_err_t distance_sensor_init(void)
 static int distance_sensor_read_mm_actual(void)
 {
     // Per-reading Kalman filter state variables
-    static float reading_kf_x = -1.0f;       // current reading estimate (mm)
-    static float reading_kf_P = 25.0f;       // reading estimate variance (mm^2)
-    static const float reading_kf_Q = 0.01f; // reading process noise variance
-    static const float reading_kf_R = 100.0f; // individual reading noise variance (higher than averaged)
+    static float reading_kf_x = -1.0f;          // current reading estimate (mm)
+    static float reading_kf_P = 25.0f;          // reading estimate variance (mm^2)
+    static const float reading_kf_Q = 0.07f;     // reading process noise variance
+    static const float reading_kf_R = 15.0f;    // individual reading noise variance (higher than averaged)
     static bool reading_kf_initialized = false; // Flag to check if filter is initialized
 
     const int avg_count = 4;
@@ -288,84 +289,18 @@ int distance_sensor_read_mm(void)
     return last_filtered_distance_mm;
 }
 
-/**
- * @brief Load pod calibration settings from NVS (pod_settings namespace)
- */
+// These functions have been moved to pod_state.c
+// Keeping stubs here for backward compatibility
 esp_err_t load_pod_settings(void)
 {
-    nvs_handle_t handle;
-    esp_err_t err = nvs_open("pod_settings", NVS_READONLY, &handle);
-    if (err == ESP_OK) {
-        int32_t empty = pod_empty_height_mm;
-        if (nvs_get_i32(handle, "empty_height", &empty) == ESP_OK) {
-            pod_empty_height_mm = empty;
-            ESP_LOGI(TAG, "Loaded pod empty height: %d mm", pod_empty_height_mm);
-        } else {
-            ESP_LOGW(TAG, "Pod empty height not in NVS, defaulting to %d mm", pod_empty_height_mm);
-        }
-        int32_t full = pod_full_height_mm;
-        if (nvs_get_i32(handle, "full_height", &full) == ESP_OK) {
-            pod_full_height_mm = full;
-            ESP_LOGI(TAG, "Loaded pod full height: %d mm", pod_full_height_mm);
-        } else {
-            ESP_LOGW(TAG, "Pod full height not in NVS, defaulting to %d mm", pod_full_height_mm);
-        }
-        int32_t offset = sensor_offset_mm;
-        if (nvs_get_i32(handle, "offset_mm", &offset) == ESP_OK) {
-            sensor_offset_mm = offset;
-            ESP_LOGI(TAG, "Loaded sensor offset: %d mm", sensor_offset_mm);
-        } else {
-            ESP_LOGW(TAG, "Sensor offset not in NVS, defaulting to %d mm", sensor_offset_mm);
-        }
-        // Load scale factor (stored as int32 scale*1000)
-        int32_t sf = 1000;
-        if (nvs_get_i32(handle, "scale_factor", &sf) == ESP_OK) {
-            sensor_scale_factor = ((float)sf) / 1000.0f;
-            ESP_LOGI(TAG, "Loaded sensor scale factor: %.3f", (double)sensor_scale_factor);
-        } else {
-            ESP_LOGW(TAG, "Sensor scale factor not in NVS, defaulting to %.3f", (double)sensor_scale_factor);
-        }
-        nvs_close(handle);
-    } else {
-        ESP_LOGW(TAG, "Failed to open pod_settings namespace: %s", esp_err_to_name(err));
-    }
-    return err;
+    ESP_LOGW(TAG, "load_pod_settings is deprecated, use pod_state_load_settings instead");
+    return pod_state_load_settings(&s_pod_state);
 }
 
-/**
- * @brief Save pod calibration settings to NVS (pod_settings namespace)
- */
 esp_err_t save_pod_settings(int empty_mm, int full_mm)
 {
-    nvs_handle_t handle;
-    esp_err_t err = nvs_open("pod_settings", NVS_READWRITE, &handle);
-    if (err == ESP_OK) {
-        // Update calibration parameters in RAM
-        // empty_mm is the actual sensor reading when the tank is empty
-        // TANK_EMPTY_HEIGHT_MM is the physical measurement we expect
-        
-        // Store the raw readings
-        pod_empty_height_mm = empty_mm;
-        pod_full_height_mm = full_mm;
-        
-        // Calculate the offset between actual sensor reading and physical expectation
-        // This offset accounts for sensor non-linearity
-        sensor_offset_mm = empty_mm - TANK_EMPTY_HEIGHT_MM;
-        ESP_LOGI(TAG, "Calibration: sensor reads %d mm when physically it's %d mm (offset=%d mm)", 
-                empty_mm, TANK_EMPTY_HEIGHT_MM, sensor_offset_mm);
-        
-        // Save to NVS
-        nvs_set_i32(handle, "empty_height", empty_mm);
-        nvs_set_i32(handle, "full_height", full_mm);
-        nvs_set_i32(handle, "offset_mm", sensor_offset_mm);
-        // Persist scale factor as int thousandths
-        int32_t sf = (int32_t)(sensor_scale_factor * 1000.0f);
-        nvs_set_i32(handle, "scale_factor", sf);
-        ESP_LOGI(TAG, "Saved sensor scale factor: %.3f", (double)sensor_scale_factor);
-        nvs_commit(handle);
-        nvs_close(handle);
-    }
-    return err;
+    ESP_LOGW(TAG, "save_pod_settings is deprecated, use pod_state_save_settings instead");
+    return pod_state_save_settings(&s_pod_state, empty_mm, full_mm);
 }
 
 /**
@@ -379,8 +314,8 @@ esp_err_t save_pod_settings(int empty_mm, int full_mm)
  */
 void distance_sensor_task(void *pvParameters)
 {
-    // Poll at 10 Hz (every 100ms)
-    const TickType_t delay_ticks = pdMS_TO_TICKS(1000);
+    // Poll at 2 Hz (every 100ms)
+    const TickType_t delay_ticks = pdMS_TO_TICKS(100);
     
     // // Wait a bit before starting to let other initializations complete
     // vTaskDelay(pdMS_TO_TICKS(2000));
@@ -406,9 +341,22 @@ void distance_sensor_task(void *pvParameters)
                 // The water level is now computed directly in distance_sensor_read_mm_actual
                 // No need to recompute - dist_mm already contains final calibrated water level
                 last_filtered_distance_mm = dist_mm;
+                s_pod_state.current_raw_mm = dist_mm; // Update pod state with latest raw reading
                 last_measurement_time = xTaskGetTickCount() * portTICK_PERIOD_MS;
                 retry_count = 0; // Reset retry counter
-                
+
+                // Print percent value and distance every 5 readings
+                if (++log_counter >= 5) {
+                    log_counter = 0;
+                    int cur_fill_percent = pod_state_calc_fill_percent_int(&s_pod_state);
+                    if (cur_fill_percent >= 0) {
+                        ESP_LOGD(TAG, "Distance: %d mm, Fill Percent: %d%%", dist_mm, cur_fill_percent);
+                    } else {
+                        ESP_LOGD(TAG, "Distance: %d mm, Fill Percent: Not calibrated", dist_mm);
+                    }
+                }
+
+
                 // Check for significant distance changes (> 5mm or 5% change)
                 int distance_diff = abs(dist_mm - last_reported_distance);
                 if (last_reported_distance < 0 || 
@@ -475,37 +423,33 @@ int distance_sensor_get_max_level_mm(void)
     // Set TAG to be function name for logging
     static const char *LOCAL_TAG = "DIST_SENSOR_MAX_LEVEL";
 
-    // Our physical calibration reference points
-    int raw_empty = pod_empty_height_mm;  // Physical distance when empty
-    
-    // The actual sensor calibration values, which may differ from physical expectations
-    int sensor_empty = raw_empty + sensor_offset_mm;    // Actual sensor reading when empty
-    int sensor_full = pod_full_height_mm;               // Actual sensor reading when full
-    int sensor_range = sensor_empty - sensor_full;      // Actual sensor reading range
+    // Use pod_state calibration values
+    int raw_empty = s_pod_state.raw_empty_mm;  // Raw distance when empty
+    int raw_full = s_pod_state.raw_full_mm;    // Raw distance when full
+    int sensor_range = raw_empty - raw_full;   // Actual sensor reading range
     
     // Adjust range to account for headspace
     int adjusted_range = sensor_range;
-    if (sensor_range >= (TANK_EMPTY_HEIGHT_MM - TANK_HEADSPACE_MM)) {
-        adjusted_range = sensor_range - TANK_HEADSPACE_MM;
+    if (sensor_range >= s_pod_state.raw_headspace_mm) {
+        adjusted_range = sensor_range - s_pod_state.raw_headspace_mm;
         #if SENSOR_VERBOSE_LOGS
         ESP_LOGI(LOCAL_TAG, "Max fill level accounts for headspace: %d -> %d mm (headspace=%d mm)", 
-                sensor_range, adjusted_range, TANK_HEADSPACE_MM);
+                sensor_range, adjusted_range, s_pod_state.raw_headspace_mm);
         #endif
     } else {
         ESP_LOGW(LOCAL_TAG, "Cannot apply full headspace: range=%d mm < headspace=%d mm", 
-                sensor_range, TANK_HEADSPACE_MM);
+                sensor_range, s_pod_state.raw_headspace_mm);
     }
     
-    // Convert to depth: sensor_empty maps to depth 0, adjusted_range is max depth
+    // Convert to depth: raw_empty maps to depth 0, adjusted_range is max depth
     float depth_mm = (float)adjusted_range;
     
-    // Apply scale factor (the ratio between actual physical measurements and sensor readings)
-    float max_level = depth_mm * sensor_scale_factor;
+    // No scale factor needed now that we're using pod_state calibration
     #if SENSOR_VERBOSE_LOGS
-    ESP_LOGI(LOCAL_TAG, "Max fill level: %d mm (adjusted from %d mm with scale factor %.3f)", 
-            (int)(max_level + 0.5f), adjusted_range, (double)sensor_scale_factor);
+    ESP_LOGI(LOCAL_TAG, "Max fill level: %d mm (adjusted from %d mm)",
+            adjusted_range, sensor_range);
     #endif
-    return (int)(max_level + 0.5f);
+    return adjusted_range;
 }
 
 /**
@@ -528,18 +472,10 @@ void distance_sensor_set_scale_factor(float factor)
  */
 int distance_sensor_get_absolute_max_level_mm(void)
 {
-    // Our physical calibration reference points
-    int raw_empty = pod_empty_height_mm;  // Physical distance when empty
+    // Use pod_state calibration values
+    int raw_empty = s_pod_state.raw_empty_mm;  // Raw distance when empty
+    int raw_full = s_pod_state.raw_full_mm;    // Raw distance when full
+    int sensor_range = raw_empty - raw_full;   // Actual sensor reading range
     
-    // The actual sensor calibration values, which may differ from physical expectations
-    int sensor_empty = raw_empty + sensor_offset_mm;  // Actual sensor reading when empty
-    int sensor_full = pod_full_height_mm;            // Actual sensor reading when full
-    int sensor_range = sensor_empty - sensor_full;   // Actual sensor reading range
-    
-    // Convert to depth: sensor_empty maps to depth 0, sensor_range is max depth
-    float depth_mm = (float)sensor_range;
-    
-    // Apply scale factor (the ratio between actual physical measurements and sensor readings)
-    float max_level = depth_mm * sensor_scale_factor;
-    return (int)(max_level + 0.5f);
+    return sensor_range;
 }

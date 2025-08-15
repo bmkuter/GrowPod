@@ -15,6 +15,7 @@ idf_component_register(
         "Networking/wifi_manager.c"
         "control_logic/control_logic.c"
         "display/display.c"
+        "pod_state/pod_state.c"
     INCLUDE_DIRS
         "."
         "ina_power_monitor"
@@ -25,6 +26,7 @@ idf_component_register(
         "Networking"
         "control_logic"
         "display"
+        "pod_state"
     # REQUIRES
     #     esp_vfs_dev      # VFS driver for UART/USB Serial JTAG
     #     driver           # GPIO, LEDC, UART, etc.
