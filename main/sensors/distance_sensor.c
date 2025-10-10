@@ -6,18 +6,13 @@
 #include <string.h>
 #include <math.h>  // For sqrtf() in standard deviation calculation
 
+#if ACTIVE_SENSOR == USE_CONTACT_SENSOR
+#include "contact_sensor.h"
+#endif
+
 // NVS for pod calibration persistence
 #include "nvs_flash.h"
 #include "nvs.h"
-
-// Define which sensor implementation to use
-#define USE_LASER_SENSOR 1        // Original laser sensor implementation
-
-// Enable or disable verbose sensor reading logs
-#define SENSOR_VERBOSE_LOGS 1  // Set to 1 to enable detailed sensor logs
-
-// Choose which implementation to use - set only one to 1
-#define ACTIVE_SENSOR USE_LASER_SENSOR
 
 static const char *TAG = "DIST_SENSOR";
 
@@ -150,6 +145,9 @@ esp_err_t distance_sensor_init(void)
 #if ACTIVE_SENSOR == USE_LASER_SENSOR
     ESP_LOGI(TAG, "Distance sensor: LASER mode (legacy), I2C=0x74");
     err = laser_init_hw();
+#elif ACTIVE_SENSOR == USE_CONTACT_SENSOR
+    ESP_LOGI(TAG, "Distance sensor: CONTACT mode via MCP23017");
+    err = contact_sensor_init_hw();
 #else
     ESP_LOGE(TAG, "No sensor mode defined!");
     return ESP_FAIL;
@@ -333,8 +331,13 @@ void distance_sensor_task(void *pvParameters)
         // Try to acquire mutex with a shorter timeout since this is a background task
         if (xSemaphoreTake(sensor_mutex, pdMS_TO_TICKS(500)) == pdTRUE) {
             // Take a direct sensor reading (already Kalman filtered internally)
-            int dist_mm = distance_sensor_read_mm_actual();
             
+#ifdef USE_CONTACT_SENSOR
+            int dist_mm = contact_sensor_read_mm_actual();
+#else
+            int dist_mm = distance_sensor_read_mm_actual();
+#endif
+
             if (dist_mm >= 0) {
                 // Valid raw reading - update cached raw value
                 last_valid_distance_mm = dist_mm;

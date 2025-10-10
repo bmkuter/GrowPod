@@ -10,7 +10,7 @@
 static const char *TAG = "POWER_MONITOR_HAL";
 
 // Variables to keep track of current configuration
-static power_monitor_chip_t current_chip_type = POWER_MONITOR_CHIP_INA260; // Default to INA260
+static power_monitor_chip_t current_chip_type = POWER_MONITOR_CHIP_INA219; // Default to INA219
 static uint8_t current_i2c_address = 0x40;                                // Default address
 
 // Initialize I2C master - reusing the same function from ina260.c for compatibility

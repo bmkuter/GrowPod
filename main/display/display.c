@@ -118,7 +118,7 @@ static void lvgl_update_task(void *pvParameter)
         lv_label_set_text(planter_pwm_label, planter_pwm_str);
         lv_label_set_text(led_pwm_label,     led_pwm_str);
 
-        vTaskDelay(pdMS_TO_TICKS(250));
+        vTaskDelay(pdMS_TO_TICKS(50));
     }
 }
 

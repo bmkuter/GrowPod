@@ -14,7 +14,7 @@
 #define UART_PORT_NUM       UART_NUM_1
 #define UART_BAUD_RATE      115200
 #define UART_TX_GPIO        17
-#define UART_RX_GPIO        18
+#define UART_RX_GPIO        16
 
 // Function prototypes
 void uart_comm_init(void);

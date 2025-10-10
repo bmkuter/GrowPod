@@ -83,7 +83,7 @@ void uart_console_task(void *pvParameter)
         char* line = linenoise("hydroponics> ");
         if (line == NULL) { // EOF or error
             ESP_LOGW(TAG, "No input received, restart console task loop");
-            vTaskDelay(pdMS_TO_TICKS(100));
+            vTaskDelay(pdMS_TO_TICKS(25));
             continue;
         }
 
