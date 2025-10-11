@@ -80,8 +80,8 @@ void set_timezone_to_boston(void) {
 
 void init_screen_wrapper()
 {
-        /* Initialize LVGL port */
-    lvgl_port_init(&((const lvgl_port_cfg_t) { .task_priority = 4, .task_stack = 4096, .timer_period_ms = 5 }));
+        /* Initialize LVGL port with more reasonable timer period */
+    lvgl_port_init(&((const lvgl_port_cfg_t) { .task_priority = 4, .task_stack = 4096, .timer_period_ms = 20 }));
 
     /* Initialize display driver and get handles */
     esp_lcd_panel_handle_t panel = display_init();

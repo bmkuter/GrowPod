@@ -49,8 +49,11 @@ static lv_obj_t *timestamp_label;
 static lv_obj_t *planter_pwm_label;
 static lv_obj_t *led_pwm_label;
 
-// Task to update the display with sensor readings
-static void lvgl_update_task(void *pvParameter)
+// LVGL timer for updating sensor readings
+static lv_timer_t *sensor_update_timer = NULL;
+
+// Timer callback to update the display with sensor readings
+static void lvgl_sensor_update_cb(lv_timer_t *timer)
 {
     esp_err_t ret;
     float current_ma, voltage_mv, power_mw;
@@ -59,7 +62,7 @@ static void lvgl_update_task(void *pvParameter)
     char current_str[32], voltage_str[32], power_str[32],
          water_level_str[32], timestamp_str[32],
          planter_pwm_str[32], led_pwm_str[32];
-    int counter = 0;
+    static int counter = 0;
     static bool power_monitor_initialized = false;
     
     // Initialize power monitor
@@ -72,54 +75,50 @@ static void lvgl_update_task(void *pvParameter)
         }
     }
 
-    while (1) {
-        // Read power monitor data
-        ret = power_monitor_read_current(&current_ma);
-        ret |= power_monitor_read_voltage(&voltage_mv);
-        ret |= power_monitor_read_power(&power_mw);
-        
-        if (ret != ESP_OK) {
-            ESP_LOGW(TAG, "Error reading power monitor data: %s", esp_err_to_name(ret));
-            // Use default values if read fails
-            current_ma = 0.0f;
-            voltage_mv = 0.0f;
-            power_mw = 0.0f;
-        }
-        
-        // Read water level sensor (use non-blocking function)
-        water_level_mm = distance_sensor_read_mm();
-        
-        // Format strings for display
-        snprintf(current_str, sizeof(current_str), "Current: %.2f mA", current_ma);
-        snprintf(voltage_str, sizeof(voltage_str), "Voltage: %.2f mV", voltage_mv);
-        snprintf(power_str, sizeof(power_str), "Power:   %.2f mW", power_mw);
-        // Show water level as percent and then raw mm in ()
-        int fill_percent = pod_state_calc_fill_percent_int(&s_pod_state);
-        if (fill_percent >= 0) {
-            snprintf(water_level_str, sizeof(water_level_str), "Water level: %d mm (%d%%)", water_level_mm, fill_percent);
-        } else {
-            snprintf(water_level_str, sizeof(water_level_str), "Water level: %d mm (Not cal)", water_level_mm);
-        }
-        snprintf(timestamp_str, sizeof(timestamp_str), "Updated: %d", (counter)); counter++;
-
-        // Read actuator states
-        const actuator_info_t *act = actuator_control_get_info();
-        float planter_duty = act[ACTUATOR_IDX_PLANTER_PUMP].duty_percentage;
-        float led_duty     = act[ACTUATOR_IDX_LED_ARRAY].duty_percentage;
-        snprintf(planter_pwm_str, sizeof(planter_pwm_str), "Planter: %.0f%%", planter_duty);
-        snprintf(led_pwm_str,     sizeof(led_pwm_str),     "LED: %.0f%%",     led_duty);
-
-        // Update UI labels
-        lv_label_set_text(current_label, current_str);
-        lv_label_set_text(voltage_label, voltage_str);
-        lv_label_set_text(power_label, power_str);
-        lv_label_set_text(water_level_label, water_level_str);
-        lv_label_set_text(timestamp_label, timestamp_str);
-        lv_label_set_text(planter_pwm_label, planter_pwm_str);
-        lv_label_set_text(led_pwm_label,     led_pwm_str);
-
-        vTaskDelay(pdMS_TO_TICKS(50));
+    // Read power monitor data
+    ret = power_monitor_read_current(&current_ma);
+    ret |= power_monitor_read_voltage(&voltage_mv);
+    ret |= power_monitor_read_power(&power_mw);
+    
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "Error reading power monitor data: %s", esp_err_to_name(ret));
+        // Use default values if read fails
+        current_ma = 0.0f;
+        voltage_mv = 0.0f;
+        power_mw = 0.0f;
     }
+    
+    // Read water level sensor (use non-blocking function)
+    water_level_mm = distance_sensor_read_mm();
+    
+    // Format strings for display
+    snprintf(current_str, sizeof(current_str), "Current: %.2f mA", current_ma);
+    snprintf(voltage_str, sizeof(voltage_str), "Voltage: %.2f mV", voltage_mv);
+    snprintf(power_str, sizeof(power_str), "Power:   %.2f mW", power_mw);
+    // Show water level as percent and then raw mm in ()
+    int fill_percent = pod_state_calc_fill_percent_int(&s_pod_state);
+    if (fill_percent >= 0) {
+        snprintf(water_level_str, sizeof(water_level_str), "Water level: %d mm (%d%%)", water_level_mm, fill_percent);
+    } else {
+        snprintf(water_level_str, sizeof(water_level_str), "Water level: %d mm (Not cal)", water_level_mm);
+    }
+    snprintf(timestamp_str, sizeof(timestamp_str), "Updated: %d", (counter)); counter++;
+
+    // Read actuator states
+    const actuator_info_t *act = actuator_control_get_info();
+    float planter_duty = act[ACTUATOR_IDX_PLANTER_PUMP].duty_percentage;
+    float led_duty     = act[ACTUATOR_IDX_LED_ARRAY].duty_percentage;
+    snprintf(planter_pwm_str, sizeof(planter_pwm_str), "Planter: %.0f%%", planter_duty);
+    snprintf(led_pwm_str,     sizeof(led_pwm_str),     "LED: %.0f%%",     led_duty);
+
+    // Update UI labels (uncomment as needed)
+    lv_label_set_text(current_label, current_str);
+    lv_label_set_text(voltage_label, voltage_str);
+    lv_label_set_text(power_label, power_str);
+    lv_label_set_text(water_level_label, water_level_str);
+    lv_label_set_text(timestamp_label, timestamp_str);
+    lv_label_set_text(planter_pwm_label, planter_pwm_str);
+    lv_label_set_text(led_pwm_label,     led_pwm_str);
 }
 
 #define SIZE_16_FONT  &lv_font_unscii_16
@@ -187,8 +186,11 @@ void display_lvgl_init(void)
     lv_label_set_text(timestamp_label, "Updated: 0 s");
     lv_obj_align(timestamp_label, LV_ALIGN_BOTTOM_RIGHT, -5, -5);
 
-    // Launch update task, pinned to core 1
-    xTaskCreatePinnedToCore(lvgl_update_task, "lvgl_update_task", 4096, NULL, 5, NULL, 1);
+    // Create LVGL timer for sensor updates (250ms = 4Hz)
+    sensor_update_timer = lv_timer_create(lvgl_sensor_update_cb, 250, NULL);
+    if (sensor_update_timer == NULL) {
+        ESP_LOGE(TAG, "Failed to create LVGL sensor update timer");
+    }
 }
 
 // Helper: fill entire screen with a solid color
