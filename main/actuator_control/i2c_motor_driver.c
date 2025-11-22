@@ -2,8 +2,7 @@
 #include "esp_log.h"
 #include <string.h>
 #include "power_monitor_HAL.h"  // Include for shared I2C initialization
-#include "nvs_flash.h"
-#include "nvs.h"
+#include "filesystem/config_manager.h"  // For JSON-based configuration
 
 static const char *TAG = "I2C_MOTOR";
 
@@ -374,27 +373,26 @@ esp_err_t i2c_motor_get_direction_config(motor_direction_config_t *config)
 
 esp_err_t i2c_motor_load_direction_settings(void)
 {
-    nvs_handle_t handle;
-    esp_err_t err = nvs_open("motor_settings", NVS_READONLY, &handle);
+    esp_err_t err = config_load_motor_directions(
+        &s_motor_direction_config.motor1_inverted,
+        &s_motor_direction_config.motor2_inverted,
+        &s_motor_direction_config.motor3_inverted,
+        &s_motor_direction_config.motor4_inverted
+    );
+    
     if (err == ESP_OK) {
-        size_t required_size = sizeof(motor_direction_config_t);
-        err = nvs_get_blob(handle, "direction_config", &s_motor_direction_config, &required_size);
-        if (err == ESP_OK) {
-            ESP_LOGI(TAG, "Motor direction settings loaded from NVS");
-            ESP_LOGI(TAG, "  Motor 1 (Planter): %s", s_motor_direction_config.motor1_inverted ? "inverted" : "normal");
-            ESP_LOGI(TAG, "  Motor 2 (Food):    %s", s_motor_direction_config.motor2_inverted ? "inverted" : "normal");
-            ESP_LOGI(TAG, "  Motor 3 (Source):  %s", s_motor_direction_config.motor3_inverted ? "inverted" : "normal");
-            ESP_LOGI(TAG, "  Motor 4 (LED):     %s", s_motor_direction_config.motor4_inverted ? "inverted" : "normal");
-        } else if (err == ESP_ERR_NVS_NOT_FOUND) {
-            ESP_LOGW(TAG, "Motor direction settings not found in NVS, using defaults");
-            err = ESP_OK; // Not an error, just use defaults
-        } else {
-            ESP_LOGE(TAG, "Failed to load motor direction settings: %s", esp_err_to_name(err));
-        }
-        nvs_close(handle);
+        ESP_LOGI(TAG, "Motor direction settings loaded from JSON");
+        ESP_LOGI(TAG, "  Motor 1 (Planter): %s", s_motor_direction_config.motor1_inverted ? "inverted" : "normal");
+        ESP_LOGI(TAG, "  Motor 2 (Food):    %s", s_motor_direction_config.motor2_inverted ? "inverted" : "normal");
+        ESP_LOGI(TAG, "  Motor 3 (Source):  %s", s_motor_direction_config.motor3_inverted ? "inverted" : "normal");
+        ESP_LOGI(TAG, "  Motor 4 (LED):     %s", s_motor_direction_config.motor4_inverted ? "inverted" : "normal");
+    } else if (err == ESP_ERR_NOT_FOUND) {
+        ESP_LOGW(TAG, "Motor direction settings not found, using defaults");
+        err = ESP_OK; // Not an error, just use defaults
     } else {
-        ESP_LOGW(TAG, "Failed to open motor_settings namespace: %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, "Failed to load motor direction settings: %s", esp_err_to_name(err));
     }
+    
     return err;
 }
 
@@ -453,27 +451,20 @@ esp_err_t i2c_motor_set_direction_config(const motor_direction_config_t *config)
 
 esp_err_t i2c_motor_save_direction_settings(void)
 {
-    nvs_handle_t handle;
-    esp_err_t err = nvs_open("motor_settings", NVS_READWRITE, &handle);
+    esp_err_t err = config_save_motor_directions(
+        s_motor_direction_config.motor1_inverted,
+        s_motor_direction_config.motor2_inverted,
+        s_motor_direction_config.motor3_inverted,
+        s_motor_direction_config.motor4_inverted
+    );
     if (err == ESP_OK) {
-        err = nvs_set_blob(handle, "direction_config", &s_motor_direction_config, sizeof(motor_direction_config_t));
-        if (err == ESP_OK) {
-            err = nvs_commit(handle);
-            if (err == ESP_OK) {
-                ESP_LOGI(TAG, "Motor direction config saved: M1=%s, M2=%s, M3=%s, M4=%s",
-                    s_motor_direction_config.motor1_inverted ? "inverted" : "normal",
-                    s_motor_direction_config.motor2_inverted ? "inverted" : "normal",
-                    s_motor_direction_config.motor3_inverted ? "inverted" : "normal",
-                    s_motor_direction_config.motor4_inverted ? "inverted" : "normal");
-            } else {
-                ESP_LOGE(TAG, "Error committing motor direction config: %s", esp_err_to_name(err));
-            }
-        } else {
-            ESP_LOGE(TAG, "Error setting motor direction config: %s", esp_err_to_name(err));
-        }
-        nvs_close(handle);
+        ESP_LOGI(TAG, "Motor direction config saved: M1=%s, M2=%s, M3=%s, M4=%s",
+            s_motor_direction_config.motor1_inverted ? "inverted" : "normal",
+            s_motor_direction_config.motor2_inverted ? "inverted" : "normal",
+            s_motor_direction_config.motor3_inverted ? "inverted" : "normal",
+            s_motor_direction_config.motor4_inverted ? "inverted" : "normal");
     } else {
-        ESP_LOGE(TAG, "Failed to open motor_settings namespace for write: %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, "Failed to save motor direction config: %s", esp_err_to_name(err));
     }
     return err;
 }

@@ -10,6 +10,7 @@
 #include <string.h>
 #include "pod_state.h"
 #include "i2c_motor_driver.h"  // For motor direction configuration
+#include "filesystem/filesystem_manager.h"  // For filesystem operations
 
 static const char *TAG = "UART_COMM";
 
@@ -29,6 +30,10 @@ static int cmd_showschedules(int argc, char **argv);
 static int cmd_motor_direction(int argc, char **argv);  // Motor direction configuration command
 static int cmd_motor_test(int argc, char **argv);       // Motor test command for calibration
 static int cmd_foodpump(int argc, char **argv);         // Food pump control command
+static int cmd_fs_list(int argc, char **argv);          // List filesystem contents
+static int cmd_fs_cat(int argc, char **argv);           // Display file contents
+static int cmd_fs_info(int argc, char **argv);          // Show filesystem info
+static int cmd_fs_test(int argc, char **argv);          // Test filesystem operations
 
 // Function to register console commands
 static void register_console_commands(void);
@@ -565,6 +570,105 @@ static int cmd_motor_test(int argc, char **argv) {
     return 0;
 }
 
+// Command handler: fs_list
+static int cmd_fs_list(int argc, char **argv) {
+    const char *path = LFS_MOUNT_POINT;
+    
+    if (argc == 2) {
+        path = argv[1];
+    }
+    
+    if (!filesystem_is_mounted()) {
+        printf("Error: Filesystem not mounted\n");
+        return 1;
+    }
+    
+    esp_err_t err = filesystem_list_dir_recursive(path);
+    if (err != ESP_OK) {
+        printf("Error listing directory: %s\n", esp_err_to_name(err));
+        return 1;
+    }
+    
+    return 0;
+}
+
+// Command handler: fs_cat
+static int cmd_fs_cat(int argc, char **argv) {
+    if (argc < 2) {
+        printf("Usage: fs_cat <file_path>\n");
+        printf("Example: fs_cat /lfs/config/motors.json\n");
+        return 1;
+    }
+    
+    if (!filesystem_is_mounted()) {
+        printf("Error: Filesystem not mounted\n");
+        return 1;
+    }
+    
+    char *buffer = NULL;
+    size_t size = 0;
+    
+    esp_err_t err = filesystem_read_file(argv[1], &buffer, &size);
+    if (err != ESP_OK) {
+        printf("Error reading file: %s\n", esp_err_to_name(err));
+        return 1;
+    }
+    
+    printf("--- File: %s (%zu bytes) ---\n", argv[1], size);
+    printf("%s", buffer);
+    if (size > 0 && buffer[size - 1] != '\n') {
+        printf("\n");  // Add newline if file doesn't end with one
+    }
+    printf("--- End of file ---\n");
+    
+    free(buffer);
+    return 0;
+}
+
+// Command handler: fs_info
+static int cmd_fs_info(int argc, char **argv) {
+    if (!filesystem_is_mounted()) {
+        printf("Filesystem Status: NOT MOUNTED\n");
+        return 1;
+    }
+    
+    printf("Filesystem Status: MOUNTED\n");
+    printf("Mount Point: %s\n", LFS_MOUNT_POINT);
+    
+    size_t total = 0, used = 0;
+    esp_err_t err = filesystem_get_usage(&total, &used);
+    if (err == ESP_OK) {
+        printf("Total Size: %d bytes (%.2f KB)\n", total, total / 1024.0);
+        printf("Used Space: %d bytes (%.2f KB)\n", used, used / 1024.0);
+        printf("Free Space: %d bytes (%.2f KB)\n", total - used, (total - used) / 1024.0);
+        printf("Usage: %.1f%%\n", 100.0 * used / total);
+    } else {
+        printf("Error getting filesystem info: %s\n", esp_err_to_name(err));
+        return 1;
+    }
+    
+    return 0;
+}
+
+// Command handler: fs_test
+static int cmd_fs_test(int argc, char **argv) {
+    if (!filesystem_is_mounted()) {
+        printf("Error: Filesystem not mounted\n");
+        return 1;
+    }
+    
+    printf("Running filesystem test...\n");
+    esp_err_t err = filesystem_test();
+    if (err == ESP_OK) {
+        printf("Filesystem test completed successfully!\n");
+    } else {
+        printf("Filesystem test failed: %s\n", esp_err_to_name(err));
+        return 1;
+    }
+    
+    return 0;
+}
+
 static void register_console_commands(void) {
     // Air pump command
     {
@@ -740,6 +844,54 @@ static void register_console_commands(void) {
             .help    = "Test motor direction for calibration",
             .hint    = "<motor_num> <forward|backward|stop>",
             .func    = &cmd_motor_test,
+            .argtable= NULL
+        };
+        ESP_ERROR_CHECK(esp_console_cmd_register(&cmd));
+    }
+
+    // Filesystem list command
+    {
+        const esp_console_cmd_t cmd = {
+            .command = "fs_list",
+            .help    = "List files recursively with full paths",
+            .hint    = "[path]",
+            .func    = &cmd_fs_list,
+            .argtable= NULL
+        };
+        ESP_ERROR_CHECK(esp_console_cmd_register(&cmd));
+    }
+
+    // Filesystem cat command
+    {
+        const esp_console_cmd_t cmd = {
+            .command = "fs_cat",
+            .help    = "Display file contents",
+            .hint    = "<file_path>",
+            .func    = &cmd_fs_cat,
+            .argtable= NULL
+        };
+        ESP_ERROR_CHECK(esp_console_cmd_register(&cmd));
+    }
+
+    // Filesystem info command
+    {
+        const esp_console_cmd_t cmd = {
+            .command = "fs_info",
+            .help    = "Show filesystem usage information",
+            .hint    = NULL,
+            .func    = &cmd_fs_info,
+            .argtable= NULL
+        };
+        ESP_ERROR_CHECK(esp_console_cmd_register(&cmd));
+    }
+
+    // Filesystem test command
+    {
+        const esp_console_cmd_t cmd = {
+            .command = "fs_test",
+            .help    = "Run filesystem read/write test",
+            .hint    = NULL,
+            .func    = &cmd_fs_test,
             .argtable= NULL
         };
         ESP_ERROR_CHECK(esp_console_cmd_register(&cmd));

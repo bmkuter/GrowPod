@@ -17,6 +17,8 @@ idf_component_register(
         "control_logic/control_logic.c"
         "display/display.c"
         "pod_state/pod_state.c"
+        "filesystem/filesystem_manager.c"
+        "filesystem/config_manager.c"
     INCLUDE_DIRS
         "."
         "ina_power_monitor"
@@ -28,6 +30,7 @@ idf_component_register(
         "control_logic"
         "display"
         "pod_state"
+        "filesystem"
     # REQUIRES
     #     esp_vfs_dev      # VFS driver for UART/USB Serial JTAG
     #     driver           # GPIO, LEDC, UART, etc.

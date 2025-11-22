@@ -6,9 +6,8 @@
 #include "cJSON.h"
 #include <time.h>
 #include "esp_sntp.h"
-#include "nvs_flash.h"
-#include "nvs.h"
 #include <esp_wifi.h>
+#include "../filesystem/config_manager.h"
 
 #include "actuator_control.h"   // For set_air_pump_pwm, set_source_pump_pwm, set_drain_pump_pwm, set_planter_pump_pwm, set_led_array_binary (or set_led_array_pwm)
 #include "power_monitor_HAL.h"  // For power monitoring abstraction
@@ -153,60 +152,45 @@ int get_current_hour(void)
 /* ==========================================
  * NVS Helpers (to persist schedules)
  * ========================================== */
-static esp_err_t save_schedule_to_nvs(schedule_type_t type, const uint8_t schedule[24]) {
-    nvs_handle_t my_handle;
-    esp_err_t err = nvs_open("user_settings", NVS_READWRITE, &my_handle);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "NVS open error: %s", esp_err_to_name(err));
-        return err;
-    }
-    const char* key = "";
+static const char* schedule_type_to_string(schedule_type_t type) {
     switch (type) {
-       case SCHEDULE_TYPE_LIGHT:   key = "light_sched";   break;
-       case SCHEDULE_TYPE_PLANTER: key = "planter_sched"; break;
-       case SCHEDULE_TYPE_AIR:     key = "air_sched";     break;
-       default: nvs_close(my_handle); return ESP_ERR_INVALID_ARG;
+        case SCHEDULE_TYPE_LIGHT:   return "light";
+        case SCHEDULE_TYPE_PLANTER: return "planter";
+        case SCHEDULE_TYPE_AIR:     return "air";
+        default:                    return NULL;
     }
-    err = nvs_set_blob(my_handle, key, schedule, 24 * sizeof(uint8_t));
+}
+
+static esp_err_t save_schedule_to_nvs(schedule_type_t type, const uint8_t schedule[24]) {
+    const char* type_str = schedule_type_to_string(type);
+    if (type_str == NULL) {
+        ESP_LOGE(TAG, "Invalid schedule type: %d", type);
+        return ESP_ERR_INVALID_ARG;
+    }
+    
+    esp_err_t err = config_save_schedule(type_str, schedule);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "NVS set blob error: %s", esp_err_to_name(err));
-        nvs_close(my_handle);
-        return err;
+        ESP_LOGE(TAG, "Failed to save schedule: %s", esp_err_to_name(err));
     }
-    err = nvs_commit(my_handle);
-    nvs_close(my_handle);
     return err;
 }
 
 static esp_err_t load_schedule_from_nvs(schedule_type_t type, uint8_t schedule[24]) {
-    nvs_handle_t my_handle;
-    // Log type
-    ESP_LOGI(TAG, "Loading schedule from NVS: %d", type);
-    esp_err_t err = nvs_open("user_settings", NVS_READONLY, &my_handle);
+    const char* type_str = schedule_type_to_string(type);
+    if (type_str == NULL) {
+        ESP_LOGE(TAG, "Invalid schedule type: %d", type);
+        return ESP_ERR_INVALID_ARG;
+    }
+    
+    ESP_LOGI(TAG, "Loading schedule from JSON: %s", type_str);
+    
+    esp_err_t err = config_load_schedule(type_str, schedule);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "NVS open error (read): %s", esp_err_to_name(err));
-        return err;
-    }
-
-    const char* key = "";
-    switch (type) {
-       case SCHEDULE_TYPE_LIGHT:   key = "light_sched";   break;
-       case SCHEDULE_TYPE_PLANTER: key = "planter_sched"; break;
-       case SCHEDULE_TYPE_AIR:     key = "air_sched";     break;
-       default:
-         nvs_close(my_handle);
-         return ESP_ERR_INVALID_ARG;
-    }
-
-    size_t required_size = 24 * sizeof(uint8_t);
-    err = nvs_get_blob(my_handle, key, schedule, &required_size);
-    if (err == ESP_ERR_NVS_NOT_FOUND) {
-        // If the key doesn't exist, default to all zeros
+        ESP_LOGE(TAG, "Failed to load schedule (defaulting to zeros): %s", esp_err_to_name(err));
+        // Default to all zeros if load fails
         memset(schedule, 0, 24);
         err = ESP_OK; // Not an error, just means no existing schedule
     }
-
-    nvs_close(my_handle);
 
     // Build a comma-separated string of the 24 elements
     char buf[128];
@@ -219,8 +203,8 @@ static esp_err_t load_schedule_from_nvs(schedule_type_t type, uint8_t schedule[2
              schedule[16], schedule[17], schedule[18], schedule[19],
              schedule[20], schedule[21], schedule[22], schedule[23]);
 
-    ESP_LOGI(TAG, "load_schedule_from_nvs('%s') => err=%s, schedule=[%s]",
-             key, esp_err_to_name(err), buf);
+    ESP_LOGI(TAG, "load_schedule_from_json => err=%s, schedule=[%s]",
+             esp_err_to_name(err), buf);
 
     return err;
 }
@@ -233,7 +217,6 @@ static esp_err_t load_schedule_from_nvs(schedule_type_t type, uint8_t schedule[2
  * applies them if hour changes or schedule updated.
  */
 void schedule_manager_task(void *pvParam) {
-    int last_hour = -1;
     schedule_message_t msg;
     while (1) {
         // Wait up to 10s for a schedule message and update appropriate global schedule
@@ -1552,12 +1535,16 @@ static esp_err_t hostname_suffix_post_handler(httpd_req_t *req) {
     }
     
     printf("Hostname suffix updated to: %s\n", suffix_item->valuestring);
-    nvs_handle_t handle;
-    if (nvs_open("user_settings", NVS_READWRITE, &handle) == ESP_OK) {
-        nvs_set_str(handle, "mdns_suffix", suffix_item->valuestring);
-        nvs_commit(handle);
-        nvs_close(handle);
+    
+    // Save to JSON configuration
+    esp_err_t err = config_save_mdns_suffix(suffix_item->valuestring);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to save mDNS suffix: %s", esp_err_to_name(err));
+        cJSON_Delete(root);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Failed to save suffix");
+        return ESP_FAIL;
     }
+    
     cJSON_Delete(root);
     httpd_resp_sendstr(req, "Suffix updated");
     return ESP_OK;

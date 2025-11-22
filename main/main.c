@@ -14,10 +14,11 @@
 #include "control_logic.h"
 #include "esp_sntp.h"
 #include "nvs_flash.h"
-#include "nvs.h"
 #include "display.h"
 #include "esp_lvgl_port.h"
 #include "pod_state.h"
+#include "filesystem/filesystem_manager.h"
+#include "filesystem/config_manager.h"
 
 #define ACTUATOR_TASK_SIZE (1024 * 4) // 4 KB stack size for actuator task
 #define UI_TASK_SIZE (1024 * 4) // 4 KB stack size for UI task
@@ -27,14 +28,13 @@ static const char *TAG = "APP_MAIN";
 void start_mdns_service(void) {
     // Initialize mDNS
     ESP_ERROR_CHECK(mdns_init());
+    
     char customSuffix[64] = "UNMODIFIED";
-    size_t suffix_len = sizeof(customSuffix);
-    nvs_handle_t handle;
-    esp_err_t err = nvs_open("user_settings", NVS_READONLY, &handle);
-    if (err == ESP_OK) {
-        nvs_get_str(handle, "mdns_suffix", customSuffix, &suffix_len);
-        nvs_close(handle);
+    esp_err_t err = config_load_mdns_suffix(customSuffix, sizeof(customSuffix));
+    if (err != ESP_OK) {
+        ESP_LOGW("MDNS", "Failed to load mDNS suffix, using default: %s", customSuffix);
     }
+    
     char fullHostname[128];
     snprintf(fullHostname, sizeof(fullHostname), "hydroponics_device_%s", customSuffix);
     printf("mdns: %s\n", fullHostname);
@@ -132,7 +132,7 @@ void log_memory_stats(void)
 }
 
 void app_main(void) {
-    vTaskDelay(1000/portTICK_PERIOD_MS);
+    vTaskDelay(5000/portTICK_PERIOD_MS);
 
     //Initialize NVS
     esp_err_t ret = nvs_flash_init();
@@ -142,6 +142,33 @@ void app_main(void) {
     }
     ESP_ERROR_CHECK(ret);
     ESP_LOGW(TAG, "NVS Status: %d", ret);
+
+    // Initialize LittleFS filesystem
+    ESP_LOGI(TAG, "Initializing filesystem...");
+    ret = filesystem_init();
+    if (ret == ESP_OK) {
+        ESP_LOGI(TAG, "Filesystem initialized successfully");
+        
+        // Run filesystem test
+        ESP_LOGI(TAG, "Running filesystem test...");
+        ret = filesystem_test();
+        if (ret == ESP_OK) {
+            ESP_LOGI(TAG, "Filesystem test completed successfully");
+        } else {
+            ESP_LOGE(TAG, "Filesystem test failed");
+        }
+        
+        // Initialize configuration manager
+        ESP_LOGI(TAG, "Initializing configuration manager...");
+        ret = config_manager_init();
+        if (ret == ESP_OK) {
+            ESP_LOGI(TAG, "Configuration manager initialized successfully");
+        } else {
+            ESP_LOGE(TAG, "Failed to initialize configuration manager");
+        }
+    } else {
+        ESP_LOGE(TAG, "Failed to initialize filesystem");
+    }
 
     i2c_master_init();
 

@@ -1,5 +1,6 @@
 # Name,   Type, SubType, Offset,   Size,     Flags
-nvs,      data, nvs,     0x9000,   0x5000,
-otadata,  data, ota,     0xe000,   0x2000,
-phy_init, data, phy,     0x10000,  0x1000,
-factory,  app,  factory, 0x20000,  0x3E0000,
+# ESP32-S3 with 4MB Flash
+nvs,      data, nvs,     0x9000,   0x6000,
+phy_init, data, phy,     0xf000,   0x1000,
+factory,  app,  factory, 0x10000,  0x2C0000,
+littlefs, data, spiffs,  0x2D0000, 0x130000,

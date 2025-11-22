@@ -4,3 +4,4 @@ dependencies:
   espressif/esp-modbus:
     version: ^1.0
   espressif/esp_lvgl_port: ^2.6.0
+  joltwallet/littlefs: "^1.14.8"

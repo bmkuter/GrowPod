@@ -2,8 +2,7 @@
 #include "power_monitor_HAL.h"
 #include "distance_sensor.h"  // Include for TANK_HEADSPACE_MM
 #include "esp_log.h"
-#include "nvs_flash.h"
-#include "nvs.h"
+#include "../filesystem/config_manager.h"
 
 // Variables
 static const char *TAG = "POD_STATE";
@@ -107,49 +106,20 @@ int pod_state_calc_fill_percent_int(const pod_state_t *state) {
  */
 esp_err_t pod_state_load_settings(pod_state_t *state)
 {
-    nvs_handle_t handle;
-    esp_err_t err = nvs_open("pod_settings", NVS_READONLY, &handle);
+    int32_t empty, full, headspace;
+    bool calibrated;
+    
+    esp_err_t err = config_load_pod_calibration(&empty, &full, &headspace, &calibrated);
     if (err == ESP_OK) {
-        int32_t empty = state->raw_empty_mm;
-        if (nvs_get_i32(handle, "empty_height", &empty) == ESP_OK) {
-            state->raw_empty_mm = empty;
-            ESP_LOGI(TAG, "Loaded pod empty height: %d mm", state->raw_empty_mm);
-        } else {
-            ESP_LOGW(TAG, "Pod empty height not in NVS, defaulting to %d mm", state->raw_empty_mm);
-        }
+        state->raw_empty_mm = empty;
+        state->raw_full_mm = full;
+        state->raw_headspace_mm = headspace;
+        state->calibrated = calibrated;
         
-        int32_t full = state->raw_full_mm;
-        if (nvs_get_i32(handle, "full_height", &full) == ESP_OK) {
-            state->raw_full_mm = full;
-            ESP_LOGI(TAG, "Loaded pod full height: %d mm", state->raw_full_mm);
-        } else {
-            ESP_LOGW(TAG, "Pod full height not in NVS, defaulting to %d mm", state->raw_full_mm);
-        }
-        
-        int32_t headspace = state->raw_headspace_mm;
-        if (nvs_get_i32(handle, "headspace_mm", &headspace) == ESP_OK) {
-            state->raw_headspace_mm = headspace;
-            ESP_LOGI(TAG, "Loaded sensor headspace: %d mm", state->raw_headspace_mm);
-        } else {
-            state->raw_headspace_mm = TANK_HEADSPACE_MM;
-            ESP_LOGW(TAG, "Sensor headspace not in NVS, defaulting to %d mm", state->raw_headspace_mm);
-        }
-        
-        uint8_t is_calibrated = 0;
-        if (nvs_get_u8(handle, "calibrated", &is_calibrated) == ESP_OK) {
-            state->calibrated = (is_calibrated != 0);
-            ESP_LOGI(TAG, "Loaded calibration state: %s", state->calibrated ? "calibrated" : "not calibrated");
-        } else {
-            // If the calibrated flag is not in NVS, determine based on loaded values
-            // Consider calibration valid if empty > full (because sensor distance decreases as water rises)
-            state->calibrated = (state->raw_empty_mm > state->raw_full_mm);
-            ESP_LOGW(TAG, "Calibration state not in NVS, determined as: %s", 
-                    state->calibrated ? "calibrated" : "not calibrated");
-        }
-        
-        nvs_close(handle);
+        ESP_LOGI(TAG, "Loaded pod calibration: empty=%ld mm, full=%ld mm, headspace=%ld mm, calibrated=%s",
+                (long)empty, (long)full, (long)headspace, calibrated ? "yes" : "no");
     } else {
-        ESP_LOGW(TAG, "Failed to open pod_settings namespace: %s", esp_err_to_name(err));
+        ESP_LOGW(TAG, "Failed to load pod calibration: %s", esp_err_to_name(err));
         // Setting Safe Defaults 
         pod_state_init(state, TANK_EMPTY_HEIGHT_MM, TANK_HEADSPACE_MM, distance_sensor_read_mm());
         state->calibrated = false; // Not calibrated if we can't load settings
@@ -162,24 +132,17 @@ esp_err_t pod_state_load_settings(pod_state_t *state)
  */
 esp_err_t pod_state_save_settings(pod_state_t *state, int empty_mm, int full_mm)
 {
-    nvs_handle_t handle;
-    esp_err_t err = nvs_open("pod_settings", NVS_READWRITE, &handle);
+    // Update calibration parameters in RAM
+    state->raw_empty_mm = empty_mm;
+    state->raw_full_mm = full_mm;
+    
+    // Save to JSON
+    esp_err_t err = config_save_pod_calibration(empty_mm, full_mm, state->raw_headspace_mm, state->calibrated);
     if (err == ESP_OK) {
-        // Update calibration parameters in RAM
-        state->raw_empty_mm = empty_mm;
-        state->raw_full_mm = full_mm;
-        
-        // Save to NVS
-        nvs_set_i32(handle, "empty_height", empty_mm);
-        nvs_set_i32(handle, "full_height", full_mm);
-        nvs_set_i32(handle, "headspace_mm", state->raw_headspace_mm);
-        nvs_set_u8(handle, "calibrated", state->calibrated ? 1 : 0);
-        
         ESP_LOGI(TAG, "Calibration saved: empty=%d mm, full=%d mm, headspace=%d mm, calibrated=%d",
                 empty_mm, full_mm, state->raw_headspace_mm, state->calibrated);
-        
-        nvs_commit(handle);
-        nvs_close(handle);
+    } else {
+        ESP_LOGE(TAG, "Failed to save pod calibration: %s", esp_err_to_name(err));
     }
     return err;
 }
