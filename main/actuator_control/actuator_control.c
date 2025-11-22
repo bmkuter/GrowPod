@@ -25,8 +25,9 @@ static float get_max_power_mW_for_actuator(actuator_index_t idx)
     switch (idx) {
     case ACTUATOR_IDX_AIR_PUMP:     return 1000.0f;  // e.g. 1 W
     case ACTUATOR_IDX_SOURCE_PUMP:  return 1500.0f;  // e.g. 1.5 W
-    case ACTUATOR_IDX_DRAIN_PUMP:   return 2000.0f;  // e.g. 2.0 W
+    case ACTUATOR_IDX_DRAIN_PUMP:   return 2000.0f;  // e.g. 2.0 W (future expansion)
     case ACTUATOR_IDX_PLANTER_PUMP: return 1200.0f;  // e.g. 1.2 W
+    case ACTUATOR_IDX_FOOD_PUMP:    return 1800.0f;  // e.g. 1.8 W
     case ACTUATOR_IDX_LED_ARRAY:    return 5000.0f;  // e.g. 5 W
     default:                        return 1000.0f;  // fallback
     }
@@ -131,19 +132,10 @@ void set_drain_pump_pwm(uint32_t duty_percentage)
     if (duty_percentage > 100) {
         duty_percentage = 100;
     }
-    ESP_LOGI(TAG, "Setting drain pump PWM to %lu%%", (unsigned long)duty_percentage);
-
-    esp_err_t ret;
-    if (duty_percentage == 0) {
-        ret = i2c_motor_set(MOTOR_DRAIN_PUMP, 0, MOTOR_RELEASE);
-    } else {
-        ret = i2c_motor_set(MOTOR_DRAIN_PUMP, duty_percentage, MOTOR_FORWARD);
-    }
-
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to set drain pump: %s", esp_err_to_name(ret));
-    }
-
+    ESP_LOGW(TAG, "Drain pump not currently connected - command ignored (future expansion)");
+    
+    // Future expansion: when drain pump is added, it will use MOTOR_DRAIN_PUMP (channel 5)
+    // For now, just update the tracking without actual hardware control
     update_actuator_info(ACTUATOR_IDX_DRAIN_PUMP, (float)duty_percentage);
 }
 
@@ -167,6 +159,43 @@ void set_planter_pump_pwm(uint32_t duty_percentage)
     }
 
     update_actuator_info(ACTUATOR_IDX_PLANTER_PUMP, (float)duty_percentage);
+}
+
+void set_food_pump_pwm(uint32_t duty_percentage)
+{
+    if (duty_percentage > 100) {
+        duty_percentage = 100;
+    }
+
+    ESP_LOGI(TAG, "Setting food pump PWM to %lu%%", (unsigned long)duty_percentage);
+
+    esp_err_t ret;
+    if (duty_percentage == 0) {
+        ret = i2c_motor_set(MOTOR_FOOD_PUMP, 0, MOTOR_RELEASE);
+    } else {
+        ret = i2c_motor_set(MOTOR_FOOD_PUMP, duty_percentage, MOTOR_FORWARD);
+    }
+
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to set food pump: %s", esp_err_to_name(ret));
+    }
+
+    update_actuator_info(ACTUATOR_IDX_FOOD_PUMP, (float)duty_percentage);
+}
+
+void dose_food_pump_ms(uint32_t duration_ms, uint8_t speed)
+{
+    ESP_LOGI(TAG, "Dosing food pump: %lu ms at %u%% speed", (unsigned long)duration_ms, speed);
+    
+    // Use the I2C motor driver's dosing function
+    esp_err_t ret = i2c_food_pump_dose_ms(duration_ms, speed);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to dose food pump: %s", esp_err_to_name(ret));
+    }
+    
+    // Note: After dosing is complete, the pump is automatically stopped by i2c_food_pump_dose_ms
+    // So we update the actuator info to reflect the stopped state
+    update_actuator_info(ACTUATOR_IDX_FOOD_PUMP, 0.0f);
 }
 
 void set_led_array_pwm(uint32_t duty_percentage)
@@ -226,6 +255,10 @@ void actuator_control_task(void *pvParameters)
 
                 case ACTUATOR_CMD_PLANTER_PUMP_PWM:
                     set_planter_pump_pwm(command.value);
+                    break;
+
+                case ACTUATOR_CMD_FOOD_PUMP_PWM:
+                    set_food_pump_pwm(command.value);
                     break;
 
                 case ACTUATOR_CMD_LED_ARRAY_PWM:

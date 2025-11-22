@@ -44,6 +44,9 @@ int contact_sensor_read_mm_actual(void)
         return -1;
     }
 
+    // Print raw received value for debugging
+    ESP_LOGI(TAG, "Raw contact sensor reading: A=0x%02X, B=0x%02X", levels[0], levels[1]);
+
     // Combine into 16-bit mask, A bits in LSB
     uint16_t mask = ((uint16_t)levels[1] << 8) | levels[0];
 

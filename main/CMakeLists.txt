@@ -11,6 +11,7 @@ idf_component_register(
         "uart_comm/uart_comm.c"
         "sensors/flowmeter_control.c"
         "sensors/distance_sensor.c"
+        "sensors/contact_sensor.c"
         "https_server/https_server.c"
         "Networking/wifi_manager.c"
         "control_logic/control_logic.c"

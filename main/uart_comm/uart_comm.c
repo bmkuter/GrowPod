@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "pod_state.h"
+#include "i2c_motor_driver.h"  // For motor direction configuration
 
 static const char *TAG = "UART_COMM";
 
@@ -25,6 +26,9 @@ static int cmd_calibrate_pod(int argc, char **argv);
 static int cmd_confirm_level(int argc, char **argv);  // Command to confirm calibration level
 static int cmd_schedule(int argc, char **argv);
 static int cmd_showschedules(int argc, char **argv);
+static int cmd_motor_direction(int argc, char **argv);  // Motor direction configuration command
+static int cmd_motor_test(int argc, char **argv);       // Motor test command for calibration
+static int cmd_foodpump(int argc, char **argv);         // Food pump control command
 
 // Function to register console commands
 static void register_console_commands(void);
@@ -268,6 +272,70 @@ static int cmd_drainpump(int argc, char **argv)
 }
 
 /**
+ * @brief Command handler for the 'foodpump' command.
+ */
+static int cmd_foodpump(int argc, char **argv) {
+    if (argc < 2 || argc > 4) {
+        printf("Usage:\n");
+        printf("  foodpump <pwm_value>           - Set continuous PWM (0-100%%)\n");
+        printf("  foodpump dose <duration_ms>    - Dose for specified milliseconds at 100%% speed\n");
+        printf("  foodpump dose <duration_ms> <speed>  - Dose for specified milliseconds at custom speed\n");
+        printf("Examples:\n");
+        printf("  foodpump 50         - Run at 50%% speed continuously\n");
+        printf("  foodpump 0          - Stop food pump\n");
+        printf("  foodpump dose 1000  - Dose for 1 second at 100%% speed\n");
+        printf("  foodpump dose 500 80 - Dose for 500ms at 80%% speed\n");
+        return 1;
+    }
+
+    if (strcmp(argv[1], "dose") == 0) {
+        // Dosing mode
+        if (argc < 3) {
+            printf("Error: Missing duration for dose command\n");
+            return 1;
+        }
+        
+        uint32_t duration_ms = (uint32_t)atoi(argv[2]);
+        uint8_t speed = 100; // Default speed
+        
+        if (argc == 4) {
+            int speed_arg = atoi(argv[3]);
+            if (speed_arg < 0 || speed_arg > 100) {
+                printf("Error: Speed must be between 0 and 100\n");
+                return 1;
+            }
+            speed = (uint8_t)speed_arg;
+        }
+        
+        if (duration_ms == 0) {
+            printf("Error: Duration must be greater than 0\n");
+            return 1;
+        }
+        
+        printf("Dosing food pump: %lu ms at %u%% speed\n", (unsigned long)duration_ms, speed);
+        dose_food_pump_ms(duration_ms, speed);
+        printf("Food pump dosing completed\n");
+        
+    } else {
+        // Continuous PWM mode
+        int value = atoi(argv[1]);
+        if (value < 0 || value > 100) {
+            printf("Error: PWM value must be between 0 and 100\n");
+            return 1;
+        }
+
+        actuator_command_t command = {
+            .cmd_type = ACTUATOR_CMD_FOOD_PUMP_PWM,
+            .value = (uint32_t)value
+        };
+        xQueueSend(get_actuator_queue(), &command, portMAX_DELAY);
+        printf("Food pump PWM set to %d%%\n", value);
+    }
+    
+    return 0;
+}
+
+/**
  * @brief Command handler for the 'led' command.
  */
 static int cmd_led(int argc, char **argv) {
@@ -391,6 +459,112 @@ static int cmd_showschedules(int argc, char **argv) {
     return 0;
 }
 
+// Command handler: motor_direction
+static int cmd_motor_direction(int argc, char **argv) {
+    if (argc == 1) {
+        // Show current motor direction settings
+        motor_direction_config_t config;
+        esp_err_t err = i2c_motor_get_direction_config(&config);
+        if (err == ESP_OK) {
+            printf("Current motor direction settings:\n");
+            printf("  Motor 1 (Planter): %s\n", config.motor1_inverted ? "inverted" : "normal");
+            printf("  Motor 2 (Food):    %s\n", config.motor2_inverted ? "inverted" : "normal");
+            printf("  Motor 3 (Source):  %s\n", config.motor3_inverted ? "inverted" : "normal");
+            printf("  Motor 4 (LED):     %s\n", config.motor4_inverted ? "inverted" : "normal");
+        } else {
+            printf("Error reading motor direction config: %s\n", esp_err_to_name(err));
+        }
+        return 0;
+    }
+    
+    if (argc == 3) {
+        // Set motor direction: motor_direction <motor_num> <normal|inverted>
+        int motor_num = atoi(argv[1]);
+        if (motor_num < 1 || motor_num > 4) {
+            printf("Invalid motor number. Use 1-4 (1=Planter, 2=Food, 3=Source, 4=LED)\n");
+            return 1;
+        }
+        
+        bool inverted;
+        if (strcmp(argv[2], "normal") == 0) {
+            inverted = false;
+        } else if (strcmp(argv[2], "inverted") == 0) {
+            inverted = true;
+        } else {
+            printf("Invalid direction. Use 'normal' or 'inverted'\n");
+            return 1;
+        }
+        
+        esp_err_t err = i2c_motor_set_direction_invert(motor_num, inverted);
+        if (err == ESP_OK) {
+            printf("Motor %d direction set to: %s\n", motor_num, inverted ? "inverted" : "normal");
+            
+            // Save to NVS
+            err = i2c_motor_save_direction_settings();
+            if (err == ESP_OK) {
+                printf("Motor direction settings saved to flash\n");
+            } else {
+                printf("Warning: Failed to save settings to flash: %s\n", esp_err_to_name(err));
+            }
+        } else {
+            printf("Error setting motor direction: %s\n", esp_err_to_name(err));
+        }
+        return 0;
+    }
+    
+    printf("Usage:\n");
+    printf("  motor_direction                      - Show current settings\n");
+    printf("  motor_direction <1-4> <normal|inverted> - Set motor direction\n");
+    printf("Motor mapping: 1=Planter, 2=Food, 3=Source, 4=LED\n");
+    return 1;
+}
+
+// Command handler: motor_test
+static int cmd_motor_test(int argc, char **argv) {
+    if (argc != 3) {
+        printf("Usage: motor_test <motor_num> <forward|backward|stop>\n");
+        printf("Motor mapping: 1=Planter, 2=Food, 3=Source, 4=LED\n");
+        printf("Use this to test motor directions for calibration\n");
+        return 1;
+    }
+    
+    int motor_num = atoi(argv[1]);
+    if (motor_num < 1 || motor_num > 4) {
+        printf("Invalid motor number. Use 1-4 (1=Planter, 2=Food, 3=Source, 4=LED)\n");
+        return 1;
+    }
+    
+    uint8_t command;
+    uint8_t speed = 50; // Default test speed
+    
+    if (strcmp(argv[2], "forward") == 0) {
+        command = MOTOR_FORWARD;
+        printf("Running motor %d forward at 50%% speed...\n", motor_num);
+    } else if (strcmp(argv[2], "backward") == 0) {
+        command = MOTOR_BACKWARD;
+        printf("Running motor %d backward at 50%% speed...\n", motor_num);
+    } else if (strcmp(argv[2], "stop") == 0) {
+        command = MOTOR_RELEASE;
+        speed = 0;
+        printf("Stopping motor %d...\n", motor_num);
+    } else {
+        printf("Invalid command. Use 'forward', 'backward', or 'stop'\n");
+        return 1;
+    }
+    
+    esp_err_t err = i2c_motor_set(motor_num, speed, command);
+    if (err == ESP_OK) {
+        printf("Motor %d command executed successfully\n", motor_num);
+        if (command != MOTOR_RELEASE) {
+            printf("Note: Motor will keep running. Use 'motor_test %d stop' to stop it.\n", motor_num);
+        }
+    } else {
+        printf("Error controlling motor: %s\n", esp_err_to_name(err));
+    }
+    
+    return 0;
+}
+
 static void register_console_commands(void) {
     // Air pump command
     {
@@ -432,9 +606,21 @@ static void register_console_commands(void) {
     {
         const esp_console_cmd_t cmd = {
             .command = "drainpump",
-            .help = "Set drain pump PWM value (0-100)",
+            .help = "Set drain pump PWM value (0-100) - Future expansion",
             .hint = NULL,
             .func = &cmd_drainpump,
+            .argtable = NULL
+        };
+        ESP_ERROR_CHECK(esp_console_cmd_register(&cmd));
+    }
+
+    // Food pump command
+    {
+        const esp_console_cmd_t cmd = {
+            .command = "foodpump",
+            .help = "Control food pump: PWM or timed dosing",
+            .hint = "<pwm_value> | dose <duration_ms> [speed]",
+            .func = &cmd_foodpump,
             .argtable = NULL
         };
         ESP_ERROR_CHECK(esp_console_cmd_register(&cmd));
@@ -530,6 +716,30 @@ static void register_console_commands(void) {
             .help    = "Print current LED, planter and air schedules",
             .hint    = NULL,
             .func    = &cmd_showschedules,
+            .argtable= NULL
+        };
+        ESP_ERROR_CHECK(esp_console_cmd_register(&cmd));
+    }
+
+    // Motor direction configuration command
+    {
+        const esp_console_cmd_t cmd = {
+            .command = "motor_direction",
+            .help    = "Configure motor direction inversion settings",
+            .hint    = "[motor_num] [normal|inverted]",
+            .func    = &cmd_motor_direction,
+            .argtable= NULL
+        };
+        ESP_ERROR_CHECK(esp_console_cmd_register(&cmd));
+    }
+
+    // Motor test command for calibration
+    {
+        const esp_console_cmd_t cmd = {
+            .command = "motor_test",
+            .help    = "Test motor direction for calibration",
+            .hint    = "<motor_num> <forward|backward|stop>",
+            .func    = &cmd_motor_test,
             .argtable= NULL
         };
         ESP_ERROR_CHECK(esp_console_cmd_register(&cmd));

@@ -28,8 +28,9 @@
 typedef enum {
     ACTUATOR_CMD_AIR_PUMP_PWM,     // value = 0..100 (NOTE: Air pump has been replaced by LED control)
     ACTUATOR_CMD_SOURCE_PUMP_PWM,  // value = 0..100
-    ACTUATOR_CMD_DRAIN_PUMP_PWM,   // value = 0..100
+    ACTUATOR_CMD_DRAIN_PUMP_PWM,   // value = 0..100 (future expansion)
     ACTUATOR_CMD_PLANTER_PUMP_PWM, // value = 0..100
+    ACTUATOR_CMD_FOOD_PUMP_PWM,    // value = 0..100
     ACTUATOR_CMD_LED_ARRAY_PWM     // value = 0..100 (Now using I2C motor driver on channel 4)
 } actuator_cmd_t;
 
@@ -47,8 +48,9 @@ typedef struct {
 typedef enum {
     ACTUATOR_IDX_AIR_PUMP = 0,    // Note: Air pump has been replaced by LED control
     ACTUATOR_IDX_SOURCE_PUMP,
-    ACTUATOR_IDX_DRAIN_PUMP,
+    ACTUATOR_IDX_DRAIN_PUMP,      // Future expansion - not currently connected
     ACTUATOR_IDX_PLANTER_PUMP,
+    ACTUATOR_IDX_FOOD_PUMP,       // New food pump using motor channel 2
     ACTUATOR_IDX_LED_ARRAY,       // Now using I2C motor driver on channel 4
     ACTUATOR_IDX_MAX
 } actuator_index_t;
@@ -70,8 +72,12 @@ QueueHandle_t   get_actuator_queue(void);
 // Pump control (all 8-bit duty 0..255 equivalent)
 void set_air_pump_pwm(uint32_t duty_percentage);
 void set_source_pump_pwm(uint32_t duty_percentage);
-void set_drain_pump_pwm(uint32_t duty_percentage);
+void set_drain_pump_pwm(uint32_t duty_percentage);  // Future expansion
 void set_planter_pump_pwm(uint32_t duty_percentage);
+void set_food_pump_pwm(uint32_t duty_percentage);
+
+// Food pump dosing functions
+void dose_food_pump_ms(uint32_t duration_ms, uint8_t speed);
 
 // LED array
 void set_led_array_binary(bool state);

@@ -2,8 +2,18 @@
 #include "esp_log.h"
 #include <string.h>
 #include "power_monitor_HAL.h"  // Include for shared I2C initialization
+#include "nvs_flash.h"
+#include "nvs.h"
 
 static const char *TAG = "I2C_MOTOR";
+
+// Motor direction configuration - stored in RAM and NVS
+static motor_direction_config_t s_motor_direction_config = {
+    .motor1_inverted = false,
+    .motor2_inverted = false, 
+    .motor3_inverted = false,
+    .motor4_inverted = false
+};
 
 // I2C port used for motor shield communication
 static i2c_port_t i2c_motor_port = I2C_NUM_0;
@@ -170,6 +180,12 @@ esp_err_t i2c_motor_driver_init(i2c_port_t i2c_port, int sda_pin, int scl_pin, u
         pca9685_set_pwm(i, 0);
     }
     
+    // Load motor direction settings from NVS
+    esp_err_t load_err = i2c_motor_load_direction_settings();
+    if (load_err != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to load motor direction settings, using defaults");
+    }
+    
     ESP_LOGI(TAG, "I2C motor driver initialized successfully");
     return ESP_OK;
 }
@@ -201,7 +217,23 @@ esp_err_t i2c_motor_run(uint8_t motor_num, uint8_t command)
     uint8_t idx = motor_num - 1;
     esp_err_t ret = ESP_OK;
     
-    switch (command) {
+    // Apply direction inversion if configured
+    uint8_t actual_command = command;
+    bool inverted = false;
+    
+    switch (motor_num) {
+        case 1: inverted = s_motor_direction_config.motor1_inverted; break;
+        case 2: inverted = s_motor_direction_config.motor2_inverted; break;
+        case 3: inverted = s_motor_direction_config.motor3_inverted; break;
+        case 4: inverted = s_motor_direction_config.motor4_inverted; break;
+    }
+    
+    if (inverted && (command == MOTOR_FORWARD || command == MOTOR_BACKWARD)) {
+        actual_command = (command == MOTOR_FORWARD) ? MOTOR_BACKWARD : MOTOR_FORWARD;
+        ESP_LOGI(TAG, "Motor %d direction inverted: %d -> %d", motor_num, command, actual_command);
+    }
+    
+    switch (actual_command) {
         case MOTOR_FORWARD:
             ret = pca9685_set_pin(motor_pins[idx].in2_pin, false); // Take low first to avoid 'break'
             if (ret != ESP_OK) return ret;
@@ -272,4 +304,176 @@ esp_err_t i2c_led_set_brightness(uint8_t brightness)
         // This ensures proper PWM control
         return i2c_motor_set(LED_CONTROL, brightness, MOTOR_FORWARD);
     }
+}
+
+esp_err_t i2c_food_pump_dose_ms(uint32_t duration_ms, uint8_t speed)
+{
+    if (speed > 100) {
+        speed = 100;
+    }
+    
+    if (duration_ms == 0) {
+        ESP_LOGW(TAG, "Food pump dose duration is 0ms, ignoring");
+        return ESP_OK;
+    }
+    
+    ESP_LOGI(TAG, "Dosing food pump: %lu ms at %u%% speed", duration_ms, speed);
+    
+    // Start the food pump
+    esp_err_t ret = i2c_motor_set(MOTOR_FOOD_PUMP, speed, MOTOR_FORWARD);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to start food pump: %s", esp_err_to_name(ret));
+        return ret;
+    }
+    
+    // Wait for the specified duration
+    vTaskDelay(pdMS_TO_TICKS(duration_ms));
+    
+    // Stop the food pump
+    ret = i2c_motor_set(MOTOR_FOOD_PUMP, 0, MOTOR_RELEASE);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to stop food pump: %s", esp_err_to_name(ret));
+        return ret;
+    }
+    
+    ESP_LOGI(TAG, "Food pump dosing completed");
+    return ESP_OK;
+}
+
+esp_err_t i2c_food_pump_start(uint8_t speed)
+{
+    if (speed > 100) {
+        speed = 100;
+    }
+    
+    ESP_LOGI(TAG, "Starting food pump at %u%% speed", speed);
+    
+    if (speed == 0) {
+        return i2c_motor_set(MOTOR_FOOD_PUMP, 0, MOTOR_RELEASE);
+    } else {
+        return i2c_motor_set(MOTOR_FOOD_PUMP, speed, MOTOR_FORWARD);
+    }
+}
+
+esp_err_t i2c_food_pump_stop(void)
+{
+    ESP_LOGI(TAG, "Stopping food pump");
+    return i2c_motor_set(MOTOR_FOOD_PUMP, 0, MOTOR_RELEASE);
+}
+
+esp_err_t i2c_motor_get_direction_config(motor_direction_config_t *config)
+{
+    if (config == NULL) {
+        ESP_LOGE(TAG, "Config pointer is NULL");
+        return ESP_ERR_INVALID_ARG;
+    }
+    
+    *config = s_motor_direction_config;
+    return ESP_OK;
+}
+
+esp_err_t i2c_motor_load_direction_settings(void)
+{
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open("motor_settings", NVS_READONLY, &handle);
+    if (err == ESP_OK) {
+        size_t required_size = sizeof(motor_direction_config_t);
+        err = nvs_get_blob(handle, "direction_config", &s_motor_direction_config, &required_size);
+        if (err == ESP_OK) {
+            ESP_LOGI(TAG, "Motor direction settings loaded from NVS");
+            ESP_LOGI(TAG, "  Motor 1 (Planter): %s", s_motor_direction_config.motor1_inverted ? "inverted" : "normal");
+            ESP_LOGI(TAG, "  Motor 2 (Food):    %s", s_motor_direction_config.motor2_inverted ? "inverted" : "normal");
+            ESP_LOGI(TAG, "  Motor 3 (Source):  %s", s_motor_direction_config.motor3_inverted ? "inverted" : "normal");
+            ESP_LOGI(TAG, "  Motor 4 (LED):     %s", s_motor_direction_config.motor4_inverted ? "inverted" : "normal");
+        } else if (err == ESP_ERR_NVS_NOT_FOUND) {
+            ESP_LOGW(TAG, "Motor direction settings not found in NVS, using defaults");
+            err = ESP_OK; // Not an error, just use defaults
+        } else {
+            ESP_LOGE(TAG, "Failed to load motor direction settings: %s", esp_err_to_name(err));
+        }
+        nvs_close(handle);
+    } else {
+        ESP_LOGW(TAG, "Failed to open motor_settings namespace: %s", esp_err_to_name(err));
+    }
+    return err;
+}
+
+esp_err_t i2c_motor_set_direction_invert(uint8_t motor_num, bool inverted)
+{
+    if (motor_num < 1 || motor_num > 4) {
+        ESP_LOGE(TAG, "Invalid motor number: %d", motor_num);
+        return ESP_ERR_INVALID_ARG;
+    }
+    
+    switch (motor_num) {
+        case 1: s_motor_direction_config.motor1_inverted = inverted; break;
+        case 2: s_motor_direction_config.motor2_inverted = inverted; break;
+        case 3: s_motor_direction_config.motor3_inverted = inverted; break;
+        case 4: s_motor_direction_config.motor4_inverted = inverted; break;
+    }
+    
+    ESP_LOGI(TAG, "Motor %d direction inversion set to: %s", motor_num, inverted ? "inverted" : "normal");
+    return ESP_OK;
+}
+
+esp_err_t i2c_motor_get_direction_invert(uint8_t motor_num, bool *inverted)
+{
+    if (motor_num < 1 || motor_num > 4 || inverted == NULL) {
+        ESP_LOGE(TAG, "Invalid motor number: %d or null pointer", motor_num);
+        return ESP_ERR_INVALID_ARG;
+    }
+    
+    switch (motor_num) {
+        case 1: *inverted = s_motor_direction_config.motor1_inverted; break;
+        case 2: *inverted = s_motor_direction_config.motor2_inverted; break;
+        case 3: *inverted = s_motor_direction_config.motor3_inverted; break;
+        case 4: *inverted = s_motor_direction_config.motor4_inverted; break;
+    }
+    
+    return ESP_OK;
+}
+
+esp_err_t i2c_motor_set_direction_config(const motor_direction_config_t *config)
+{
+    if (config == NULL) {
+        ESP_LOGE(TAG, "Null config pointer");
+        return ESP_ERR_INVALID_ARG;
+    }
+    
+    s_motor_direction_config = *config;
+    
+    ESP_LOGI(TAG, "Motor direction config updated: M1=%s, M2=%s, M3=%s, M4=%s",
+        config->motor1_inverted ? "inverted" : "normal",
+        config->motor2_inverted ? "inverted" : "normal", 
+        config->motor3_inverted ? "inverted" : "normal",
+        config->motor4_inverted ? "inverted" : "normal");
+    
+    return ESP_OK;
+}
+
+esp_err_t i2c_motor_save_direction_settings(void)
+{
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open("motor_settings", NVS_READWRITE, &handle);
+    if (err == ESP_OK) {
+        err = nvs_set_blob(handle, "direction_config", &s_motor_direction_config, sizeof(motor_direction_config_t));
+        if (err == ESP_OK) {
+            err = nvs_commit(handle);
+            if (err == ESP_OK) {
+                ESP_LOGI(TAG, "Motor direction config saved: M1=%s, M2=%s, M3=%s, M4=%s",
+                    s_motor_direction_config.motor1_inverted ? "inverted" : "normal",
+                    s_motor_direction_config.motor2_inverted ? "inverted" : "normal",
+                    s_motor_direction_config.motor3_inverted ? "inverted" : "normal",
+                    s_motor_direction_config.motor4_inverted ? "inverted" : "normal");
+            } else {
+                ESP_LOGE(TAG, "Error committing motor direction config: %s", esp_err_to_name(err));
+            }
+        } else {
+            ESP_LOGE(TAG, "Error setting motor direction config: %s", esp_err_to_name(err));
+        }
+        nvs_close(handle);
+    } else {
+        ESP_LOGE(TAG, "Failed to open motor_settings namespace for write: %s", esp_err_to_name(err));
+    }
+    return err;
 }
