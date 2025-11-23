@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
 
 static const char *TAG = "CONFIG_MGR";
 
@@ -94,7 +95,7 @@ cJSON* config_load_json(const char *file_path)
         return NULL;
     }
     
-    ESP_LOGI(TAG, "Loaded config: %s", file_path);
+    ESP_LOGD(TAG, "Loaded config: %s", file_path);
     return json;
 }
 
@@ -308,3 +309,86 @@ esp_err_t config_load_schedule(const char *schedule_type, uint8_t *schedule)
     cJSON_Delete(root);
     return ESP_OK;
 }
+
+// Plant information functions
+esp_err_t config_save_plant_info(const plant_info_t *info)
+{
+    if (info == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    cJSON *root = cJSON_CreateObject();
+    if (root == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    cJSON_AddStringToObject(root, "plant_name", info->plant_name);
+    cJSON_AddStringToObject(root, "start_date", info->start_date);
+    cJSON_AddNumberToObject(root, "start_timestamp", info->start_timestamp);
+
+    esp_err_t ret = config_save_json(PLANT_CONFIG_FILE, root);
+    cJSON_Delete(root);
+
+    return ret;
+}
+
+esp_err_t config_load_plant_info(plant_info_t *info)
+{
+    if (info == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    cJSON *root = config_load_json(PLANT_CONFIG_FILE);
+    if (root == NULL) {
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    cJSON *name = cJSON_GetObjectItem(root, "plant_name");
+    cJSON *date = cJSON_GetObjectItem(root, "start_date");
+    cJSON *timestamp = cJSON_GetObjectItem(root, "start_timestamp");
+
+    if (name && cJSON_IsString(name)) {
+        strncpy(info->plant_name, name->valuestring, sizeof(info->plant_name) - 1);
+        info->plant_name[sizeof(info->plant_name) - 1] = '\0';
+    } else {
+        info->plant_name[0] = '\0';
+    }
+
+    if (date && cJSON_IsString(date)) {
+        strncpy(info->start_date, date->valuestring, sizeof(info->start_date) - 1);
+        info->start_date[sizeof(info->start_date) - 1] = '\0';
+    } else {
+        info->start_date[0] = '\0';
+    }
+
+    if (timestamp && cJSON_IsNumber(timestamp)) {
+        info->start_timestamp = timestamp->valueint;
+    } else {
+        info->start_timestamp = 0;
+    }
+
+    cJSON_Delete(root);
+    return ESP_OK;
+}
+
+int32_t config_get_days_growing(const plant_info_t *info)
+{
+    if (info == NULL || info->start_timestamp == 0) {
+        return -1;
+    }
+
+    // Get current time
+    time_t now;
+    time(&now);
+
+    // Calculate difference in seconds
+    time_t diff_seconds = now - info->start_timestamp;
+
+    if (diff_seconds < 0) {
+        return -1;  // Invalid (future date)
+    }
+
+    // Convert to days
+    return (int32_t)(diff_seconds / 86400);  // 86400 seconds in a day
+}
+

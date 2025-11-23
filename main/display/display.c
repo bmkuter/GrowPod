@@ -15,6 +15,8 @@
 #include "distance_sensor.h"    // For water level sensor
 #include "actuator_control.h"   
 #include "pod_state.h"          // For pod state and fill percent
+#include "filesystem/config_manager.h"  // For plant info
+#include <string.h>
 
 static const char *TAG = "display";
 
@@ -45,6 +47,7 @@ static lv_obj_t *current_label;
 static lv_obj_t *voltage_label;
 static lv_obj_t *power_label;
 static lv_obj_t *water_level_label;
+static lv_obj_t *plant_name_label;
 static lv_obj_t *timestamp_label;
 static lv_obj_t *planter_pwm_label;
 static lv_obj_t *led_pwm_label;
@@ -60,9 +63,8 @@ static void lvgl_sensor_update_cb(lv_timer_t *timer)
     int water_level_mm;
     // add buffers for actuator text
     char current_str[32], voltage_str[32], power_str[32],
-         water_level_str[32], timestamp_str[32],
+         water_level_str[32], plant_name_str[68], plant_info_str[32],
          planter_pwm_str[32], led_pwm_str[32];
-    static int counter = 0;
     static bool power_monitor_initialized = false;
     
     // Initialize power monitor
@@ -102,7 +104,22 @@ static void lvgl_sensor_update_cb(lv_timer_t *timer)
     } else {
         snprintf(water_level_str, sizeof(water_level_str), "Water level: %d mm (Not cal)", water_level_mm);
     }
-    snprintf(timestamp_str, sizeof(timestamp_str), "Updated: %d", (counter)); counter++;
+    
+    // Get plant info and calculate days growing
+    plant_info_t plant_info = {0};
+    esp_err_t plant_err = config_load_plant_info(&plant_info);
+    if (plant_err == ESP_OK && strlen(plant_info.plant_name) > 0) {
+        snprintf(plant_name_str, sizeof(plant_name_str), "%s", plant_info.plant_name);
+        int32_t days = config_get_days_growing(&plant_info);
+        if (days >= 0) {
+            snprintf(plant_info_str, sizeof(plant_info_str), "Day: %ld", (long)days);
+        } else {
+            snprintf(plant_info_str, sizeof(plant_info_str), "Day: --");
+        }
+    } else {
+        snprintf(plant_name_str, sizeof(plant_name_str), "No plant set");
+        snprintf(plant_info_str, sizeof(plant_info_str), "Day: --");
+    }
 
     // Read actuator states
     const actuator_info_t *act = actuator_control_get_info();
@@ -116,7 +133,8 @@ static void lvgl_sensor_update_cb(lv_timer_t *timer)
     lv_label_set_text(voltage_label, voltage_str);
     lv_label_set_text(power_label, power_str);
     lv_label_set_text(water_level_label, water_level_str);
-    lv_label_set_text(timestamp_label, timestamp_str);
+    lv_label_set_text(plant_name_label, plant_name_str);  // Show plant name
+    lv_label_set_text(timestamp_label, plant_info_str);  // Show days growing
     lv_label_set_text(planter_pwm_label, planter_pwm_str);
     lv_label_set_text(led_pwm_label,     led_pwm_str);
 }
@@ -129,6 +147,10 @@ void display_lvgl_init(void)
     /* Set LVGL background to black */
     lv_obj_set_style_bg_color(lv_scr_act(), lv_color_black(), 0);
     lv_obj_set_style_bg_opa(lv_scr_act(), LV_OPA_COVER, 0);
+    
+    /* Disable scrollbars on the screen */
+    lv_obj_clear_flag(lv_scr_act(), LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scrollbar_mode(lv_scr_act(), LV_SCROLLBAR_MODE_OFF);
 
     // Create title label (16 px high)
     title_label = lv_label_create(lv_scr_act());
@@ -179,12 +201,19 @@ void display_lvgl_init(void)
     lv_label_set_text(led_pwm_label, "LED: 0%");
     lv_obj_align(led_pwm_label, LV_ALIGN_TOP_LEFT, 5, 85);
 
-    // Timestamp bottom right
+    // Plant name bottom right (above days growing)
+    plant_name_label = lv_label_create(lv_scr_act());
+    lv_obj_set_style_text_color(plant_name_label, lv_color_white(), 0);
+    lv_obj_set_style_text_font(plant_name_label, SIZE_8_FONT, LV_PART_MAIN);
+    lv_label_set_text(plant_name_label, "No plant set");
+    lv_obj_align(plant_name_label, LV_ALIGN_BOTTOM_RIGHT, -5, -24);  // Above the day counter
+    
+    // Plant info bottom right (days growing)
     timestamp_label = lv_label_create(lv_scr_act());
     lv_obj_set_style_text_color(timestamp_label, lv_color_white(), 0);
     lv_obj_set_style_text_font(timestamp_label, SIZE_8_FONT, LV_PART_MAIN);
-    lv_label_set_text(timestamp_label, "Updated: 0 s");
-    lv_obj_align(timestamp_label, LV_ALIGN_BOTTOM_RIGHT, -5, -5);
+    lv_label_set_text(timestamp_label, "Day: --");
+    lv_obj_align(timestamp_label, LV_ALIGN_BOTTOM_RIGHT, -5, -12);  // Increased offset from -5 to -12
 
     // Create LVGL timer for sensor updates (250ms = 4Hz)
     sensor_update_timer = lv_timer_create(lvgl_sensor_update_cb, 250, NULL);
@@ -308,7 +337,8 @@ esp_lcd_panel_handle_t display_init(void)
     }
 
     // Set gap offsets for 1.14" 240x135 display (ST7789 240x320 cropped)
-    ret = esp_lcd_panel_set_gap(panel_handle, 40, 52); // adjusted vertical gap by -2 to remove top bar
+    // Adjusted to eliminate white bar at bottom: shifted vertical gap down
+    ret = esp_lcd_panel_set_gap(panel_handle, 40, 52);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "panel_set_gap failed: %s", esp_err_to_name(ret));
         return NULL;

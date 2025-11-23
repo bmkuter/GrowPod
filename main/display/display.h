@@ -40,3 +40,4 @@ void display_lvgl_init(void);
  * @return esp_lcd_panel_io_handle_t Handle to the LCD panel IO.
  */
 esp_lcd_panel_io_handle_t display_get_io_handle(void);
+

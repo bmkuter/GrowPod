@@ -16,6 +16,14 @@ extern "C" {
 #define POD_CONFIG_FILE         "/lfs/config/pod.json"
 #define SYSTEM_CONFIG_FILE      "/lfs/config/system.json"
 #define SCHEDULES_CONFIG_FILE   "/lfs/config/schedules.json"
+#define PLANT_CONFIG_FILE       "/lfs/config/plant.json"
+
+// Plant information structure
+typedef struct {
+    char plant_name[64];      // Name of the plant
+    char start_date[16];      // Start date in format "YYYY-MM-DD"
+    int32_t start_timestamp;  // Unix timestamp when planting started
+} plant_info_t;
 
 /**
  * @brief Initialize the configuration manager
@@ -138,6 +146,31 @@ esp_err_t config_save_schedule(const char *schedule_type, const uint8_t *schedul
  * @return esp_err_t ESP_OK on success, ESP_ERR_NOT_FOUND if not set
  */
 esp_err_t config_load_schedule(const char *schedule_type, uint8_t *schedule);
+
+// Plant information functions
+/**
+ * @brief Save plant information to JSON
+ * 
+ * @param info Pointer to plant_info_t structure
+ * @return esp_err_t ESP_OK on success, error code otherwise
+ */
+esp_err_t config_save_plant_info(const plant_info_t *info);
+
+/**
+ * @brief Load plant information from JSON
+ * 
+ * @param info Pointer to plant_info_t structure to fill
+ * @return esp_err_t ESP_OK on success, ESP_ERR_NOT_FOUND if not set
+ */
+esp_err_t config_load_plant_info(plant_info_t *info);
+
+/**
+ * @brief Calculate days since planting based on current time
+ * 
+ * @param info Pointer to plant_info_t structure
+ * @return int32_t Number of days since planting, or -1 if not set/invalid
+ */
+int32_t config_get_days_growing(const plant_info_t *info);
 
 #ifdef __cplusplus
 }

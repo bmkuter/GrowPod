@@ -6,11 +6,14 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_vfs_dev.h"
+#include "driver/uart_vfs.h"
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 #include "pod_state.h"
 #include "i2c_motor_driver.h"  // For motor direction configuration
 #include "filesystem/filesystem_manager.h"  // For filesystem operations
+#include "filesystem/config_manager.h"  // For plant info
 
 static const char *TAG = "UART_COMM";
 
@@ -34,6 +37,8 @@ static int cmd_fs_list(int argc, char **argv);          // List filesystem conte
 static int cmd_fs_cat(int argc, char **argv);           // Display file contents
 static int cmd_fs_info(int argc, char **argv);          // Show filesystem info
 static int cmd_fs_test(int argc, char **argv);          // Test filesystem operations
+static int cmd_plant_set(int argc, char **argv);        // Set plant information
+static int cmd_plant_info(int argc, char **argv);       // Display plant information
 
 // Function to register console commands
 static void register_console_commands(void);
@@ -76,11 +81,11 @@ void uart_console_task(void *pvParameter)
     linenoiseAllowEmpty(false);
 
     // Install UART driver for interrupt-driven reads/writes
-    esp_vfs_dev_uart_use_driver(UART_PORT_NUM);
+    uart_vfs_dev_use_driver(UART_PORT_NUM);
 
     // Set up the UART console line endings
-    esp_vfs_dev_uart_port_set_rx_line_endings(UART_PORT_NUM, ESP_LINE_ENDINGS_CR);
-    esp_vfs_dev_uart_port_set_tx_line_endings(UART_PORT_NUM, ESP_LINE_ENDINGS_CRLF);
+    uart_vfs_dev_port_set_rx_line_endings(UART_PORT_NUM, ESP_LINE_ENDINGS_CR);
+    uart_vfs_dev_port_set_tx_line_endings(UART_PORT_NUM, ESP_LINE_ENDINGS_CRLF);
 
     // Initialize the readline environment
     esp_console_register_help_command();
@@ -669,6 +674,81 @@ static int cmd_fs_test(int argc, char **argv) {
     return 0;
 }
 
+// Command handler: plant_set
+static int cmd_plant_set(int argc, char **argv) {
+    if (argc < 3) {
+        printf("Usage: plant_set <plant_name> <start_date>\n");
+        printf("  plant_name: Name of the plant (e.g., \"Tomato\")\n");
+        printf("  start_date: Start date in YYYY-MM-DD format\n");
+        printf("Example: plant_set \"Cherry Tomato\" 2025-11-22\n");
+        return 1;
+    }
+    
+    if (!filesystem_is_mounted()) {
+        printf("Error: Filesystem not mounted\n");
+        return 1;
+    }
+    
+    plant_info_t info;
+    strncpy(info.plant_name, argv[1], sizeof(info.plant_name) - 1);
+    info.plant_name[sizeof(info.plant_name) - 1] = '\0';
+    
+    strncpy(info.start_date, argv[2], sizeof(info.start_date) - 1);
+    info.start_date[sizeof(info.start_date) - 1] = '\0';
+    
+    // Get current timestamp
+    time_t now;
+    time(&now);
+    info.start_timestamp = (int32_t)now;
+    
+    esp_err_t err = config_save_plant_info(&info);
+    if (err != ESP_OK) {
+        printf("Error saving plant info: %s\n", esp_err_to_name(err));
+        return 1;
+    }
+    
+    printf("Plant information saved:\n");
+    printf("  Name: %s\n", info.plant_name);
+    printf("  Start Date: %s\n", info.start_date);
+    printf("  Timestamp: %ld\n", (long)info.start_timestamp);
+    
+    return 0;
+}
+
+// Command handler: plant_info
+static int cmd_plant_info(int argc, char **argv) {
+    if (!filesystem_is_mounted()) {
+        printf("Error: Filesystem not mounted\n");
+        return 1;
+    }
+    
+    plant_info_t info;
+    esp_err_t err = config_load_plant_info(&info);
+    
+    if (err == ESP_ERR_NOT_FOUND) {
+        printf("No plant information set.\n");
+        printf("Use 'plant_set <name> <date>' to set plant info.\n");
+        return 0;
+    } else if (err != ESP_OK) {
+        printf("Error loading plant info: %s\n", esp_err_to_name(err));
+        return 1;
+    }
+    
+    printf("Current Plant Information:\n");
+    printf("  Plant Name: %s\n", info.plant_name);
+    printf("  Start Date: %s\n", info.start_date);
+    printf("  Start Timestamp: %ld\n", (long)info.start_timestamp);
+    
+    int32_t days = config_get_days_growing(&info);
+    if (days >= 0) {
+        printf("  Days Growing: %ld\n", (long)days);
+    } else {
+        printf("  Days Growing: Invalid (check system time)\n");
+    }
+    
+    return 0;
+}
+
 static void register_console_commands(void) {
     // Air pump command
     {
@@ -892,6 +972,30 @@ static void register_console_commands(void) {
             .help    = "Run filesystem read/write test",
             .hint    = NULL,
             .func    = &cmd_fs_test,
+            .argtable= NULL
+        };
+        ESP_ERROR_CHECK(esp_console_cmd_register(&cmd));
+    }
+
+    // Plant set command
+    {
+        const esp_console_cmd_t cmd = {
+            .command = "plant_set",
+            .help    = "Set plant name and start date",
+            .hint    = "<plant_name> <YYYY-MM-DD>",
+            .func    = &cmd_plant_set,
+            .argtable= NULL
+        };
+        ESP_ERROR_CHECK(esp_console_cmd_register(&cmd));
+    }
+
+    // Plant info command
+    {
+        const esp_console_cmd_t cmd = {
+            .command = "plant_info",
+            .help    = "Display current plant information",
+            .hint    = NULL,
+            .func    = &cmd_plant_info,
             .argtable= NULL
         };
         ESP_ERROR_CHECK(esp_console_cmd_register(&cmd));
