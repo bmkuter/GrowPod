@@ -39,6 +39,7 @@ static int cmd_fs_info(int argc, char **argv);          // Show filesystem info
 static int cmd_fs_test(int argc, char **argv);          // Test filesystem operations
 static int cmd_plant_set(int argc, char **argv);        // Set plant information
 static int cmd_plant_info(int argc, char **argv);       // Display plant information
+static int cmd_pwm_sweep(int argc, char **argv);        // PWM sweep test for motor shields
 
 // Function to register console commands
 static void register_console_commands(void);
@@ -749,6 +750,44 @@ static int cmd_plant_info(int argc, char **argv) {
     return 0;
 }
 
+// Command handler: pwm_sweep
+static int cmd_pwm_sweep(int argc, char **argv) {
+    if (argc != 2) {
+        printf("Usage: pwm_sweep <motor|led>\n");
+        printf("  motor - Test pump motor shield (0x60)\n");
+        printf("  led   - Test LED motor shield (0x61)\n");
+        return 1;
+    }
+    
+    uint8_t shield_addr;
+    const char *shield_type = argv[1];
+    
+    if (strcmp(shield_type, "motor") == 0) {
+        shield_addr = MOTOR_SHIELD_PUMP_ADDR;
+        printf("Starting PWM sweep on pump motor shield (0x%02x)...\n", shield_addr);
+    } else if (strcmp(shield_type, "led") == 0) {
+        shield_addr = MOTOR_SHIELD_LED_ADDR;
+        printf("Starting PWM sweep on LED motor shield (0x%02x)...\n", shield_addr);
+    } else {
+        printf("Error: Invalid shield type '%s'\n", shield_type);
+        printf("Valid options: motor, led\n");
+        return 1;
+    }
+    
+    printf("Each channel will sweep from 0%% to 100%% and back over 2 seconds.\n");
+    printf("Total test time: ~8 seconds (4 channels x 2 seconds)\n\n");
+    
+    esp_err_t err = i2c_motor_pwm_sweep(shield_addr);
+    
+    if (err != ESP_OK) {
+        printf("Error during PWM sweep: %s\n", esp_err_to_name(err));
+        return 1;
+    }
+    
+    printf("\nPWM sweep completed successfully!\n");
+    return 0;
+}
+
 static void register_console_commands(void) {
     // Air pump command
     {
@@ -996,6 +1035,18 @@ static void register_console_commands(void) {
             .help    = "Display current plant information",
             .hint    = NULL,
             .func    = &cmd_plant_info,
+            .argtable= NULL
+        };
+        ESP_ERROR_CHECK(esp_console_cmd_register(&cmd));
+    }
+
+    // PWM sweep command
+    {
+        const esp_console_cmd_t cmd = {
+            .command = "pwm_sweep",
+            .help    = "Perform PWM sweep test on motor shield",
+            .hint    = "<motor|led>",
+            .func    = &cmd_pwm_sweep,
             .argtable= NULL
         };
         ESP_ERROR_CHECK(esp_console_cmd_register(&cmd));

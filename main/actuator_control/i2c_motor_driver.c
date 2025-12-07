@@ -110,6 +110,137 @@ static esp_err_t pca9685_set_pin(uint8_t pin, bool value)
     }
 }
 
+// Helper function to write to a register on a specific PCA9685 address
+static esp_err_t pca9685_write_register_addr(uint8_t addr, uint8_t reg, uint8_t value)
+{
+    i2c_cmd_handle_t cmd = i2c_cmd_link_create();
+    i2c_master_start(cmd);
+    i2c_master_write_byte(cmd, (addr << 1) | I2C_MASTER_WRITE, true);
+    i2c_master_write_byte(cmd, reg, true);
+    i2c_master_write_byte(cmd, value, true);
+    i2c_master_stop(cmd);
+    
+    esp_err_t ret = i2c_master_cmd_begin(i2c_motor_port, cmd, 1000 / portTICK_PERIOD_MS);
+    i2c_cmd_link_delete(cmd);
+    
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to write to register 0x%02x on address 0x%02x: %s", reg, addr, esp_err_to_name(ret));
+    }
+    return ret;
+}
+
+// Helper function to set PWM value for a specific pin on a specific address
+static esp_err_t pca9685_set_pwm_addr(uint8_t addr, uint8_t pin, uint16_t value)
+{
+    esp_err_t ret;
+    i2c_cmd_handle_t cmd = i2c_cmd_link_create();
+    
+    if (value > 4095) {
+        // Special case for full-on
+        i2c_master_start(cmd);
+        i2c_master_write_byte(cmd, (addr << 1) | I2C_MASTER_WRITE, true);
+        i2c_master_write_byte(cmd, PCA9685_LED0_ON_L + 4 * pin, true);
+        i2c_master_write_byte(cmd, 0x00, true);  // ON_L
+        i2c_master_write_byte(cmd, 0x10, true);  // ON_H (bit 4 = full on)
+        i2c_master_write_byte(cmd, 0x00, true);  // OFF_L
+        i2c_master_write_byte(cmd, 0x00, true);  // OFF_H
+        i2c_master_stop(cmd);
+    } else {
+        // Normal PWM
+        i2c_master_start(cmd);
+        i2c_master_write_byte(cmd, (addr << 1) | I2C_MASTER_WRITE, true);
+        i2c_master_write_byte(cmd, PCA9685_LED0_ON_L + 4 * pin, true);
+        i2c_master_write_byte(cmd, 0x00, true);  // ON_L
+        i2c_master_write_byte(cmd, 0x00, true);  // ON_H
+        i2c_master_write_byte(cmd, value & 0xFF, true);          // OFF_L
+        i2c_master_write_byte(cmd, (value >> 8) & 0x0F, true);   // OFF_H
+        i2c_master_stop(cmd);
+    }
+    
+    ret = i2c_master_cmd_begin(i2c_motor_port, cmd, 1000 / portTICK_PERIOD_MS);
+    i2c_cmd_link_delete(cmd);
+    
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to set PWM for pin %d on address 0x%02x: %s", pin, addr, esp_err_to_name(ret));
+    }
+    
+    return ret;
+}
+
+// Helper function to set a pin high or low on a specific address
+static esp_err_t pca9685_set_pin_addr(uint8_t addr, uint8_t pin, bool value)
+{
+    if (value == true) {
+        return pca9685_set_pwm_addr(addr, pin, 4096); // Full on
+    } else {
+        return pca9685_set_pwm_addr(addr, pin, 0);    // Off
+    }
+}
+
+// Helper function to initialize a single PCA9685 shield at a specific address
+static esp_err_t pca9685_init_shield(uint8_t addr, const char *name)
+{
+    esp_err_t ret;
+    
+    // Reset the PCA9685
+    ret = pca9685_write_register_addr(addr, PCA9685_MODE1, 0x80);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to reset %s at 0x%02x", name, addr);
+        return ret;
+    }
+    vTaskDelay(10 / portTICK_PERIOD_MS);
+    
+    // Set MODE1 register: enable auto-increment, normal mode
+    ret = pca9685_write_register_addr(addr, PCA9685_MODE1, 0x20); // Auto increment enabled
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
+    // Set MODE2 register: output logic state not inverted, outputs change on STOP
+    ret = pca9685_write_register_addr(addr, PCA9685_MODE2, 0x04);
+    if (ret != ESP_OK) {
+        return ret;
+    }
+    
+    // Set PWM frequency to maximum ~1526 Hz to reduce audible whine
+    // Formula: freq = 25MHz / (4096 * (prescale + 1))
+    // For max frequency, use minimum prescale value of 3
+    // This gives: 25000000 / (4096 * 4) = ~1526 Hz
+    uint8_t prescale = 3; // Minimum prescale for maximum frequency (~1526 Hz)
+    
+    // To set prescale, we need to set sleep mode first
+    ret = pca9685_write_register_addr(addr, PCA9685_MODE1, 0x30); // Set sleep bit
+    if (ret != ESP_OK) {
+        return ret;
+    }
+    
+    ret = pca9685_write_register_addr(addr, PCA9685_PRESCALE, prescale);
+    if (ret != ESP_OK) {
+        return ret;
+    }
+    
+    // Wake up
+    ret = pca9685_write_register_addr(addr, PCA9685_MODE1, 0x20);
+    if (ret != ESP_OK) {
+        return ret;
+    }
+    vTaskDelay(5 / portTICK_PERIOD_MS);
+    
+    // Final mode: enable auto increment
+    ret = pca9685_write_register_addr(addr, PCA9685_MODE1, 0xA0);
+    if (ret != ESP_OK) {
+        return ret;
+    }
+    
+    // Turn off all outputs
+    for (uint8_t i = 0; i < 16; i++) {
+        pca9685_set_pwm_addr(addr, i, 0);
+    }
+    
+    ESP_LOGI(TAG, "%s (0x%02x) initialized successfully", name, addr);
+    return ESP_OK;
+}
+
 esp_err_t i2c_motor_driver_init(i2c_port_t i2c_port, int sda_pin, int scl_pin, uint32_t clock_speed)
 {
     esp_err_t ret;
@@ -127,56 +258,18 @@ esp_err_t i2c_motor_driver_init(i2c_port_t i2c_port, int sda_pin, int scl_pin, u
     // Note: We're now using the I2C configuration from the power monitor
     // (SDA: GPIO_NUM_42, SCL: GPIO_NUM_41, 100kHz)
     
-    // Reset the PCA9685
-    ret = pca9685_write_register(PCA9685_MODE1, 0x80);
+    // Initialize pump motor shield (0x60) - required
+    ret = pca9685_init_shield(MOTOR_SHIELD_PUMP_ADDR, "Pump motor shield");
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to reset PCA9685");
-        return ret;
-    }
-    vTaskDelay(10 / portTICK_PERIOD_MS);
-    
-    // Set MODE1 register: enable auto-increment, normal mode
-    ret = pca9685_write_register(PCA9685_MODE1, 0x20); // Auto increment enabled
-    if (ret != ESP_OK) {
-        return ret;
-    }
-
-    // Set MODE2 register: output logic state not inverted, outputs change on STOP
-    ret = pca9685_write_register(PCA9685_MODE2, 0x04);
-    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to initialize pump motor shield - this is required!");
         return ret;
     }
     
-    // Set PWM frequency to 1600 Hz (default from Adafruit library)
-    uint8_t prescale = 25000000 / (4096 * 1600) - 1; // Based on 25MHz internal clock
-    
-    // To set prescale, we need to set sleep mode first
-    ret = pca9685_write_register(PCA9685_MODE1, 0x30); // Set sleep bit
+    // Initialize LED motor shield (0x61) - optional
+    ret = pca9685_init_shield(MOTOR_SHIELD_LED_ADDR, "LED motor shield");
     if (ret != ESP_OK) {
-        return ret;
-    }
-    
-    ret = pca9685_write_register(PCA9685_PRESCALE, prescale);
-    if (ret != ESP_OK) {
-        return ret;
-    }
-    
-    // Wake up
-    ret = pca9685_write_register(PCA9685_MODE1, 0x20);
-    if (ret != ESP_OK) {
-        return ret;
-    }
-    vTaskDelay(5 / portTICK_PERIOD_MS);
-    
-    // Final mode: enable auto increment
-    ret = pca9685_write_register(PCA9685_MODE1, 0xA0);
-    if (ret != ESP_OK) {
-        return ret;
-    }
-    
-    // Turn off all outputs
-    for (uint8_t i = 0; i < 16; i++) {
-        pca9685_set_pwm(i, 0);
+        ESP_LOGW(TAG, "LED motor shield not found or failed to initialize (this is optional)");
+        // Continue anyway - LED shield is optional
     }
     
     // Load motor direction settings from NVS
@@ -185,7 +278,7 @@ esp_err_t i2c_motor_driver_init(i2c_port_t i2c_port, int sda_pin, int scl_pin, u
         ESP_LOGW(TAG, "Failed to load motor direction settings, using defaults");
     }
     
-    ESP_LOGI(TAG, "I2C motor driver initialized successfully");
+    ESP_LOGI(TAG, "I2C motor driver initialization complete");
     return ESP_OK;
 }
 
@@ -292,17 +385,29 @@ esp_err_t i2c_led_set_brightness(uint8_t brightness)
         brightness = 100;
     }
     
-    ESP_LOGI(TAG, "Setting LED brightness to %u%%", brightness);
+    ESP_LOGI(TAG, "Setting LED brightness to %u%% on LED shield (0x%02x)", brightness, MOTOR_SHIELD_LED_ADDR);
     
-    // We're reusing the same motor channel that was previously used for the air pump
+    // LED is connected to motor channel 1 on the LED shield (0x61)
+    // Get the PWM pin for motor 1
+    const motor_pins_t *pins = &motor_pins[LED_CHANNEL_1 - 1];
+    
+    // Convert percentage to 12-bit PWM value (0-4095)
+    uint16_t pwm_value = (brightness * 4095) / 100;
+    
+    esp_err_t ret;
     if (brightness == 0) {
-        // Turn off LED
-        return i2c_motor_set(LED_CONTROL, 0, MOTOR_RELEASE);
+        // Turn off LED - release all control pins
+        ret = pca9685_set_pin_addr(MOTOR_SHIELD_LED_ADDR, pins->in1_pin, false);
+        ret |= pca9685_set_pin_addr(MOTOR_SHIELD_LED_ADDR, pins->in2_pin, false);
+        ret |= pca9685_set_pwm_addr(MOTOR_SHIELD_LED_ADDR, pins->pwm_pin, 0);
     } else {
-        // Set LED brightness using forward direction (same as with motors)
-        // This ensures proper PWM control
-        return i2c_motor_set(LED_CONTROL, brightness, MOTOR_FORWARD);
+        // Set LED brightness using forward direction
+        ret = pca9685_set_pin_addr(MOTOR_SHIELD_LED_ADDR, pins->in2_pin, false);
+        ret |= pca9685_set_pin_addr(MOTOR_SHIELD_LED_ADDR, pins->in1_pin, true);
+        ret |= pca9685_set_pwm_addr(MOTOR_SHIELD_LED_ADDR, pins->pwm_pin, pwm_value);
     }
+    
+    return ret;
 }
 
 esp_err_t i2c_food_pump_dose_ms(uint32_t duration_ms, uint8_t speed)
@@ -467,4 +572,69 @@ esp_err_t i2c_motor_save_direction_settings(void)
         ESP_LOGE(TAG, "Failed to save motor direction config: %s", esp_err_to_name(err));
     }
     return err;
+}
+
+esp_err_t i2c_motor_pwm_sweep(uint8_t shield_addr)
+{
+    const char *shield_name;
+    if (shield_addr == MOTOR_SHIELD_PUMP_ADDR) {
+        shield_name = "Pump motor shield";
+    } else if (shield_addr == MOTOR_SHIELD_LED_ADDR) {
+        shield_name = "LED motor shield";
+    } else {
+        ESP_LOGE(TAG, "Invalid shield address: 0x%02x", shield_addr);
+        return ESP_ERR_INVALID_ARG;
+    }
+    
+    ESP_LOGI(TAG, "Starting PWM sweep on %s (0x%02x)", shield_name, shield_addr);
+    
+    // Sweep through all 4 motor channels
+    for (uint8_t motor = 0; motor < 4; motor++) {
+        const motor_pins_t *pins = &motor_pins[motor];
+        
+        ESP_LOGI(TAG, "  Channel %d: Sweeping 0%% -> 100%% -> 0%%", motor + 1);
+        
+        // Set motor to forward direction
+        esp_err_t ret = pca9685_set_pin_addr(shield_addr, pins->in2_pin, false);
+        ret |= pca9685_set_pin_addr(shield_addr, pins->in1_pin, true);
+        
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to set direction for channel %d", motor + 1);
+            continue;
+        }
+        
+        // Sweep up from 0% to 100% over 1 second
+        for (uint8_t pwm = 0; pwm <= 100; pwm += 5) {
+            uint16_t pwm_value = (pwm * 4095) / 100;
+            ret = pca9685_set_pwm_addr(shield_addr, pins->pwm_pin, pwm_value);
+            if (ret != ESP_OK) {
+                ESP_LOGE(TAG, "Failed to set PWM for channel %d at %d%%", motor + 1, pwm);
+            }
+            vTaskDelay(pdMS_TO_TICKS(50)); // 50ms per step, 20 steps = 1 second
+        }
+        
+        // Sweep down from 100% to 0% over 1 second
+        for (int8_t pwm = 100; pwm >= 0; pwm -= 5) {
+            uint16_t pwm_value = (pwm * 4095) / 100;
+            ret = pca9685_set_pwm_addr(shield_addr, pins->pwm_pin, pwm_value);
+            if (ret != ESP_OK) {
+                ESP_LOGE(TAG, "Failed to set PWM for channel %d at %d%%", motor + 1, pwm);
+            }
+            vTaskDelay(pdMS_TO_TICKS(50)); // 50ms per step, 20 steps = 1 second
+        }
+        
+        // Release motor (turn off)
+        ret = pca9685_set_pin_addr(shield_addr, pins->in1_pin, false);
+        ret |= pca9685_set_pin_addr(shield_addr, pins->in2_pin, false);
+        ret |= pca9685_set_pwm_addr(shield_addr, pins->pwm_pin, 0);
+        
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to release channel %d", motor + 1);
+        }
+        
+        ESP_LOGI(TAG, "  Channel %d: Sweep complete", motor + 1);
+    }
+    
+    ESP_LOGI(TAG, "PWM sweep complete on %s", shield_name);
+    return ESP_OK;
 }

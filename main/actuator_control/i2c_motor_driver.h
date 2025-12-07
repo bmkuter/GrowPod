@@ -6,29 +6,33 @@
 #include <stdbool.h>
 #include "ina219.h"  // For shared I2C definitions
 
-// Default I2C address for the motor shield
-#define MOTOR_SHIELD_I2C_ADDR          0x60
+// I2C addresses for motor shields
+#define MOTOR_SHIELD_PUMP_ADDR         0x60  // Pump control motor shield
+#define MOTOR_SHIELD_LED_ADDR          0x61  // LED control motor shield
 
-// Define DC motor channels for each pump
-#define MOTOR_PLANTER_PUMP              1  // DC Motor #1
-#define MOTOR_FOOD_PUMP                2  // DC Motor #2 (food dosing pump)
-#define MOTOR_SOURCE_PUMP              3  // DC Motor #3
-#define LED_CONTROL                    4  // LED connected to motor channel 4
+// For backward compatibility
+#define MOTOR_SHIELD_I2C_ADDR          MOTOR_SHIELD_PUMP_ADDR
 
-// Future expansion - drain pump will use a different channel when added
-#define MOTOR_DRAIN_PUMP               5  // DC Motor #5 (future expansion)
+// Define DC motor channels for each pump (on 0x60 shield)
+#define MOTOR_PLANTER_PUMP             1  // DC Motor #1 - Planter pump
+#define MOTOR_FOOD_PUMP                2  // DC Motor #2 - Food dosing pump
+#define MOTOR_SOURCE_PUMP              3  // DC Motor #3 - Source pump
+#define MOTOR_DRAIN_PUMP               4  // DC Motor #4 - Drain pump
+
+// Define LED channels (on 0x61 shield)
+#define LED_CHANNEL_1                  1  // LED array on motor channel 1
 
 // Motor commands
 #define MOTOR_FORWARD                  1
 #define MOTOR_BACKWARD                 2
 #define MOTOR_RELEASE                  4  // Stop/brake the motor
 
-// Motor direction inversion settings
+// Motor direction inversion settings (for pump shield at 0x60)
 typedef struct {
     bool motor1_inverted;  // Planter pump
     bool motor2_inverted;  // Food pump
     bool motor3_inverted;  // Source pump
-    bool motor4_inverted;  // LED control (not typically used for direction)
+    bool motor4_inverted;  // Drain pump
 } motor_direction_config_t;
 
 /**
@@ -83,6 +87,8 @@ esp_err_t i2c_motor_stop_all(void);
 
 /**
  * @brief Set the LED brightness using PWM
+ * 
+ * Controls LED on channel 1 of the LED motor shield (address 0x61).
  * 
  * @param brightness Brightness level (0-100%)
  * @return esp_err_t ESP_OK on success, error code otherwise
@@ -160,5 +166,16 @@ esp_err_t i2c_food_pump_start(uint8_t speed);
  * @return esp_err_t ESP_OK on success, error code otherwise
  */
 esp_err_t i2c_food_pump_stop(void);
+
+/**
+ * @brief Perform a PWM sweep on all 4 channels of a motor shield
+ * 
+ * Sweeps each motor channel from 0% to 100% and back to 0% over 2 seconds.
+ * Tests all 4 motor channels sequentially.
+ * 
+ * @param shield_addr Motor shield I2C address (0x60 for pumps, 0x61 for LEDs)
+ * @return esp_err_t ESP_OK on success, error code otherwise
+ */
+esp_err_t i2c_motor_pwm_sweep(uint8_t shield_addr);
 
 #endif // I2C_MOTOR_DRIVER_H

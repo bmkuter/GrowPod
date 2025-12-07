@@ -334,6 +334,9 @@ void distance_sensor_task(void *pvParameters)
             
 #ifdef USE_CONTACT_SENSOR
             int dist_mm = contact_sensor_read_mm_actual();
+            vTaskDelay(pdMS_TO_TICKS(666)); // Slight delay to avoid I2C bus contention
+            xSemaphoreGive(sensor_mutex);
+            continue;
 #else
             int dist_mm = distance_sensor_read_mm_actual();
 #endif

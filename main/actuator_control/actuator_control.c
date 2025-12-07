@@ -132,10 +132,20 @@ void set_drain_pump_pwm(uint32_t duty_percentage)
     if (duty_percentage > 100) {
         duty_percentage = 100;
     }
-    ESP_LOGW(TAG, "Drain pump not currently connected - command ignored (future expansion)");
-    
-    // Future expansion: when drain pump is added, it will use MOTOR_DRAIN_PUMP (channel 5)
-    // For now, just update the tracking without actual hardware control
+
+    ESP_LOGI(TAG, "Setting drain pump PWM to %lu%%", (unsigned long)duty_percentage);
+
+    esp_err_t ret;
+    if (duty_percentage == 0) {
+        ret = i2c_motor_set(MOTOR_DRAIN_PUMP, 0, MOTOR_RELEASE);
+    } else {
+        ret = i2c_motor_set(MOTOR_DRAIN_PUMP, duty_percentage, MOTOR_FORWARD);
+    }
+
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to set drain pump: %s", esp_err_to_name(ret));
+    }
+
     update_actuator_info(ACTUATOR_IDX_DRAIN_PUMP, (float)duty_percentage);
 }
 

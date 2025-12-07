@@ -1671,7 +1671,7 @@ void schedule_planter_task(void *pvParam) {
                     ESP_LOGI(TAG, "Planter duty: %d%%, sec_into_hour: %d, on_seconds: %d", duty, sec_into_hour, on_seconds);
 
 
-                    { actuator_command_t cmd = { .cmd_type = ACTUATOR_CMD_PLANTER_PUMP_PWM, .value = 65 }; xQueueSend(actuator_queue, &cmd, portMAX_DELAY); }
+                    { actuator_command_t cmd = { .cmd_type = ACTUATOR_CMD_PLANTER_PUMP_PWM, .value = 100 }; xQueueSend(actuator_queue, &cmd, portMAX_DELAY); }
                 } else {
                     { actuator_command_t cmd = { .cmd_type = ACTUATOR_CMD_PLANTER_PUMP_PWM, .value = 0 }; xQueueSend(actuator_queue, &cmd, portMAX_DELAY); }
                 }
