@@ -11,7 +11,6 @@
 
 #include "actuator_control.h"   // For set_air_pump_pwm, set_source_pump_pwm, set_drain_pump_pwm, set_planter_pump_pwm, set_led_array_binary (or set_led_array_pwm)
 #include "power_monitor_HAL.h"  // For power monitoring abstraction
-#include "flowmeter_control.h"  // For flow rate reading
 #include "control_logic.h"      // For system_state_t, get_system_state, etc.
 #include "distance_sensor.h"    // For distance_sensor_read_mm()
 #include "pod_state.h"  // Add pod_state

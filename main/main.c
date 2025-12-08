@@ -4,7 +4,6 @@
 #include "actuator_control.h"
 #include "uart_comm.h"
 #include "power_monitor_HAL.h"
-#include "flowmeter_control.h"
 #include "distance_sensor.h"
 #include "https_server/https_server.h"
 #include "freertos/FreeRTOS.h"
@@ -253,17 +252,13 @@ void app_main(void) {
     // Initialize actuators
     xTaskCreate(actuator_control_task, "actuator_control_task", 4096, NULL, 5, NULL);
 
-    // // Initialize and start flowmeter task
-    // if (flowmeter_init() == ESP_OK) {
-    //     xTaskCreate(flowmeter_task, "flowmeter_task", 4096, NULL, 5, NULL);
-    // } else {
-    //     ESP_LOGE("MAIN", "Failed to initialize flowmeter");
-    // }
-
-    // // Initialize control logic
+    // Note: Flowmeter has been removed - waiting for new hardware prototype
+    
+    // Note: Control logic temporarily disabled pending sensor updates
     // ret = control_logic_init();
     // if (ret != ESP_OK) {
     //     ESP_LOGE("MAIN", "Failed to initialize control logic module");
     // }
+    
     log_memory_stats();
 }

@@ -1,6 +1,5 @@
 #include "control_logic.h"
 #include "esp_log.h"
-#include "flowmeter_control.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -177,20 +176,13 @@ const char *get_system_status_string(system_state_t state) {
 // -----------------------------------------------------------
 void control_logic_task(void *pvParameter) {
     while (1) {
-        // Monitor overflow flowmeter
-        float overflow_flow_rate = get_overflow_flow_rate();
-        if (overflow_flow_rate > OVERFLOW_THRESHOLD) {
-            handle_overflow_event();
-        }
-
+        // Note: Flowmeter monitoring removed - waiting for new hardware prototype
+        // TODO: Implement new sensor-based overflow detection when FDC1004 is calibrated
+        
         // Monitor emptying water completion
         if (current_system_state == SYSTEM_STATE_EMPTYING_WATER) {
-            // Check if drain flow rate has decreased below a threshold
-            float drain_flow_rate = get_drain_flow_rate();
-            if (drain_flow_rate < SOME_MIN_FLOW_RATE) {
-                // Emptying is complete
-                stop_emptying_water();
-            }
+            // TODO: Implement water level-based drain completion detection
+            // using FDC1004 capacitive sensor
         }
 
         // Add other monitoring/logic for the feeding cycle, etc.

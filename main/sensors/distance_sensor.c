@@ -1,14 +1,11 @@
 #include "distance_sensor.h"
+#include "fdc1004_distance_sensor.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
 #include <string.h>
-#include <math.h>  // For sqrtf() in standard deviation calculation
-
-#if ACTIVE_SENSOR == USE_CONTACT_SENSOR
-#include "contact_sensor.h"
-#endif
+#include <math.h>
 
 // NVS for pod calibration persistence
 #include "nvs_flash.h"
@@ -26,106 +23,13 @@ static volatile uint32_t last_measurement_time = 0;
 // Last filtered distance measurement
 static volatile int last_filtered_distance_mm = WATER_LEVEL_ERROR_MM;
 
-// Dynamic calibration parameters
-static int sensor_offset_mm = 0;           // default laser offset in mm (fallback until NVS load)
-static int pod_empty_height_mm = TANK_EMPTY_HEIGHT_MM;
-static int pod_full_height_mm = 0;          // set after load or calibration
-
-// Calibration scale factor (actual/raw), default=1.0
-static float sensor_scale_factor = 1.0f;
-
 //===========================================================
-// If using laser sensor (I2C)
-#if defined(USE_LASER_SENSOR)
-
-#include "driver/i2c.h"
-#include "driver/i2c_master.h"
-
-// Laser sensor I2C address
-#define LASER_I2C_ADDRESS   0x74
-
-// Write register helper
-static esp_err_t laser_write_reg(uint8_t reg, const uint8_t *data, size_t len)
-{
-    // We need to send [reg][data...]
-    uint8_t buf[len + 1];
-    buf[0] = reg;
-    memcpy(&buf[1], data, len);
-
-    // Write to the device in one shot:
-    return i2c_master_write_to_device(
-        I2C_NUM_0,
-        LASER_I2C_ADDRESS, 
-        buf, 
-        len + 1, 
-        pdMS_TO_TICKS(50)
-    );
-}
-
-// Read register helper
-static esp_err_t laser_read_reg(uint8_t reg, uint8_t *data, size_t len)
-{
-    // 1) Write the register address
-    // 2) Then read 'len' bytes into 'data'
-
-    // The new API does this in one line:
-    return i2c_master_write_read_device(
-        I2C_NUM_0,
-        LASER_I2C_ADDRESS,
-        &reg,  // pointer to register address
-        1,     // size of register address
-        data, 
-        len, 
-        pdMS_TO_TICKS(50)
-    );
-}
-
-
-static int laser_get_distance_mm(void)
-{
-    // Command the laser to start measurement
-    uint8_t dat = 0xB0;
-    esp_err_t ret = laser_write_reg(0x10, &dat, 1);
-    if (ret != ESP_OK) {
-        return -1; 
-    }
-    vTaskDelay(pdMS_TO_TICKS(50)); // Wait for measurement to complete
-
-    // Read 2 bytes from register 0x02
-    uint8_t buf[2];
-    ret = laser_read_reg(0x02, buf, 2);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to read distance from laser sensor: %s", esp_err_to_name(ret));
-        return -1;
-    }
-
-    // Get raw value without any calibration
-    int raw = ((int)buf[0] << 8) | buf[1];
-    ESP_LOGD(TAG, "Raw laser sensor reading: %d mm", raw);
-    
-    // Check for obviously invalid readings
-    if (raw <= 0) {
-        ESP_LOGW(TAG, "Invalid sensor raw reading: %d mm", raw);
-        return -1;
-    }
-    
-    return raw;
-}
-
-
-static esp_err_t laser_init_hw(void) {
-    // Assume i2c_master_init() is already called in app_main
-    return ESP_OK;
-}
-
-#endif // USE_LASER_SENSOR
-
-//===========================================================
-// Common entry points
+// FDC1004 Capacitive Sensor Initialization
 //===========================================================
 esp_err_t distance_sensor_init(void)
 {
-    uint32_t err = ESP_OK;
+    esp_err_t err = ESP_OK;
+    
     // Load calibration first for global pod state
     pod_state_load_settings(&s_pod_state);
     ESP_LOGI(TAG, "Pod state initialized: empty_raw=%d mm, full_raw=%d mm, headspace_raw=%d mm",
@@ -141,23 +45,16 @@ esp_err_t distance_sensor_init(void)
         ESP_LOGI(TAG, "Sensor access mutex created");
     }
     
-    // Initialize hardware based on selected sensor
-#if ACTIVE_SENSOR == USE_LASER_SENSOR
-    ESP_LOGI(TAG, "Distance sensor: LASER mode (legacy), I2C=0x74");
-    err = laser_init_hw();
-#elif ACTIVE_SENSOR == USE_CONTACT_SENSOR
-    ESP_LOGI(TAG, "Distance sensor: CONTACT mode via MCP23017");
-    err = contact_sensor_init_hw();
-#else
-    ESP_LOGE(TAG, "No sensor mode defined!");
-    return ESP_FAIL;
-#endif
+    // Initialize FDC1004 capacitive distance sensor
+    ESP_LOGI(TAG, "Initializing FDC1004 capacitive distance sensor...");
+    err = fdc1004_init();
+    
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to initialize distance sensor hardware: %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, "Failed to initialize FDC1004 sensor: %s", esp_err_to_name(err));
         return err;
     }
-    ESP_LOGI(TAG, "Distance sensor initialized");
-    // Load persisted calibration (already done at start of this function)
+    
+    ESP_LOGI(TAG, "FDC1004 distance sensor initialized successfully");
     ESP_LOGI(TAG, "Calibration loaded: empty=%d mm, full=%d mm, headspace=%d mm", 
             s_pod_state.raw_empty_mm, s_pod_state.raw_full_mm, s_pod_state.raw_headspace_mm);
 
@@ -167,118 +64,23 @@ esp_err_t distance_sensor_init(void)
 /**
  * @brief Take an actual reading from the distance sensor hardware
  * 
- * This is an internal function that accesses the sensor hardware directly.
+ * This is an internal function that accesses the FDC1004 sensor directly.
  * It should only be called when the mutex is held to prevent concurrent access.
  * 
- * @note This function takes about 400ms to complete (due to averaging multiple readings)
  * @return Distance in mm, or negative value if error
  */
 static int distance_sensor_read_mm_actual(void)
 {
-    // Per-reading Kalman filter state variables
-    static float reading_kf_x = -1.0f;          // current reading estimate (mm)
-    static float reading_kf_P = 25.0f;          // reading estimate variance (mm^2)
-    static const float reading_kf_Q = 0.07f;     // reading process noise variance
-    static const float reading_kf_R = 15.0f;    // individual reading noise variance (higher than averaged)
-    static bool reading_kf_initialized = false; // Flag to check if filter is initialized
-
-    const int avg_count = 4;
-    const int max_acceptable_distance = 400; // Maximum acceptable distance in mm
-    const int min_acceptable_distance = 10;  // Minimum acceptable distance in mm
+    // Read distance from FDC1004 capacitive sensor
+    int dist_mm = fdc1004_read_distance_mm();
     
-    int readings[avg_count];  // Store individual readings for analysis
-    int sum = 0;
-    int valid_readings = 0;
-    int retries = 0;
-    const int max_retries = 3; // Max number of retries for anomalous readings
-
-    #if SENSOR_VERBOSE_LOGS
-    ESP_LOGD(TAG, "Starting laser distance measurement (averaging %d readings)", avg_count);
-    #endif
-    
-    // Take multiple readings and apply Kalman filter to each one before averaging
-    for (int i = 0; i < avg_count; i++) {
-        int retry_count = 0;
-        int raw_tmp;
-        int filtered_tmp;
-        
-        // Try up to max_retries times to get a reading within acceptable range
-        do {
-            raw_tmp = laser_get_distance_mm();
-            
-            // Apply Kalman filter to each individual raw reading
-            if (raw_tmp > 0) {
-                // Initialize per-reading filter if needed
-                if (!reading_kf_initialized) {
-                    reading_kf_x = (float)raw_tmp;
-                    reading_kf_P = reading_kf_R;
-                    reading_kf_initialized = true;
-                    filtered_tmp = raw_tmp;
-                } else {
-                    // Standard Kalman filter update
-                    float P_pred = reading_kf_P + reading_kf_Q;
-                    float K = P_pred / (P_pred + reading_kf_R);
-                    reading_kf_x = reading_kf_x + K * ((float)raw_tmp - reading_kf_x);
-                    reading_kf_P = (1.0f - K) * P_pred;
-                    filtered_tmp = (int)(reading_kf_x + 0.5f);
-                    
-                    #if SENSOR_VERBOSE_LOGS
-                    ESP_LOGD(TAG, "Reading #%d: RaD=%d mm, K=%.3f, Filtered=%d", 
-                             i+1, raw_tmp, (double)K, filtered_tmp);
-                    #endif
-                }
-            } else {
-                // Invalid reading, pass through
-                filtered_tmp = raw_tmp;
-            }
-            
-            // Check if filtered reading is out of acceptable range but technically valid
-            if (filtered_tmp > 0 && (filtered_tmp > max_acceptable_distance || filtered_tmp < min_acceptable_distance)) {
-                ESP_LOGW(TAG, "Anomalous reading #%d: %d mm (raw=%d mm) (outside %d-%d mm range), retry %d/%d", 
-                        i+1, filtered_tmp, raw_tmp, min_acceptable_distance, max_acceptable_distance, 
-                        retry_count+1, max_retries);
-                
-                // Only count as a retry if it's out of range but > 0
-                retry_count++;
-                retries++;
-                vTaskDelay(pdMS_TO_TICKS(10)); // Slightly longer delay before retry
-            } else {
-                // Either good reading or error (< 0)
-                break;
-            }
-        } while (retry_count < max_retries);
-        
-        if (filtered_tmp > 0 && filtered_tmp <= max_acceptable_distance && filtered_tmp >= min_acceptable_distance) {  
-            // Valid reading within acceptable range
-            readings[valid_readings] = filtered_tmp;
-            sum += filtered_tmp;
-            valid_readings++;
-            #if SENSOR_VERBOSE_LOGS
-            ESP_LOGD(TAG, "ReadDng #%d: %d mm (filtered from raw=%d mm) (valid)", 
-                    i+1, filtered_tmp, raw_tmp);
-            #endif
-        } else if (filtered_tmp > 0) {
-            // Still out of range after retries
-            ESP_LOGW(TAG, "Reading #%d: %d mm (filtered from raw=%d mm) (out of range, discarded)", 
-                    i+1, filtered_tmp, raw_tmp);
-        } else {
-            // Error reading
-            ESP_LOGW(TAG, "Invalid laser reading attempt (%d) %d/%d", filtered_tmp, i+1, avg_count);
-        }
-        
-        // Small delay between readings
-        vTaskDelay(pdMS_TO_TICKS(1));
-    }
-    
-    if (valid_readings >= avg_count/2) {
-        int raw_result = sum / valid_readings;
-        return raw_result;
-    } else {
-        ESP_LOGW(TAG, "Too few valid readings (%d/%d), returning error", valid_readings, avg_count);
+    if (dist_mm < 0) {
+        ESP_LOGW(TAG, "Failed to read FDC1004 distance sensor");
         return -1;
     }
-    ESP_LOGE(TAG, "Too many invalid readings (%d/%d failed)", avg_count - valid_readings, avg_count);
-    return -1;
+    
+    ESP_LOGD(TAG, "FDC1004 distance: %d mm", dist_mm);
+    return dist_mm;
 }
 
 int distance_sensor_read_mm(void)
@@ -330,16 +132,8 @@ void distance_sensor_task(void *pvParameters)
     while (1) {
         // Try to acquire mutex with a shorter timeout since this is a background task
         if (xSemaphoreTake(sensor_mutex, pdMS_TO_TICKS(500)) == pdTRUE) {
-            // Take a direct sensor reading (already Kalman filtered internally)
-            
-#ifdef USE_CONTACT_SENSOR
-            int dist_mm = contact_sensor_read_mm_actual();
-            vTaskDelay(pdMS_TO_TICKS(666)); // Slight delay to avoid I2C bus contention
-            xSemaphoreGive(sensor_mutex);
-            continue;
-#else
+            // Take a direct sensor reading from FDC1004
             int dist_mm = distance_sensor_read_mm_actual();
-#endif
 
             if (dist_mm >= 0) {
                 // Valid raw reading - update cached raw value
@@ -458,14 +252,7 @@ int distance_sensor_get_max_level_mm(void)
     return adjusted_range;
 }
 
-/**
- * @brief Set the global sensor scale factor used for level conversion
- * @param factor Scale factor (actual/raw)
- */
-void distance_sensor_set_scale_factor(float factor)
-{
-    sensor_scale_factor = factor;
-}
+
 
 /**
  * @brief Get the absolute maximum water level the tank can hold in mm

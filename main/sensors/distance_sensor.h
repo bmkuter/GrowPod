@@ -18,18 +18,8 @@ extern "C" {
 // Sentinel value for invalid water level readings
 #define WATER_LEVEL_ERROR_MM (-10000)
 
-// Sensor type definitions
-#define USE_LASER_SENSOR      1
-#define USE_CONTACT_SENSOR    2
-
-// Sensor selection (default to contact sensor if not defined)
-#ifndef ACTIVE_SENSOR
-#define ACTIVE_SENSOR         USE_CONTACT_SENSOR
-#endif
-
-#if ACTIVE_SENSOR == USE_CONTACT_SENSOR
-#include "contact_sensor.h"
-#endif
+// Use FDC1004 capacitive sensor as the backend
+#include "fdc1004_distance_sensor.h"
 
 /**
  * @brief Initialize the distance sensor subsystem (laser sensor).
