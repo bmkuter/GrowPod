@@ -379,17 +379,23 @@ esp_err_t i2c_motor_stop_all(void)
     return ESP_OK;
 }
 
-esp_err_t i2c_led_set_brightness(uint8_t brightness)
+esp_err_t i2c_led_set_channel_brightness(uint8_t channel, uint8_t brightness)
 {
+    // Validate channel number (1-4)
+    if (channel < 1 || channel > 4) {
+        ESP_LOGE(TAG, "Invalid LED channel %u. Must be 1-4", channel);
+        return ESP_ERR_INVALID_ARG;
+    }
+    
     if (brightness > 100) {
         brightness = 100;
     }
     
-    ESP_LOGI(TAG, "Setting LED brightness to %u%% on LED shield (0x%02x)", brightness, MOTOR_SHIELD_LED_ADDR);
+    ESP_LOGI(TAG, "Setting LED channel %u brightness to %u%% on LED shield (0x%02x)", 
+             channel, brightness, MOTOR_SHIELD_LED_ADDR);
     
-    // LED is connected to motor channel 1 on the LED shield (0x61)
-    // Get the PWM pin for motor 1
-    const motor_pins_t *pins = &motor_pins[LED_CHANNEL_1 - 1];
+    // Get the PWM pins for the specified channel
+    const motor_pins_t *pins = &motor_pins[channel - 1];
     
     // Convert percentage to 12-bit PWM value (0-4095)
     uint16_t pwm_value = (brightness * 4095) / 100;

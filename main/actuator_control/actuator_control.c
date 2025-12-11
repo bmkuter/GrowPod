@@ -214,12 +214,14 @@ void set_led_array_pwm(uint32_t duty_percentage)
         duty_percentage = 100;
     }
     
-    ESP_LOGI(TAG, "Setting LED array PWM to %lu%%", (unsigned long)duty_percentage);
+    ESP_LOGI(TAG, "Setting all LED channels to %lu%%", (unsigned long)duty_percentage);
 
-    // Use the I2C motor driver to control the LED
-    esp_err_t ret = i2c_led_set_brightness(duty_percentage);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to set LED brightness: %s", esp_err_to_name(ret));
+    // Set all 4 LED channels to the same brightness
+    for (uint8_t channel = 1; channel <= 4; channel++) {
+        esp_err_t ret = i2c_led_set_channel_brightness(channel, duty_percentage);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to set LED channel %u brightness: %s", channel, esp_err_to_name(ret));
+        }
     }
 
     // Update actuator info
@@ -228,16 +230,43 @@ void set_led_array_pwm(uint32_t duty_percentage)
 
 void set_led_array_binary(bool state)
 {
-    ESP_LOGI(TAG, "Setting LED array to %s", state ? "ON" : "OFF");
+    ESP_LOGI(TAG, "Setting all LED channels to %s", state ? "ON" : "OFF");
     
-    // Use the I2C motor driver to control the LED (binary on/off)
-    esp_err_t ret = i2c_led_set_brightness(state ? 100 : 0);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to set LED state: %s", esp_err_to_name(ret));
+    uint32_t brightness = state ? 100 : 0;
+    
+    // Set all 4 LED channels to the same state
+    for (uint8_t channel = 1; channel <= 4; channel++) {
+        esp_err_t ret = i2c_led_set_channel_brightness(channel, brightness);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to set LED channel %u state: %s", channel, esp_err_to_name(ret));
+        }
     }
 
     // For LED array, we treat on=100%, off=0%
     update_actuator_info(ACTUATOR_IDX_LED_ARRAY, state ? 100.0f : 0.0f);
+}
+
+void set_led_channel_pwm(uint8_t channel, uint32_t duty_percentage)
+{
+    if (channel < 1 || channel > 4) {
+        ESP_LOGE(TAG, "Invalid LED channel %u. Must be 1-4", channel);
+        return;
+    }
+    
+    if (duty_percentage > 100) {
+        duty_percentage = 100;
+    }
+    
+    ESP_LOGI(TAG, "Setting LED channel %u PWM to %lu%%", channel, (unsigned long)duty_percentage);
+
+    // Use the I2C motor driver to control the specific LED channel
+    esp_err_t ret = i2c_led_set_channel_brightness(channel, duty_percentage);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to set LED channel %u brightness: %s", channel, esp_err_to_name(ret));
+    }
+
+    // Note: We don't update the global actuator_info for individual channels yet
+    // This could be extended in the future with per-channel tracking
 }
 
 // -----------------------------------------------------------
@@ -273,6 +302,10 @@ void actuator_control_task(void *pvParameters)
 
                 case ACTUATOR_CMD_LED_ARRAY_PWM:
                     set_led_array_pwm(command.value);
+                    break;
+
+                case ACTUATOR_CMD_LED_CHANNEL_PWM:
+                    set_led_channel_pwm(command.channel, command.value);
                     break;
 
                 default:

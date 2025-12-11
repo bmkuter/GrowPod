@@ -1436,7 +1436,10 @@ static esp_err_t drainpump_post_handler(httpd_req_t *req)
 }
 
 //-----------------------------------------------------------------------------------
-// Handler for LED POST request (JSON: {"state": "on"|"off"})
+// Handler for LED POST request
+// JSON formats:
+//   {"value": <0..100>}              - Set all LED channels to same PWM value
+//   {"channel": <1..4>, "value": <0..100>} - Set specific LED channel
 //-----------------------------------------------------------------------------------
 static esp_err_t led_post_handler(httpd_req_t *req)
 {
@@ -1448,7 +1451,7 @@ static esp_err_t led_post_handler(httpd_req_t *req)
     }
     content[ret] = '\0';  // Null-terminate the content
 
-    ESP_LOGI(TAG, "Received content: %s", content);
+    ESP_LOGI(TAG, "Received LED command: %s", content);
 
     // Parse JSON
     cJSON *json = cJSON_Parse(content);
@@ -1457,25 +1460,54 @@ static esp_err_t led_post_handler(httpd_req_t *req)
         return ESP_FAIL;
     }
 
-    cJSON *state = cJSON_GetObjectItem(json, "state");
-    if (!state || !cJSON_IsString(state)) {
-        ESP_LOGE(TAG, "Invalid or missing 'state' in JSON");
-        cJSON_Delete(json);
-        return ESP_FAIL;
-    }
+    // Check for channel-specific control
+    cJSON *channel_json = cJSON_GetObjectItem(json, "channel");
+    cJSON *value_json = cJSON_GetObjectItem(json, "value");
 
-    // Set LED array state: "on" -> true, "off" -> false
-    if (strcmp(state->valuestring, "on") == 0) {
-        set_led_array_pwm(100);
-        // set_led_array_binary(true);
-        httpd_resp_sendstr(req, "LED array turned ON");
-    } else if (strcmp(state->valuestring, "off") == 0) {
-        set_led_array_pwm(0);
-        // set_led_array_binary(false);
-        httpd_resp_sendstr(req, "LED array turned OFF");
+    if (channel_json && cJSON_IsNumber(channel_json) && value_json && cJSON_IsNumber(value_json)) {
+        // Channel-specific control
+        int channel = channel_json->valueint;
+        int value = value_json->valueint;
+        
+        if (channel < 1 || channel > 4) {
+            ESP_LOGE(TAG, "Invalid channel %d. Must be 1-4", channel);
+            cJSON_Delete(json);
+            httpd_resp_sendstr(req, "Invalid channel. Must be 1-4");
+            return ESP_FAIL;
+        }
+        
+        if (value < 0 || value > 100) {
+            ESP_LOGE(TAG, "Invalid value %d. Must be 0-100", value);
+            cJSON_Delete(json);
+            httpd_resp_sendstr(req, "Invalid value. Must be 0-100");
+            return ESP_FAIL;
+        }
+        
+        set_led_channel_pwm((uint8_t)channel, (uint32_t)value);
+        char response[64];
+        snprintf(response, sizeof(response), "LED channel %d set to %d%%", channel, value);
+        httpd_resp_sendstr(req, response);
+        
+    } else if (value_json && cJSON_IsNumber(value_json)) {
+        // All channels control
+        int value = value_json->valueint;
+        
+        if (value < 0 || value > 100) {
+            ESP_LOGE(TAG, "Invalid value %d. Must be 0-100", value);
+            cJSON_Delete(json);
+            httpd_resp_sendstr(req, "Invalid value. Must be 0-100");
+            return ESP_FAIL;
+        }
+        
+        set_led_array_pwm((uint32_t)value);
+        char response[64];
+        snprintf(response, sizeof(response), "All LED channels set to %d%%", value);
+        httpd_resp_sendstr(req, response);
+        
     } else {
-        ESP_LOGE(TAG, "Invalid 'state' value, must be 'on' or 'off'");
+        ESP_LOGE(TAG, "Invalid JSON format. Expected {\"value\": 0-100} or {\"channel\": 1-4, \"value\": 0-100}");
         cJSON_Delete(json);
+        httpd_resp_sendstr(req, "Invalid JSON format");
         return ESP_FAIL;
     }
 

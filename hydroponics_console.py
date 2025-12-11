@@ -11,6 +11,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from datetime import datetime
 import time
 import tkinter as tk
+from tkinter import messagebox, ttk
 
 # JUST FOR DEBUG, REMOVE ME DURING PRODUCTION
 import urllib3
@@ -93,6 +94,616 @@ def prompt_schedule_24(initial_schedule=None):
     root.mainloop()
     return result
 
+def prompt_schedule_actuators():
+    """
+    Opens a unified Tkinter window for configuring all schedule parameters.
+    Shows all actuator controls in a single grouped panel.
+    Returns a dictionary with schedule configuration or None if cancelled.
+    """
+    result = None
+
+    def on_confirm():
+        nonlocal result
+        
+        # Validate schedule name
+        sched_name = schedule_name_entry.get().strip()
+        if not sched_name:
+            tk.messagebox.showerror("Error", "Schedule name cannot be empty.")
+            return
+        
+        # Validate start time
+        start_time_str = start_time_entry.get().strip()
+        try:
+            datetime.strptime(start_time_str, "%H:%M")
+        except ValueError:
+            tk.messagebox.showerror("Error", "Invalid start time format. Use HH:MM (e.g., 18:00)")
+            return
+        
+        # Validate duration
+        duration_str = duration_entry.get().strip()
+        try:
+            parts = duration_str.split(":")
+            if len(parts) != 2:
+                raise ValueError("Incorrect format")
+            hours = int(parts[0])
+            minutes = int(parts[1])
+            if hours < 0 or minutes < 0 or minutes >= 60:
+                raise ValueError("Hours must be >= 0 and minutes must be between 0 and 59.")
+            duration = hours * 60 + minutes
+            if duration <= 0:
+                raise ValueError("Duration must be greater than 0.")
+        except ValueError as ve:
+            tk.messagebox.showerror("Error", f"Invalid duration format: {ve}")
+            return
+        
+        # Get frequency
+        frequency = frequency_var.get().lower()
+        
+        # Get day of week if weekly
+        day_of_week = None
+        if frequency == 'weekly':
+            day_of_week = day_var.get()
+            if not day_of_week or day_of_week == "Select Day":
+                tk.messagebox.showerror("Error", "Please select a day of the week for weekly schedules.")
+                return
+        
+        # Collect actuator actions
+        actions = {}
+        
+        if led_enabled.get():
+            actions['led'] = {'value': led_scale.get()}
+        
+        if airpump_enabled.get():
+            actions['airpump'] = {'value': airpump_scale.get()}
+        
+        if sourcepump_enabled.get():
+            actions['sourcepump'] = {'value': sourcepump_scale.get()}
+        
+        if planterpump_enabled.get():
+            actions['planterpump'] = {'value': planterpump_scale.get()}
+        
+        if drainpump_enabled.get():
+            actions['drainpump'] = {'value': drainpump_scale.get()}
+        
+        if not actions:
+            tk.messagebox.showerror("Error", "No actuators enabled. Please enable at least one actuator.")
+            return
+        
+        # Build result dictionary
+        result = {
+            'schedule_name': sched_name,
+            'start_time': start_time_str,
+            'duration_minutes': duration,
+            'frequency': frequency,
+            'day_of_week': day_of_week,
+            'actions': actions
+        }
+        
+        root.destroy()
+
+    def on_cancel():
+        nonlocal result
+        result = None
+        root.destroy()
+
+    def toggle_day_selector(*args):
+        """Enable/disable day selector based on frequency"""
+        if frequency_var.get() == 'weekly':
+            day_menu.config(state='normal')
+        else:
+            day_menu.config(state='disabled')
+
+    # Create main window
+    root = tk.Tk()
+    root.title("Actuator Schedule Setup")
+    root.geometry("600x700")
+    
+    # Main container with scrollbar
+    main_frame = tk.Frame(root)
+    main_frame.pack(fill="both", expand=True, padx=10, pady=10)
+    
+    # ========== Schedule Information Section ==========
+    info_frame = tk.LabelFrame(main_frame, text="Schedule Information", padx=10, pady=10)
+    info_frame.pack(fill="x", pady=(0, 10))
+    
+    # Schedule Name
+    tk.Label(info_frame, text="Schedule Name:", anchor="w").grid(row=0, column=0, sticky="w", pady=5)
+    schedule_name_entry = tk.Entry(info_frame, width=30)
+    schedule_name_entry.grid(row=0, column=1, sticky="ew", pady=5)
+    
+    # Start Time
+    tk.Label(info_frame, text="Start Time (HH:MM):", anchor="w").grid(row=1, column=0, sticky="w", pady=5)
+    start_time_entry = tk.Entry(info_frame, width=30)
+    start_time_entry.insert(0, "18:00")
+    start_time_entry.grid(row=1, column=1, sticky="ew", pady=5)
+    
+    # Duration
+    tk.Label(info_frame, text="Duration (HH:MM):", anchor="w").grid(row=2, column=0, sticky="w", pady=5)
+    duration_entry = tk.Entry(info_frame, width=30)
+    duration_entry.insert(0, "01:00")
+    duration_entry.grid(row=2, column=1, sticky="ew", pady=5)
+    
+    # Frequency
+    tk.Label(info_frame, text="Frequency:", anchor="w").grid(row=3, column=0, sticky="w", pady=5)
+    frequency_var = tk.StringVar(value="daily")
+    freq_frame = tk.Frame(info_frame)
+    freq_frame.grid(row=3, column=1, sticky="w", pady=5)
+    tk.Radiobutton(freq_frame, text="Daily", variable=frequency_var, value="daily", command=toggle_day_selector).pack(side="left", padx=5)
+    tk.Radiobutton(freq_frame, text="Weekly", variable=frequency_var, value="weekly", command=toggle_day_selector).pack(side="left", padx=5)
+    
+    # Day of Week (for weekly)
+    tk.Label(info_frame, text="Day of Week:", anchor="w").grid(row=4, column=0, sticky="w", pady=5)
+    day_var = tk.StringVar(value="Monday")
+    days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+    day_menu = tk.OptionMenu(info_frame, day_var, *days)
+    day_menu.grid(row=4, column=1, sticky="w", pady=5)
+    day_menu.config(state='disabled')  # Initially disabled for daily
+    
+    info_frame.columnconfigure(1, weight=1)
+    
+    # ========== Actuators Section ==========
+    actuators_frame = tk.LabelFrame(main_frame, text="Actuators Configuration", padx=10, pady=10)
+    actuators_frame.pack(fill="both", expand=True, pady=(0, 10))
+    
+    # Helper function to create actuator control
+    def create_actuator_control(parent, row, name, default_value=0):
+        enabled_var = tk.BooleanVar(value=False)
+        
+        # Checkbox
+        cb = tk.Checkbutton(parent, text=name, variable=enabled_var, width=15, anchor="w")
+        cb.grid(row=row, column=0, sticky="w", pady=5)
+        
+        # Scale
+        scale = tk.Scale(parent, from_=0, to=100, orient="horizontal", length=300, 
+                        state='disabled', label="PWM %")
+        scale.set(default_value)
+        scale.grid(row=row, column=1, sticky="ew", pady=5, padx=(10, 0))
+        
+        # Enable/disable scale based on checkbox
+        def toggle_scale():
+            scale.config(state='normal' if enabled_var.get() else 'disabled')
+        
+        cb.config(command=toggle_scale)
+        
+        return enabled_var, scale
+    
+    # Create actuator controls
+    led_enabled, led_scale = create_actuator_control(actuators_frame, 0, "LED Array", 100)
+    airpump_enabled, airpump_scale = create_actuator_control(actuators_frame, 1, "Air Pump", 80)
+    sourcepump_enabled, sourcepump_scale = create_actuator_control(actuators_frame, 2, "Source Pump", 100)
+    planterpump_enabled, planterpump_scale = create_actuator_control(actuators_frame, 3, "Planter Pump", 100)
+    drainpump_enabled, drainpump_scale = create_actuator_control(actuators_frame, 4, "Drain Pump", 100)
+    
+    actuators_frame.columnconfigure(1, weight=1)
+    
+    # ========== Buttons Section ==========
+    button_frame = tk.Frame(main_frame)
+    button_frame.pack(pady=10)
+    
+    confirm_btn = tk.Button(button_frame, text="Create Schedule", command=on_confirm, width=15, bg="#4CAF50", fg="white")
+    confirm_btn.pack(side="left", padx=5)
+    
+    cancel_btn = tk.Button(button_frame, text="Cancel", command=on_cancel, width=15)
+    cancel_btn.pack(side="left", padx=5)
+    
+    root.mainloop()
+    return result
+
+def prompt_schedule_multi(light_sched, planter_sched):
+    """
+    Opens a unified Tkinter window with tabs for Light and Planter schedules.
+    Shows both 24-hour schedules in a single tabbed interface.
+    Returns tuple (updated_light, updated_planter) or (None, None) if cancelled.
+    """
+    result = None
+
+    def on_confirm():
+        nonlocal result
+        # Collect all schedules from the two tabs
+        updated_light = [light_scales[i].get() for i in range(24)]
+        updated_planter = [planter_scales[i].get() for i in range(24)]
+        
+        result = (updated_light, updated_planter)
+        root.destroy()
+
+    def on_cancel():
+        nonlocal result
+        result = (None, None)
+        root.destroy()
+
+    def create_schedule_tab(parent, schedule_name, initial_schedule, color="#4CAF50"):
+        """Create a tab with 24 hour sliders for a single schedule"""
+        # Create a frame with scrollbar for the tab
+        tab_frame = tk.Frame(parent)
+        
+        # Title
+        title_frame = tk.Frame(tab_frame, bg=color, height=40)
+        title_frame.pack(fill="x", pady=(0, 10))
+        title_frame.pack_propagate(False)
+        
+        title_label = tk.Label(title_frame, text=f"{schedule_name} Schedule", 
+                              font=("Arial", 14, "bold"), bg=color, fg="white")
+        title_label.pack(expand=True)
+        
+        # Create canvas with scrollbar for schedules
+        canvas = tk.Canvas(tab_frame)
+        scrollbar = tk.Scrollbar(tab_frame, orient="vertical", command=canvas.yview)
+        scrollable_frame = tk.Frame(canvas)
+        
+        scrollable_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+        
+        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+        
+        # Create 24 hour sliders
+        scales = []
+        for hour in range(24):
+            hour_frame = tk.Frame(scrollable_frame)
+            hour_frame.pack(fill="x", padx=10, pady=3)
+            
+            # Hour label
+            hour_label = tk.Label(hour_frame, text=f"{hour:02d}:00", width=6, font=("Arial", 10))
+            hour_label.pack(side="left", padx=5)
+            
+            # PWM value display
+            value_var = tk.StringVar(value="0%")
+            value_label = tk.Label(hour_frame, textvariable=value_var, width=5, 
+                                   font=("Arial", 10, "bold"), fg=color)
+            value_label.pack(side="right", padx=5)
+            
+            # Slider
+            scale = tk.Scale(hour_frame, from_=0, to=100, orient="horizontal", 
+                           length=400, showvalue=0)
+            
+            # Set initial value
+            if initial_schedule and len(initial_schedule) == 24:
+                scale.set(initial_schedule[hour])
+            else:
+                scale.set(0)
+            
+            # Update value label when slider changes
+            def update_label(val, var=value_var):
+                var.set(f"{int(float(val))}%")
+            
+            scale.config(command=update_label)
+            update_label(scale.get(), value_var)  # Set initial label
+            
+            scale.pack(side="left", fill="x", expand=True, padx=5)
+            scales.append(scale)
+        
+        # Pack canvas and scrollbar
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+        
+        return tab_frame, scales
+
+    # Create main window
+    root = tk.Tk()
+    root.title("All Schedules Editor")
+    root.geometry("700x650")
+    
+    # Main frame
+    main_frame = tk.Frame(root)
+    main_frame.pack(fill="both", expand=True, padx=10, pady=10)
+    
+    # Info label
+    info_label = tk.Label(main_frame, 
+                         text="Configure 24-hour schedules for all actuators (0-100% PWM for each hour)",
+                         font=("Arial", 10), fg="#666")
+    info_label.pack(pady=(0, 10))
+    
+    # Create tabbed notebook
+    notebook = ttk.Notebook(main_frame)
+    notebook.pack(fill="both", expand=True)
+    
+    # Create two tabs with different colors
+    light_tab, light_scales = create_schedule_tab(notebook, "💡 Light", light_sched, "#FFA500")
+    planter_tab, planter_scales = create_schedule_tab(notebook, "🌱 Planter Pump", planter_sched, "#4CAF50")
+    
+    # Add tabs to notebook
+    notebook.add(light_tab, text="💡 Light Schedule")
+    notebook.add(planter_tab, text="🌱 Planter Schedule")
+    
+    # Buttons frame
+    button_frame = tk.Frame(main_frame)
+    button_frame.pack(pady=10)
+    
+    confirm_btn = tk.Button(button_frame, text="Save All Schedules", command=on_confirm, 
+                           width=18, bg="#4CAF50", fg="white", font=("Arial", 11, "bold"))
+    confirm_btn.pack(side="left", padx=5)
+    
+    cancel_btn = tk.Button(button_frame, text="Cancel", command=on_cancel, 
+                          width=12, font=("Arial", 11))
+    cancel_btn.pack(side="left", padx=5)
+    
+    # Add keyboard shortcuts info
+    shortcuts_label = tk.Label(main_frame, 
+                              text="💡 Tip: Use tabs to switch between schedules quickly",
+                              font=("Arial", 9), fg="#999")
+    shortcuts_label.pack(pady=(5, 0))
+    
+    root.mainloop()
+    return result
+
+def prompt_unified_schedule_manager(initial_light_schedule=None, initial_planter_schedule=None):
+    """
+    Comprehensive schedule management GUI combining:
+    1. Hourly schedules (Light curve + Planter intervals)
+    2. Routine commands (Fill/Empty/Maintenance schedules)
+    
+    Args:
+        initial_light_schedule: List of 24 integers (0-100) for light schedule
+        initial_planter_schedule: List of 24 integers (0-100) for planter schedule
+    
+    Returns a dictionary with both schedule types or None if cancelled.
+    """
+    result = None
+
+    def on_save_all():
+        nonlocal result
+        
+        # Collect hourly schedules
+        light_schedule = [light_scales[i].get() for i in range(24)]
+        planter_schedule = [planter_scales[i].get() for i in range(24)]
+        
+        # Collect routine schedule info
+        routine_config = None
+        if enable_routine.get():
+            # Validate schedule name
+            sched_name = routine_name_entry.get().strip()
+            if not sched_name:
+                tk.messagebox.showerror("Error", "Routine schedule name cannot be empty.")
+                return
+            
+            # Validate start time
+            start_time_str = routine_start_entry.get().strip()
+            try:
+                datetime.strptime(start_time_str, "%H:%M")
+            except ValueError:
+                tk.messagebox.showerror("Error", "Invalid start time format. Use HH:MM (e.g., 18:00)")
+                return
+            
+            # Get frequency
+            frequency = routine_freq_var.get().lower()
+            
+            # Get day of week if weekly
+            day_of_week = None
+            if frequency == 'weekly':
+                day_of_week = routine_day_var.get()
+                if not day_of_week or day_of_week == "Select Day":
+                    tk.messagebox.showerror("Error", "Please select a day of the week for weekly schedules.")
+                    return
+            
+            # Get selected routine command
+            routine_command = routine_command_var.get()
+            if not routine_command or routine_command == "Select Command":
+                tk.messagebox.showerror("Error", "Please select a routine command.")
+                return
+            
+            routine_config = {
+                'schedule_name': sched_name,
+                'start_time': start_time_str,
+                'frequency': frequency,
+                'day_of_week': day_of_week,
+                'command': routine_command
+            }
+        
+        result = {
+            'light_schedule': light_schedule,
+            'planter_schedule': planter_schedule,
+            'routine_config': routine_config
+        }
+        
+        root.destroy()
+
+    def on_cancel():
+        nonlocal result
+        result = None
+        root.destroy()
+
+    def toggle_routine_controls():
+        """Enable/disable routine controls based on checkbox"""
+        state = 'normal' if enable_routine.get() else 'disabled'
+        routine_name_entry.config(state=state)
+        routine_start_entry.config(state=state)
+        routine_freq_daily.config(state=state)
+        routine_freq_weekly.config(state=state)
+        routine_command_menu.config(state=state)
+        toggle_day_selector()
+
+    def toggle_day_selector():
+        """Enable/disable day selector based on frequency"""
+        if enable_routine.get() and routine_freq_var.get() == 'weekly':
+            routine_day_menu.config(state='normal')
+        else:
+            routine_day_menu.config(state='disabled')
+
+    def create_hourly_schedule_tab(parent, schedule_name, initial_schedule, color="#4CAF50"):
+        """Create a tab with 24 hour sliders for hourly schedules"""
+        tab_frame = tk.Frame(parent)
+        
+        # Title
+        title_frame = tk.Frame(tab_frame, bg=color, height=40)
+        title_frame.pack(fill="x", pady=(0, 10))
+        title_frame.pack_propagate(False)
+        
+        title_label = tk.Label(title_frame, text=f"{schedule_name} Schedule", 
+                              font=("Arial", 14, "bold"), bg=color, fg="white")
+        title_label.pack(expand=True)
+        
+        # Create canvas with scrollbar
+        canvas = tk.Canvas(tab_frame)
+        scrollbar = tk.Scrollbar(tab_frame, orient="vertical", command=canvas.yview)
+        scrollable_frame = tk.Frame(canvas)
+        
+        scrollable_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+        
+        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+        
+        # Create 24 hour sliders
+        scales = []
+        for hour in range(24):
+            hour_frame = tk.Frame(scrollable_frame)
+            hour_frame.pack(fill="x", padx=10, pady=3)
+            
+            # Hour label
+            hour_label = tk.Label(hour_frame, text=f"{hour:02d}:00", width=6, font=("Arial", 10))
+            hour_label.pack(side="left", padx=5)
+            
+            # PWM value display
+            value_var = tk.StringVar(value="0%")
+            value_label = tk.Label(hour_frame, textvariable=value_var, width=5, 
+                                   font=("Arial", 10, "bold"), fg=color)
+            value_label.pack(side="right", padx=5)
+            
+            # Slider
+            scale = tk.Scale(hour_frame, from_=0, to=100, orient="horizontal", 
+                           length=400, showvalue=0)
+            
+            # Set initial value
+            if initial_schedule and len(initial_schedule) == 24:
+                scale.set(initial_schedule[hour])
+            else:
+                scale.set(0)
+            
+            # Update value label when slider changes
+            def update_label(val, var=value_var):
+                var.set(f"{int(float(val))}%")
+            
+            scale.config(command=update_label)
+            update_label(scale.get(), value_var)
+            
+            # Add mouse wheel support
+            def on_mousewheel(event, s=scale):
+                current = s.get()
+                # Scroll up = increase, scroll down = decrease
+                if event.delta > 0:
+                    s.set(min(100, current + 1))
+                else:
+                    s.set(max(0, current - 1))
+            
+            scale.bind("<MouseWheel>", on_mousewheel)
+            
+            scale.pack(side="left", fill="x", expand=True, padx=5)
+            scales.append(scale)
+        
+        # Pack canvas and scrollbar
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+        
+        return tab_frame, scales
+
+    # Create main window
+    root = tk.Tk()
+    root.title("Unified Schedule Manager")
+    root.geometry("750x750")
+    
+    # Main frame
+    main_frame = tk.Frame(root)
+    main_frame.pack(fill="both", expand=True, padx=10, pady=10)
+    
+    # ========== Top Info Label ==========
+    info_label = tk.Label(main_frame, 
+                         text="Manage hourly schedules (Light & Planter) and routine commands (Fill/Empty/Maintenance)",
+                         font=("Arial", 10), fg="#666", wraplength=700)
+    info_label.pack(pady=(0, 10))
+    
+    # ========== Hourly Schedules Section (Tabbed) ==========
+    hourly_frame = tk.LabelFrame(main_frame, text="Hourly Schedules", padx=5, pady=5)
+    hourly_frame.pack(fill="both", expand=True, pady=(0, 10))
+    
+    # Create tabbed notebook for hourly schedules
+    hourly_notebook = ttk.Notebook(hourly_frame)
+    hourly_notebook.pack(fill="both", expand=True)
+    
+    # Create two tabs - Light and Planter (no Air)
+    light_tab, light_scales = create_hourly_schedule_tab(hourly_notebook, "💡 Light", initial_light_schedule, "#FFA500")
+    planter_tab, planter_scales = create_hourly_schedule_tab(hourly_notebook, "🌱 Planter", initial_planter_schedule, "#4CAF50")
+    
+    # Add tabs to notebook
+    hourly_notebook.add(light_tab, text="💡 Light Curve")
+    hourly_notebook.add(planter_tab, text="🌱 Planter Intervals")
+    
+    # ========== Routine Commands Section ==========
+    routine_frame = tk.LabelFrame(main_frame, text="Routine Command Schedule (Fill/Empty/Maintenance)", padx=10, pady=10)
+    routine_frame.pack(fill="x", pady=(0, 10))
+    
+    # Enable/Disable routine checkbox
+    enable_routine = tk.BooleanVar(value=False)
+    enable_cb = tk.Checkbutton(routine_frame, text="Enable Routine Command Schedule", 
+                               variable=enable_routine, command=toggle_routine_controls,
+                               font=("Arial", 10, "bold"))
+    enable_cb.grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 10))
+    
+    # Routine Name
+    tk.Label(routine_frame, text="Schedule Name:", anchor="w").grid(row=1, column=0, sticky="w", pady=5)
+    routine_name_entry = tk.Entry(routine_frame, width=30, state='disabled')
+    routine_name_entry.grid(row=1, column=1, sticky="ew", pady=5)
+    
+    # Start Time
+    tk.Label(routine_frame, text="Start Time (HH:MM):", anchor="w").grid(row=2, column=0, sticky="w", pady=5)
+    routine_start_entry = tk.Entry(routine_frame, width=30, state='disabled')
+    routine_start_entry.insert(0, "02:00")
+    routine_start_entry.grid(row=2, column=1, sticky="ew", pady=5)
+    
+    # Frequency
+    tk.Label(routine_frame, text="Frequency:", anchor="w").grid(row=3, column=0, sticky="w", pady=5)
+    routine_freq_var = tk.StringVar(value="daily")
+    freq_frame = tk.Frame(routine_frame)
+    freq_frame.grid(row=3, column=1, sticky="w", pady=5)
+    routine_freq_daily = tk.Radiobutton(freq_frame, text="Daily", variable=routine_freq_var, 
+                                        value="daily", command=toggle_day_selector, state='disabled')
+    routine_freq_daily.pack(side="left", padx=5)
+    routine_freq_weekly = tk.Radiobutton(freq_frame, text="Weekly", variable=routine_freq_var, 
+                                         value="weekly", command=toggle_day_selector, state='disabled')
+    routine_freq_weekly.pack(side="left", padx=5)
+    
+    # Day of Week (for weekly)
+    tk.Label(routine_frame, text="Day of Week:", anchor="w").grid(row=4, column=0, sticky="w", pady=5)
+    routine_day_var = tk.StringVar(value="Monday")
+    days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+    routine_day_menu = tk.OptionMenu(routine_frame, routine_day_var, *days)
+    routine_day_menu.grid(row=4, column=1, sticky="w", pady=5)
+    routine_day_menu.config(state='disabled')
+    
+    # Routine Command Selection
+    tk.Label(routine_frame, text="Command:", anchor="w").grid(row=5, column=0, sticky="w", pady=5)
+    routine_command_var = tk.StringVar(value="Select Command")
+    commands = ["empty_pod", "fill_pod", "calibrate_pod"]
+    routine_command_menu = tk.OptionMenu(routine_frame, routine_command_var, *commands)
+    routine_command_menu.grid(row=5, column=1, sticky="w", pady=5)
+    routine_command_menu.config(state='disabled')
+    
+    routine_frame.columnconfigure(1, weight=1)
+    
+    # ========== Action Buttons ==========
+    button_frame = tk.Frame(main_frame)
+    button_frame.pack(pady=10)
+    
+    save_btn = tk.Button(button_frame, text="Save All Settings", command=on_save_all, 
+                        width=20, bg="#4CAF50", fg="white", font=("Arial", 11, "bold"))
+    save_btn.pack(side="left", padx=5)
+    
+    cancel_btn = tk.Button(button_frame, text="Cancel", command=on_cancel, 
+                          width=12, font=("Arial", 11))
+    cancel_btn.pack(side="left", padx=5)
+    
+    # ========== Help Text ==========
+    help_label = tk.Label(main_frame, 
+                         text="💡 Tip: Hourly schedules control frequent events. Routine commands handle maintenance tasks.",
+                         font=("Arial", 9), fg="#999")
+    help_label.pack(pady=(5, 0))
+    
+    root.mainloop()
+    return result
+
 class HydroponicsServiceListener:
     def __init__(self, console):
         self.console = console
@@ -143,8 +754,9 @@ class HydroponicsConsole(Cmd):
             'planterpump': 'Set planter pump PWM value: planterpump <value>',
             # Servo → Drain Pump
             'drainpump': 'Set drain pump PWM value: drainpump <value>',
-            'led': 'Set LED array state: led <on/off>',
+            'led': 'Set LED brightness: led <value> [channel]',
             'schedule_actuators': 'Set actuator schedule: schedule_actuators',
+            'manage_schedules': 'Unified schedule manager (hourly + routines): manage_schedules',
             'view_schedules': 'View all actuator schedules: view_schedules',
             'delete_schedule': 'Delete a schedule: delete_schedule <schedule_name>',
             'start_feeding_cycle': 'Start the feeding cycle.',
@@ -298,9 +910,18 @@ class HydroponicsConsole(Cmd):
         # Send commands to actuators
         for actuator, command in actions.items():
             try:
-                url = f"https://{device_info['address']}:{device_info['port']}/api/actuators/{actuator}"
-                response = self.session.post(url, json=command, timeout=5, verify=False)
-                print(f"Actuator '{actuator}' responded with: {response.text}")
+                # Handle routine commands specially
+                if actuator == 'routine' and 'command' in command:
+                    # Post to /api/routines/<command_name>
+                    routine_cmd = command['command']
+                    url = f"https://{device_info['address']}:{device_info['port']}/api/routines/{routine_cmd}"
+                    response = self.session.post(url, json={}, timeout=10, verify=False)
+                    print(f"Routine '{routine_cmd}' started: {response.text}")
+                else:
+                    # Regular actuator command
+                    url = f"https://{device_info['address']}:{device_info['port']}/api/actuators/{actuator}"
+                    response = self.session.post(url, json=command, timeout=5, verify=False)
+                    print(f"Actuator '{actuator}' responded with: {response.text}")
             except Exception as e:
                 print(f"Error sending command to '{actuator}' for device '{device_name}': {e}")
 
@@ -308,12 +929,9 @@ class HydroponicsConsole(Cmd):
         def turn_off_actuators():
             print(f"Turning off actuators for schedule '{name}' on device '{device_name}' at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
             for actuator, command in actions.items():
-                # Rename waterpump -> sourcepump, servo -> drainpump
-                # So if actuator is in these sets, we set them to 0
-                if actuator in ['airpump', 'sourcepump', 'planterpump', 'drainpump']:
+                # Set all actuators to 0
+                if actuator in ['airpump', 'sourcepump', 'planterpump', 'drainpump', 'led']:
                     self._post_actuator_command(actuator, {'value': 0}, device_name)
-                elif actuator == 'led':
-                    self._post_actuator_command(actuator, {'state': 'off'}, device_name)
 
         # Schedule turning off actuators after 'duration' minutes
         if duration > 0:
@@ -406,20 +1024,18 @@ class HydroponicsConsole(Cmd):
         if name == "all_schedules":
             light_sched = self._fetch_saved_schedule("light")
             planter_sched = self._fetch_saved_schedule("planter")
-            air_sched = self._fetch_saved_schedule("air")
 
-            # 3) Present a multi-schedule GUI or similar
-            updated_light, updated_planter, updated_air = self._prompt_schedule_multi(
-                light_sched, planter_sched, air_sched
+            # 3) Present a multi-schedule GUI
+            updated_light, updated_planter = self._prompt_schedule_multi(
+                light_sched, planter_sched
             )
-            if updated_light is None or updated_planter is None or updated_air is None:
+            if updated_light is None or updated_planter is None:
                 print("Schedule editing cancelled.")
                 return
 
             # 4) Post each updated schedule
             self._post_routine("light_schedule", {"schedule": updated_light})
             self._post_routine("planter_pod_schedule", {"schedule": updated_planter})
-            self._post_routine("air_pump_schedule", {"schedule": updated_air})
             return
 
         # Post the routine
@@ -641,14 +1257,46 @@ class HydroponicsConsole(Cmd):
             print("Please provide a valid integer value.")
 
     def do_led(self, arg):
-        'Set LED array state: led <on/off>'
+        '''Set LED brightness: led <value> [channel]
+        Examples:
+            led 100       - Set all LED channels to 100%
+            led 50        - Set all LED channels to 50%
+            led 75 2      - Set LED channel 2 to 75%
+            led 0         - Turn off all LEDs
+        '''
         if not self._check_device_selected():
             return
-        state = arg.strip().lower()
-        if state not in ['on', 'off']:
-            print("Please specify 'on' or 'off'.")
+        
+        args = arg.strip().split()
+        if len(args) == 0:
+            print("Usage: led <value> [channel]")
+            print("  value: 0-100 (PWM percentage)")
+            print("  channel: 1-4 (optional, sets specific channel)")
+            print("Examples:")
+            print("  led 100       - Set all LEDs to 100%")
+            print("  led 50 2      - Set channel 2 to 50%")
             return
-        self._post_actuator_command('led', {'state': state}, self.selected_device)
+        
+        try:
+            value = int(args[0])
+            if value < 0 or value > 100:
+                print("Value must be between 0 and 100")
+                return
+            
+            if len(args) == 1:
+                # Set all channels
+                self._post_actuator_command('led', {'value': value}, self.selected_device)
+            elif len(args) == 2:
+                # Set specific channel
+                channel = int(args[1])
+                if channel < 1 or channel > 4:
+                    print("Channel must be between 1 and 4")
+                    return
+                self._post_actuator_command('led', {'channel': channel, 'value': value}, self.selected_device)
+            else:
+                print("Too many arguments. Usage: led <value> [channel]")
+        except ValueError:
+            print("Invalid numeric value. Usage: led <value> [channel]")
 
     # --------------------------------------------------------------------------
     # Scheduling Commands
@@ -658,131 +1306,20 @@ class HydroponicsConsole(Cmd):
         if not self._check_device_selected():
             return
         
-        print("\n--- Actuator Schedule Setup ---")
+        print("\n--- Opening Actuator Schedule Setup Window ---")
         
-        # Prompt for schedule name
-        schedule_name = self._prompt_input("Enter schedule name: ")
-        if not schedule_name:
-            print("Schedule name cannot be empty.")
+        # Open the unified GUI window
+        config = prompt_schedule_actuators()
+        
+        if config is None:
+            print("Schedule setup cancelled.")
             return
+        
+        schedule_name = config['schedule_name']
+        
+        # Check if schedule already exists
         if schedule_name in self.schedules:
             print(f"Schedule '{schedule_name}' already exists.")
-            return
-        
-        # Prompt for start time (24-hour format, e.g., 18:00)
-        start_time_str = self._prompt_input("Enter start time (HH:MM, 24-hour format): ")
-        try:
-            start_time = datetime.strptime(start_time_str, "%H:%M").time()
-        except ValueError:
-            print("Invalid time format.")
-            return
-        
-        # Prompt for duration in hours:minutes
-        duration_str = self._prompt_input("Enter duration (HH:MM): ")
-        try:
-            parts = duration_str.split(":")
-            if len(parts) != 2:
-                raise ValueError("Incorrect format")
-            hours = int(parts[0])
-            minutes = int(parts[1])
-            if hours < 0 or minutes < 0 or minutes >= 60:
-                raise ValueError("Hours must be >= 0 and minutes must be between 0 and 59.")
-            duration = hours * 60 + minutes
-            if duration <= 0:
-                raise ValueError("Duration must be greater than 0.")
-        except ValueError as ve:
-            print(f"Invalid duration format: {ve}")
-            return
-        
-        # Prompt for frequency (daily, weekly)
-        frequency = self._prompt_input("Enter frequency ('daily' or 'weekly'): ").lower()
-        if frequency not in ['daily', 'weekly']:
-            print("Frequency must be 'daily' or 'weekly'.")
-            return
-        
-        day_of_week = None
-        if frequency == 'weekly':
-            # Prompt for the day of the week
-            day_of_week = self._prompt_input("Enter day of the week (e.g., Monday): ").lower()
-            days_map = {
-                'monday': 'mon',
-                'tuesday': 'tue',
-                'wednesday': 'wed',
-                'thursday': 'thu',
-                'friday': 'fri',
-                'saturday': 'sat',
-                'sunday': 'sun'
-            }
-            if day_of_week not in days_map:
-                print("Invalid day of the week.")
-                return
-            day_of_week_short = days_map[day_of_week]
-        else:
-            day_of_week_short = None
-        
-        # Prompt for actuator commands
-        print("\n--- Define Actuator Commands ---")
-        actions = {}
-        
-        # LED
-        led_choice = self._prompt_input("Schedule LED? (y/n): ").lower()
-        if led_choice == 'y':
-            led_state = self._prompt_input("Enter LED state ('on' or 'off'): ").lower()
-            if led_state not in ['on', 'off']:
-                print("Invalid LED state. Skipping LED scheduling.")
-            else:
-                actions['led'] = {'state': led_state}
-        
-        # Air Pump
-        airpump_choice = self._prompt_input("Schedule Air Pump? (y/n): ").lower()
-        if airpump_choice == 'y':
-            try:
-                airpump_value = int(self._prompt_input("Enter Air Pump PWM value (0-100): "))
-                if 0 <= airpump_value <= 100:
-                    actions['airpump'] = {'value': airpump_value}
-                else:
-                    print("Invalid Air Pump value. Skipping Air Pump scheduling.")
-            except ValueError:
-                print("Invalid Air Pump value. Skipping Air Pump scheduling.")
-        
-        # Source Pump
-        sourcepump_choice = self._prompt_input("Schedule Source Pump? (y/n): ").lower()
-        if sourcepump_choice == 'y':
-            try:
-                sourcepump_value = int(self._prompt_input("Enter Source Pump PWM value (0-100): "))
-                if 0 <= sourcepump_value <= 100:
-                    actions['sourcepump'] = {'value': sourcepump_value}
-                else:
-                    print("Invalid Source Pump value. Skipping Source Pump scheduling.")
-            except ValueError:
-                print("Invalid Source Pump value. Skipping Source Pump scheduling.")
-
-        # Planter Pump
-        planterpump_choice = self._prompt_input("Schedule Planter Pump? (y/n): ").lower()
-        if planterpump_choice == 'y':
-            try:
-                planterpump_value = int(self._prompt_input("Enter Planter Pump PWM value (0-100): "))
-                if 0 <= planterpump_value <= 100:
-                    actions['planterpump'] = {'value': planterpump_value}
-                else:
-                    print("Invalid Planter Pump value. Skipping Planter Pump scheduling.")
-            except ValueError:
-                print("Invalid Planter Pump value. Skipping Planter Pump scheduling.")
-
-        # Drain Pump
-        drainpump_choice = self._prompt_input("Schedule Drain Pump? (y/n): ").lower()
-        if drainpump_choice == 'y':
-            try:
-                drainpump_value = int(self._prompt_input("Enter Drain Pump PWM value (0-100): "))
-                if 0 <= drainpump_value <= 100:
-                    actions['drainpump'] = {'value': drainpump_value}
-                else:
-                    print("Invalid Drain Pump value. Skipping Drain Pump scheduling.")
-            except ValueError:
-                print("Invalid Drain Pump value. Skipping Drain Pump scheduling.")
-        
-        if not actions:
-            print("No actuators scheduled. Exiting schedule setup.")
             return
         
         # Get device info
@@ -794,11 +1331,11 @@ class HydroponicsConsole(Cmd):
         self.schedules[schedule_name] = {
             'device_name': device_name,
             'device_ip': device_ip,
-            'start_time': start_time_str,
-            'duration_minutes': duration,
-            'frequency': frequency,
-            'day_of_week': day_of_week.capitalize() if frequency == 'weekly' else None,
-            'actions': actions
+            'start_time': config['start_time'],
+            'duration_minutes': config['duration_minutes'],
+            'frequency': config['frequency'],
+            'day_of_week': config['day_of_week'],
+            'actions': config['actions']
         }
         
         # Schedule the job if device is available
@@ -807,7 +1344,102 @@ class HydroponicsConsole(Cmd):
         # Save schedules to JSON
         self.save_schedules()
         
-        print(f"\nActuator schedule '{schedule_name}' has been set successfully for device '{device_name}'.\n")
+        print(f"\nActuator schedule '{schedule_name}' has been set successfully for device '{device_name}'.")
+        print(f"  Start Time: {config['start_time']}")
+        print(f"  Duration: {config['duration_minutes']} minutes")
+        print(f"  Frequency: {config['frequency']}")
+        if config['day_of_week']:
+            print(f"  Day: {config['day_of_week']}")
+        print(f"  Actuators configured: {', '.join(config['actions'].keys())}\n")
+
+    def do_manage_schedules(self, arg):
+        '''Unified schedule manager: manage_schedules
+        Opens comprehensive GUI for managing both:
+        - Hourly schedules (Light curve + Planter intervals)  
+        - Routine commands (Fill/Empty/Maintenance tasks)
+        '''
+        if not self._check_device_selected():
+            return
+        
+        print("\n--- Opening Unified Schedule Manager ---")
+        
+        # Fetch current hourly schedules from device
+        light_sched = self._fetch_saved_schedule("light")
+        planter_sched = self._fetch_saved_schedule("planter")
+        
+        # Open the unified GUI window (load with current schedules from device)
+        config = prompt_unified_schedule_manager(light_sched, planter_sched)
+        
+        if config is None:
+            print("Schedule management cancelled.")
+            return
+        
+        # Handle hourly schedules
+        if config['light_schedule'] or config['planter_schedule']:
+            print("\n--- Updating Hourly Schedules ---")
+            
+            # Post light schedule
+            if config['light_schedule']:
+                self._post_routine("light_schedule", {"schedule": config['light_schedule']})
+                print("✓ Light schedule updated")
+            
+            # Post planter schedule  
+            if config['planter_schedule']:
+                self._post_routine("planter_pod_schedule", {"schedule": config['planter_schedule']})
+                print("✓ Planter schedule updated")
+        
+        # Handle routine command schedule
+        if config['routine_config']:
+            routine = config['routine_config']
+            schedule_name = routine['schedule_name']
+            
+            # Check if schedule already exists
+            if schedule_name in self.schedules:
+                print(f"Warning: Schedule '{schedule_name}' already exists. Overwriting...")
+            
+            # Get device info
+            device_info = devices[self.selected_device]
+            device_name = self.selected_device
+            device_ip = device_info['address']
+            
+            # Create action based on routine command
+            actions = {}
+            command = routine['command']
+            
+            # Map routine commands to actions
+            # These will be handled as API calls to the routine endpoint
+            if command == 'empty_pod':
+                actions['routine'] = {'command': 'empty_pod'}
+            elif command == 'fill_pod':
+                actions['routine'] = {'command': 'fill_pod'}
+            elif command == 'calibrate_pod':
+                actions['routine'] = {'command': 'calibrate_pod'}
+            
+            # Store the routine schedule
+            self.schedules[schedule_name] = {
+                'device_name': device_name,
+                'device_ip': device_ip,
+                'start_time': routine['start_time'],
+                'duration_minutes': 0,  # Routines don't have duration
+                'frequency': routine['frequency'],
+                'day_of_week': routine['day_of_week'],
+                'actions': actions
+            }
+            
+            # Schedule the job
+            self.schedule_job(schedule_name, self.schedules[schedule_name])
+            
+            # Save schedules to JSON
+            self.save_schedules()
+            
+            print(f"\n✓ Routine schedule '{schedule_name}' created:")
+            print(f"  Command: {command}")
+            print(f"  Start Time: {routine['start_time']}")
+            print(f"  Frequency: {routine['frequency']}")
+            if routine['day_of_week']:
+                print(f"  Day: {routine['day_of_week']}")
+        
+        print("\n✓ All schedule updates completed successfully!\n")
 
     def do_view_schedules(self, arg):
         'View all actuator schedules: view_schedules'
@@ -841,7 +1473,7 @@ class HydroponicsConsole(Cmd):
             duration_display = f"{hours}:{minutes:02d}"
             
             # Retrieve actuator values
-            led = details['actions'].get('led', {}).get('state', '-')
+            led = str(details['actions'].get('led', {}).get('value', '-'))
             airpump = str(details['actions'].get('airpump', {}).get('value', '-'))
             sourcepump = str(details['actions'].get('sourcepump', {}).get('value', '-'))
             planterpump = str(details['actions'].get('planterpump', {}).get('value', '-'))
@@ -1115,21 +1747,17 @@ class HydroponicsConsole(Cmd):
             except requests.exceptions.RequestException as e:
                 print(f"Error polling sensor data: {e}")
 
-    def _prompt_schedule_multi(self, light_sched, planter_sched, air_sched):
+    def _prompt_schedule_multi(self, light_sched, planter_sched):
         '''
-        Prompt the user to edit all schedules together, returning updated schedules.
+        Prompt the user to edit Light and Planter schedules using a unified tabbed interface.
+        Returns tuple (updated_light, updated_planter) or (None, None) if cancelled.
         '''
         try:
-            print("Editing Light Schedule")
-            updated_light = prompt_schedule_24(light_sched)
-            print("Editing Planter Schedule")
-            updated_planter = prompt_schedule_24(planter_sched)
-            print("Editing Air Pump Schedule")
-            updated_air = prompt_schedule_24(air_sched)
-            return updated_light, updated_planter, updated_air
+            print("Opening unified schedule editor...")
+            return prompt_schedule_multi(light_sched, planter_sched)
         except Exception as e:
             print(f"Error in multi-schedule editing: {e}")
-            return None, None, None
+            return None, None
 
     def do_showschedules(self, arg):
         'Print current LED, planter & air schedules on the selected device'

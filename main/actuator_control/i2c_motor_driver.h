@@ -21,6 +21,9 @@
 
 // Define LED channels (on 0x61 shield)
 #define LED_CHANNEL_1                  1  // LED array on motor channel 1
+#define LED_CHANNEL_2                  2  // LED array on motor channel 2
+#define LED_CHANNEL_3                  3  // LED array on motor channel 3
+#define LED_CHANNEL_4                  4  // LED array on motor channel 4
 
 // Motor commands
 #define MOTOR_FORWARD                  1
@@ -86,14 +89,15 @@ esp_err_t i2c_motor_set(uint8_t motor_num, uint8_t speed, uint8_t command);
 esp_err_t i2c_motor_stop_all(void);
 
 /**
- * @brief Set the LED brightness using PWM
+ * @brief Set the brightness of a specific LED channel using PWM
  * 
- * Controls LED on channel 1 of the LED motor shield (address 0x61).
+ * Controls LED on the specified channel (1-4) of the LED motor shield (address 0x61).
  * 
+ * @param channel LED channel number (1-4)
  * @param brightness Brightness level (0-100%)
  * @return esp_err_t ESP_OK on success, error code otherwise
  */
-esp_err_t i2c_led_set_brightness(uint8_t brightness);
+esp_err_t i2c_led_set_channel_brightness(uint8_t channel, uint8_t brightness);
 
 /**
  * @brief Set motor direction inversion for a specific motor

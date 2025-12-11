@@ -348,28 +348,68 @@ static int cmd_foodpump(int argc, char **argv) {
 
 /**
  * @brief Command handler for the 'led' command.
+ * Supports two formats:
+ * 1. led <value>           - Sets all LEDs (legacy format)
+ * 2. led <channel> <value> - Sets specific LED channel (1-4)
  */
 static int cmd_led(int argc, char **argv) {
-    if (argc != 2) {
-        ESP_LOGW(TAG, "Usage: led <value>");
-        ESP_LOGW(TAG, "Example: led 100 (full duty)");
+    actuator_command_t command;
+    
+    if (argc == 2) {
+        // Legacy format: led <value>
+        // Sets all LEDs (backward compatible)
+        int value = atoi(argv[1]);
+        
+        // Validate range
+        if (value < 0 || value > 100) {
+            ESP_LOGW(TAG, "Invalid value. Must be between 0 and 100.");
+            return 1;
+        }
+
+        command.cmd_type = ACTUATOR_CMD_LED_ARRAY_PWM;
+        command.value = (uint32_t)value;
+        command.channel = 0; // not used
+        
+        xQueueSend(get_actuator_queue(), &command, portMAX_DELAY);
+        ESP_LOGI(TAG, "LED array set to %d%%", value);
+        return 0;
+        
+    } else if (argc == 3) {
+        // New format: led <channel> <value>
+        int channel = atoi(argv[1]);
+        int value = atoi(argv[2]);
+        
+        // Validate channel (1-4)
+        if (channel < 1 || channel > 4) {
+            ESP_LOGW(TAG, "Invalid channel. Must be between 1 and 4.");
+            return 1;
+        }
+        
+        // Validate value (0-100)
+        if (value < 0 || value > 100) {
+            ESP_LOGW(TAG, "Invalid value. Must be between 0 and 100.");
+            return 1;
+        }
+
+        command.cmd_type = ACTUATOR_CMD_LED_CHANNEL_PWM;
+        command.channel = (uint8_t)channel;
+        command.value = (uint32_t)value;
+        
+        xQueueSend(get_actuator_queue(), &command, portMAX_DELAY);
+        ESP_LOGI(TAG, "LED channel %d set to %d%%", channel, value);
+        return 0;
+        
+    } else {
+        // Invalid argument count
+        ESP_LOGW(TAG, "Usage:");
+        ESP_LOGW(TAG, "  led <value>           - Set all LEDs (0-100%%)");
+        ESP_LOGW(TAG, "  led <channel> <value> - Set specific LED channel");
+        ESP_LOGW(TAG, "Examples:");
+        ESP_LOGW(TAG, "  led 100       - All LEDs to full brightness");
+        ESP_LOGW(TAG, "  led 1 50      - Channel 1 to 50%% brightness");
+        ESP_LOGW(TAG, "  led 4 100     - Channel 4 to full brightness");
         return 1;
     }
-
-    int value = atoi(argv[1]);
-    // Validate range
-    if (value < 0 || value > 100) {
-        ESP_LOGW(TAG, "Invalid value. Must be between 0 and 100.");
-        return 1;
-    }
-
-    actuator_command_t command = {
-        .cmd_type = ACTUATOR_CMD_LED_ARRAY_PWM,
-        .value = (uint32_t)value
-    };
-    xQueueSend(get_actuator_queue(), &command, portMAX_DELAY);
-    ESP_LOGI(TAG, "LED array set to %d", value);
-    return 0;
 }
 
 /**

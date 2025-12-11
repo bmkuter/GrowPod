@@ -31,13 +31,15 @@ typedef enum {
     ACTUATOR_CMD_DRAIN_PUMP_PWM,   // value = 0..100 (future expansion)
     ACTUATOR_CMD_PLANTER_PUMP_PWM, // value = 0..100
     ACTUATOR_CMD_FOOD_PUMP_PWM,    // value = 0..100
-    ACTUATOR_CMD_LED_ARRAY_PWM     // value = 0..100 (Now using I2C motor driver on channel 4)
+    ACTUATOR_CMD_LED_ARRAY_PWM,    // value = 0..100 (Now using I2C motor driver on channel 4)
+    ACTUATOR_CMD_LED_CHANNEL_PWM   // Multi-channel LED control (channel in channel field, value = 0..100)
 } actuator_cmd_t;
 
 // The queue command structure
 typedef struct {
     actuator_cmd_t cmd_type;
-    uint32_t       value;  // duty% for pumps (0..100), or boolean for LED
+    uint32_t       value;   // duty% for pumps (0..100), or boolean for LED
+    uint8_t        channel; // LED channel (1-4) for ACTUATOR_CMD_LED_CHANNEL_PWM
 } actuator_command_t;
 
 // -------------------------------------------------------------
@@ -82,6 +84,9 @@ void dose_food_pump_ms(uint32_t duration_ms, uint8_t speed);
 // LED array
 void set_led_array_binary(bool state);
 void set_led_array_pwm(uint32_t duty_percentage);
+
+// Multi-channel LED control (channels 1-4 on LED shield at 0x61)
+void set_led_channel_pwm(uint8_t channel, uint32_t duty_percentage);
 
 // Access to the global actuator info array
 // (Note: consider adding a mutex if multiple tasks can read/write)
