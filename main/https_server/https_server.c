@@ -120,6 +120,7 @@ static esp_err_t airpump_post_handler(httpd_req_t *req);
 static esp_err_t sourcepump_post_handler(httpd_req_t *req);
 static esp_err_t planterpump_post_handler(httpd_req_t *req);
 static esp_err_t drainpump_post_handler(httpd_req_t *req);
+static esp_err_t foodpump_post_handler(httpd_req_t *req);
 static esp_err_t led_post_handler(httpd_req_t *req);
 static esp_err_t unit_metrics_get_handler(httpd_req_t *req);
 static esp_err_t hostname_suffix_post_handler(httpd_req_t *req);
@@ -392,6 +393,14 @@ void start_https_server(void) {
             .user_ctx = NULL
         };
         httpd_register_uri_handler(server, &drainpump_post_uri);
+        
+        httpd_uri_t foodpump_post_uri = {
+            .uri      = "/api/actuators/foodpump",
+            .method   = HTTP_POST,
+            .handler  = foodpump_post_handler,
+            .user_ctx = NULL
+        };
+        httpd_register_uri_handler(server, &foodpump_post_uri);
         
         httpd_uri_t led_post_uri = {
             .uri      = "/api/actuators/led",
@@ -1432,6 +1441,92 @@ static esp_err_t drainpump_post_handler(httpd_req_t *req)
     cJSON_Delete(json);
 
     httpd_resp_sendstr(req, "Drain pump updated");
+    return ESP_OK;
+}
+
+//-----------------------------------------------------------------------------------
+// Handler for food pump POST request
+// JSON formats:
+//   {"value": <0..100>}              - Set continuous PWM mode (0-100%)
+//   {"dose": <duration_ms>, "speed": <0..100>} - Timed dosing mode
+//-----------------------------------------------------------------------------------
+static esp_err_t foodpump_post_handler(httpd_req_t *req)
+{
+    char content[150];
+    int ret = httpd_req_recv(req, content, req->content_len);
+    if (ret <= 0) {
+        ESP_LOGE(TAG, "Failed to receive request data");
+        return ESP_FAIL;
+    }
+    content[ret] = '\0';
+
+    ESP_LOGI(TAG, "Received food pump command: %s", content);
+
+    // Parse JSON
+    cJSON *json = cJSON_Parse(content);
+    if (!json) {
+        ESP_LOGE(TAG, "Invalid JSON received");
+        return ESP_FAIL;
+    }
+
+    // Check for dosing mode (dose + speed)
+    cJSON *dose_json = cJSON_GetObjectItem(json, "dose");
+    cJSON *speed_json = cJSON_GetObjectItem(json, "speed");
+
+    if (dose_json && cJSON_IsNumber(dose_json)) {
+        // Dosing mode
+        uint32_t duration_ms = (uint32_t)dose_json->valueint;
+        uint8_t speed = 100;  // Default to 100% if not specified
+        
+        if (speed_json && cJSON_IsNumber(speed_json)) {
+            speed = (uint8_t)speed_json->valueint;
+            if (speed > 100) speed = 100;
+        }
+        
+        if (duration_ms == 0) {
+            ESP_LOGE(TAG, "Invalid dose duration: %lu ms", (unsigned long)duration_ms);
+            cJSON_Delete(json);
+            httpd_resp_sendstr(req, "Invalid dose duration. Must be > 0");
+            return ESP_FAIL;
+        }
+        
+        ESP_LOGI(TAG, "Dosing food pump: %lu ms at %u%% speed", (unsigned long)duration_ms, speed);
+        dose_food_pump_ms(duration_ms, speed);
+        
+        char response[80];
+        snprintf(response, sizeof(response), "Food pump dosed: %lu ms at %u%% speed", 
+                 (unsigned long)duration_ms, speed);
+        httpd_resp_sendstr(req, response);
+        
+    } else {
+        // PWM mode
+        cJSON *value_json = cJSON_GetObjectItem(json, "value");
+        
+        if (!value_json || !cJSON_IsNumber(value_json)) {
+            ESP_LOGE(TAG, "Invalid JSON format. Expected {\"value\": 0-100} or {\"dose\": ms, \"speed\": 0-100}");
+            cJSON_Delete(json);
+            httpd_resp_sendstr(req, "Invalid JSON format");
+            return ESP_FAIL;
+        }
+        
+        int value = value_json->valueint;
+        
+        if (value < 0 || value > 100) {
+            ESP_LOGE(TAG, "Invalid value %d. Must be 0-100", value);
+            cJSON_Delete(json);
+            httpd_resp_sendstr(req, "Invalid value. Must be 0-100");
+            return ESP_FAIL;
+        }
+        
+        ESP_LOGI(TAG, "Setting food pump PWM to %d%%", value);
+        set_food_pump_pwm((uint32_t)value);
+        
+        char response[64];
+        snprintf(response, sizeof(response), "Food pump set to %d%%", value);
+        httpd_resp_sendstr(req, response);
+    }
+
+    cJSON_Delete(json);
     return ESP_OK;
 }
 

@@ -17,6 +17,57 @@ from tkinter import messagebox, ttk
 import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
+"""
+=============================================================================
+TODO: FOOD PUMP SYSTEM - Complete Integration Checklist
+=============================================================================
+
+FIRMWARE TASKS (ESP32):
+1. [✓] Create foodpump API endpoint in https_server.c:
+    - POST /api/actuators/foodpump
+    - Accept JSON: {"value": 0-100} for PWM mode
+    - Accept JSON: {"dose": duration_ms, "speed": 0-100} for timed dosing
+    
+2. [✓] Implement foodpump_post_handler() in https_server.c
+    - Parse JSON payload
+    - Call set_food_pump_pwm() for PWM mode
+    - Call dose_food_pump_ms() for dose mode
+    
+3. [✓] Register foodpump endpoint in start_webserver()
+
+PYTHON CONSOLE TASKS (hydroponics_console.py):
+4. [✓] Uncomment API calls in do_foodpump() command
+    - Line ~1428: self._post_actuator_command('foodpump', ...)
+    
+5. [✓] Uncomment API calls in execute_schedule()
+    - Line ~1048: Enable food_dose HTTP POST to device
+    
+CALIBRATION SYSTEM (Future):
+6. [ ] Create calibration routine to measure:
+    - Volume dispensed per millisecond at various speeds
+    - Create lookup table: ms -> mL conversion
+    
+7. [ ] Add calibration GUI:
+    - Run pump for known duration
+    - User measures dispensed volume
+    - Calculate and store calibration factor
+    
+8. [ ] Update food schedule GUI:
+    - Display volume (mL) instead of time (ms)
+    - Use calibration data for conversion
+    
+9. [ ] Store calibration data:
+    - In device NVS (firmware)
+    - In Python config file (console)
+
+NOTES:
+- Food pump uses MOTOR_FOOD_PUMP (motor channel 2) on first shield (0x60)
+- Firmware functions already exist: set_food_pump_pwm(), dose_food_pump_ms()
+- UART command 'foodpump' already works in firmware
+- This GUI provides scheduled dosing split into intervals throughout the day
+=============================================================================
+"""
+
 # Setup Logging
 logging.basicConfig(
     level=logging.INFO,
@@ -428,19 +479,25 @@ def prompt_schedule_multi(light_sched, planter_sched):
     root.mainloop()
     return result
 
-def prompt_unified_schedule_manager(initial_light_schedule=None, initial_planter_schedule=None):
+def prompt_unified_schedule_manager(initial_light_schedule=None, initial_planter_schedule=None, existing_schedules=None):
     """
     Comprehensive schedule management GUI combining:
     1. Hourly schedules (Light curve + Planter intervals)
-    2. Routine commands (Fill/Empty/Maintenance schedules)
+    2. Food dosing schedule
+    3. Routine commands (Fill/Empty/Maintenance schedules)
+    4. View existing schedules
     
     Args:
         initial_light_schedule: List of 24 integers (0-100) for light schedule
         initial_planter_schedule: List of 24 integers (0-100) for planter schedule
+        existing_schedules: Dictionary of existing schedules to display
     
     Returns a dictionary with both schedule types or None if cancelled.
     """
     result = None
+    
+    if existing_schedules is None:
+        existing_schedules = {}
 
     def on_save_all():
         nonlocal result
@@ -448,6 +505,31 @@ def prompt_unified_schedule_manager(initial_light_schedule=None, initial_planter
         # Collect hourly schedules
         light_schedule = [light_scales[i].get() for i in range(24)]
         planter_schedule = [planter_scales[i].get() for i in range(24)]
+        
+        # Collect food schedule info
+        food_config = None
+        if enable_food.get():
+            try:
+                total_ms = int(food_total_entry.get())
+                intervals = int(food_intervals_spinbox.get())
+                speed = int(food_speed_scale.get())
+                
+                if total_ms <= 0:
+                    tk.messagebox.showerror("Error", "Total daily amount must be greater than 0.")
+                    return
+                if intervals <= 0:
+                    tk.messagebox.showerror("Error", "Number of intervals must be greater than 0.")
+                    return
+                
+                food_config = {
+                    'total_daily_ms': total_ms,
+                    'intervals': intervals,
+                    'speed': speed,
+                    'dose_per_interval': total_ms // intervals
+                }
+            except ValueError:
+                tk.messagebox.showerror("Error", "Invalid food schedule values. Please enter valid numbers.")
+                return
         
         # Collect routine schedule info
         routine_config = None
@@ -494,6 +576,7 @@ def prompt_unified_schedule_manager(initial_light_schedule=None, initial_planter
         result = {
             'light_schedule': light_schedule,
             'planter_schedule': planter_schedule,
+            'food_config': food_config,
             'routine_config': routine_config
         }
         
@@ -619,7 +702,7 @@ def prompt_unified_schedule_manager(initial_light_schedule=None, initial_planter
     # Create main window
     root = tk.Tk()
     root.title("Unified Schedule Manager")
-    root.geometry("750x750")
+    root.geometry("800x950")  # Increased height for food section and schedules view
     
     # Bring window to foreground
     root.lift()
@@ -633,7 +716,7 @@ def prompt_unified_schedule_manager(initial_light_schedule=None, initial_planter
     
     # ========== Top Info Label ==========
     info_label = tk.Label(main_frame, 
-                         text="Manage hourly schedules (Light & Planter) and routine commands (Fill/Empty/Maintenance)",
+                         text="Manage hourly schedules (Light & Planter), food dosing, and routine commands",
                          font=("Arial", 10), fg="#666", wraplength=700)
     info_label.pack(pady=(0, 10))
     
@@ -652,6 +735,85 @@ def prompt_unified_schedule_manager(initial_light_schedule=None, initial_planter
     # Add tabs to notebook
     hourly_notebook.add(light_tab, text="💡 Light Curve")
     hourly_notebook.add(planter_tab, text="🌱 Planter Intervals")
+    
+    # ========== Food Schedule Section ==========
+    food_frame = tk.LabelFrame(main_frame, text="🍽️ Food Dosing Schedule (Daily Distribution)", padx=10, pady=10)
+    food_frame.pack(fill="x", pady=(0, 10))
+    
+    # Enable/Disable food schedule checkbox
+    enable_food = tk.BooleanVar(value=False)
+    
+    def toggle_food_controls():
+        """Enable/disable food controls based on checkbox"""
+        state = 'normal' if enable_food.get() else 'disabled'
+        food_total_entry.config(state=state)
+        food_intervals_spinbox.config(state=state)
+        food_speed_scale.config(state=state)
+        food_calibrate_btn.config(state=state)
+    
+    enable_food_cb = tk.Checkbutton(food_frame, text="Enable Daily Food Dosing Schedule", 
+                                    variable=enable_food, command=toggle_food_controls,
+                                    font=("Arial", 10, "bold"))
+    enable_food_cb.grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 10))
+    
+    # Total daily amount (in milliseconds of pump runtime)
+    tk.Label(food_frame, text="Total Daily Amount (ms):", anchor="w").grid(row=1, column=0, sticky="w", pady=5)
+    food_total_entry = tk.Entry(food_frame, width=15, state='disabled')
+    food_total_entry.insert(0, "5000")  # Default 5 seconds total per day
+    food_total_entry.grid(row=1, column=1, sticky="w", pady=5, padx=(0, 5))
+    tk.Label(food_frame, text="(Total pump runtime per day)", fg="#666", font=("Arial", 9)).grid(row=1, column=2, sticky="w", pady=5)
+    
+    # Number of intervals
+    tk.Label(food_frame, text="Number of Intervals:", anchor="w").grid(row=2, column=0, sticky="w", pady=5)
+    food_intervals_spinbox = tk.Spinbox(food_frame, from_=1, to=24, width=13, state='disabled')
+    food_intervals_spinbox.delete(0, "end")
+    food_intervals_spinbox.insert(0, "4")  # Default 4 feedings per day
+    food_intervals_spinbox.grid(row=2, column=1, sticky="w", pady=5, padx=(0, 5))
+    tk.Label(food_frame, text="(Evenly spaced throughout the day)", fg="#666", font=("Arial", 9)).grid(row=2, column=2, sticky="w", pady=5)
+    
+    # Pump speed
+    tk.Label(food_frame, text="Pump Speed (%):", anchor="w").grid(row=3, column=0, sticky="w", pady=5)
+    food_speed_scale = tk.Scale(food_frame, from_=1, to=100, orient="horizontal", 
+                                length=200, state='disabled')
+    food_speed_scale.set(100)  # Default 100% speed
+    food_speed_scale.grid(row=3, column=1, sticky="w", pady=5, padx=(0, 5))
+    tk.Label(food_frame, text="(Speed during dosing)", fg="#666", font=("Arial", 9)).grid(row=3, column=2, sticky="w", pady=5)
+    
+    # Calculated dose per interval (read-only display)
+    tk.Label(food_frame, text="Dose Per Interval:", anchor="w", fg="#0066cc", font=("Arial", 9, "bold")).grid(row=4, column=0, sticky="w", pady=5)
+    food_dose_label = tk.Label(food_frame, text="0 ms", fg="#0066cc", font=("Arial", 9, "bold"))
+    food_dose_label.grid(row=4, column=1, sticky="w", pady=5)
+    
+    def update_dose_calculation(*args):
+        """Update the calculated dose per interval"""
+        try:
+            total = int(food_total_entry.get())
+            intervals = int(food_intervals_spinbox.get())
+            dose_per_interval = total // intervals if intervals > 0 else 0
+            food_dose_label.config(text=f"{dose_per_interval} ms per feeding")
+        except ValueError:
+            food_dose_label.config(text="Invalid input")
+    
+    # Bind calculation updates
+    food_total_entry.bind("<KeyRelease>", update_dose_calculation)
+    food_intervals_spinbox.bind("<<Increment>>", update_dose_calculation)
+    food_intervals_spinbox.bind("<<Decrement>>", update_dose_calculation)
+    food_intervals_spinbox.bind("<KeyRelease>", update_dose_calculation)
+    
+    # Calibration section (skeleton for future implementation)
+    tk.Label(food_frame, text="", anchor="w").grid(row=5, column=0, pady=5)  # Spacer
+    food_calibrate_btn = tk.Button(food_frame, text="🔧 Calibrate Food Pump", 
+                                   state='disabled',
+                                   command=lambda: tk.messagebox.showinfo("Calibration", 
+                                       "Food pump calibration feature coming soon!\n\n"
+                                       "This will allow you to:\n"
+                                       "- Measure actual volume dispensed per millisecond\n"
+                                       "- Convert between time and volume units\n"
+                                       "- Fine-tune dosing accuracy"))
+    food_calibrate_btn.grid(row=5, column=1, sticky="w", pady=5)
+    tk.Label(food_frame, text="(Calibration: TODO)", fg="#999", font=("Arial", 9, "italic")).grid(row=5, column=2, sticky="w", pady=5)
+    
+    food_frame.columnconfigure(2, weight=1)
     
     # ========== Routine Commands Section ==========
     routine_frame = tk.LabelFrame(main_frame, text="Routine Command Schedule (Fill/Empty/Maintenance)", padx=10, pady=10)
@@ -704,6 +866,99 @@ def prompt_unified_schedule_manager(initial_light_schedule=None, initial_planter
     routine_command_menu.config(state='disabled')
     
     routine_frame.columnconfigure(1, weight=1)
+    
+    # ========== Existing Schedules View Section ==========
+    if existing_schedules:
+        schedules_frame = tk.LabelFrame(main_frame, text="📅 Existing Schedules", padx=5, pady=5)
+        schedules_frame.pack(fill="both", expand=True, pady=(0, 10))
+        
+        # Create canvas with scrollbar for schedule list
+        sched_canvas = tk.Canvas(schedules_frame, height=200)
+        sched_scrollbar = tk.Scrollbar(schedules_frame, orient="vertical", command=sched_canvas.yview)
+        sched_scrollable = tk.Frame(sched_canvas)
+        
+        sched_scrollable.bind(
+            "<Configure>",
+            lambda e: sched_canvas.configure(scrollregion=sched_canvas.bbox("all"))
+        )
+        
+        sched_canvas.create_window((0, 0), window=sched_scrollable, anchor="nw")
+        sched_canvas.configure(yscrollcommand=sched_scrollbar.set)
+        
+        # Header row
+        header_frame = tk.Frame(sched_scrollable, relief=tk.RAISED, borderwidth=1)
+        header_frame.pack(fill="x", padx=5, pady=(5, 2))
+        
+        tk.Label(header_frame, text="Name", width=18, font=("Arial", 9, "bold"), anchor="w").pack(side="left", padx=2)
+        tk.Label(header_frame, text="Device", width=12, font=("Arial", 9, "bold"), anchor="w").pack(side="left", padx=2)
+        tk.Label(header_frame, text="Time", width=8, font=("Arial", 9, "bold"), anchor="w").pack(side="left", padx=2)
+        tk.Label(header_frame, text="Frequency", width=10, font=("Arial", 9, "bold"), anchor="w").pack(side="left", padx=2)
+        tk.Label(header_frame, text="Actions", width=30, font=("Arial", 9, "bold"), anchor="w").pack(side="left", padx=2)
+        
+        # Add schedule rows
+        for sched_name, sched_details in existing_schedules.items():
+            row_frame = tk.Frame(sched_scrollable, relief=tk.GROOVE, borderwidth=1)
+            row_frame.pack(fill="x", padx=5, pady=1)
+            
+            # Name
+            name_label = tk.Label(row_frame, text=sched_name, width=18, anchor="w", font=("Arial", 9))
+            name_label.pack(side="left", padx=2)
+            
+            # Device
+            device_label = tk.Label(row_frame, text=sched_details.get('device_name', 'N/A'), 
+                                   width=12, anchor="w", font=("Arial", 9))
+            device_label.pack(side="left", padx=2)
+            
+            # Time
+            time_label = tk.Label(row_frame, text=sched_details.get('start_time', 'N/A'), 
+                                 width=8, anchor="w", font=("Arial", 9))
+            time_label.pack(side="left", padx=2)
+            
+            # Frequency with day
+            freq = sched_details.get('frequency', 'N/A')
+            day = sched_details.get('day_of_week', '')
+            freq_text = f"{freq.capitalize()}"
+            if day and freq == 'weekly':
+                freq_text += f" ({day})"
+            freq_label = tk.Label(row_frame, text=freq_text, width=10, anchor="w", font=("Arial", 9))
+            freq_label.pack(side="left", padx=2)
+            
+            # Actions summary
+            actions = sched_details.get('actions', {})
+            action_parts = []
+            
+            # Check for routine commands
+            if 'routine' in actions:
+                action_parts.append(f"Routine: {actions['routine'].get('command', 'N/A')}")
+            
+            # Check for food dosing
+            if 'food_dose' in actions:
+                dose_ms = actions['food_dose'].get('duration_ms', 0)
+                speed = actions['food_dose'].get('speed', 100)
+                action_parts.append(f"Food: {dose_ms}ms@{speed}%")
+            
+            # Check for actuators
+            for actuator in ['led', 'airpump', 'sourcepump', 'planterpump', 'drainpump']:
+                if actuator in actions:
+                    value = actions[actuator].get('value', 0)
+                    if value > 0:
+                        action_parts.append(f"{actuator.capitalize()}: {value}%")
+            
+            action_text = ", ".join(action_parts) if action_parts else "None"
+            if len(action_text) > 40:
+                action_text = action_text[:37] + "..."
+            
+            action_label = tk.Label(row_frame, text=action_text, width=30, anchor="w", 
+                                   font=("Arial", 9), fg="#0066cc")
+            action_label.pack(side="left", padx=2)
+        
+        # Pack canvas and scrollbar
+        sched_canvas.pack(side="left", fill="both", expand=True)
+        sched_scrollbar.pack(side="right", fill="y")
+        
+        # Info label
+        info_text = f"Showing {len(existing_schedules)} active schedule(s). Use 'delete_schedule' command to remove."
+        tk.Label(schedules_frame, text=info_text, font=("Arial", 8), fg="#666").pack(pady=(5, 0))
     
     # ========== Action Buttons ==========
     button_frame = tk.Frame(main_frame)
@@ -776,6 +1031,7 @@ class HydroponicsConsole(Cmd):
             'planterpump': 'Set planter pump PWM value: planterpump <value>',
             # Servo → Drain Pump
             'drainpump': 'Set drain pump PWM value: drainpump <value>',
+            'foodpump': 'Control food pump: foodpump <value> | dose <duration_ms> [speed]',
             'led': 'Set LED brightness: led <value> [channel]',
             'schedule_actuators': 'Set actuator schedule: schedule_actuators',
             'manage_schedules': 'Unified schedule manager (hourly + routines): manage_schedules',
@@ -939,6 +1195,14 @@ class HydroponicsConsole(Cmd):
                     url = f"https://{device_info['address']}:{device_info['port']}/api/routines/{routine_cmd}"
                     response = self.session.post(url, json={}, timeout=10, verify=False)
                     print(f"Routine '{routine_cmd}' started: {response.text}")
+                elif actuator == 'food_dose':
+                    # Handle food dosing (timed pump operation)
+                    duration_ms = command.get('duration_ms', 1000)
+                    speed = command.get('speed', 100)
+                    url = f"https://{device_info['address']}:{device_info['port']}/api/actuators/foodpump"
+                    payload = {'dose': duration_ms, 'speed': speed}
+                    response = self.session.post(url, json=payload, timeout=10, verify=False)
+                    print(f"Food pump dosed: {response.text}")
                 else:
                     # Regular actuator command
                     url = f"https://{device_info['address']}:{device_info['port']}/api/actuators/{actuator}"
@@ -1278,6 +1542,57 @@ class HydroponicsConsole(Cmd):
         except ValueError:
             print("Please provide a valid integer value.")
 
+    def do_foodpump(self, arg):
+        '''Control food pump: foodpump <value> | dose <duration_ms> [speed]
+        Examples:
+            foodpump 50           - Run at 50% speed continuously
+            foodpump 0            - Stop food pump
+            foodpump dose 1000    - Dose for 1 second at 100% speed
+            foodpump dose 500 80  - Dose for 500ms at 80% speed
+        '''
+        if not self._check_device_selected():
+            return
+        
+        args = arg.strip().split()
+        if len(args) == 0:
+            print("Usage: foodpump <value> | dose <duration_ms> [speed]")
+            print("  foodpump <value>                  - Set continuous PWM (0-100%)")
+            print("  foodpump dose <duration_ms>       - Dose for specified milliseconds at 100% speed")
+            print("  foodpump dose <duration_ms> <speed> - Dose for specified milliseconds at custom speed")
+            return
+        
+        # Check if it's a dose command
+        if args[0].lower() == 'dose':
+            if len(args) < 2:
+                print("Usage: foodpump dose <duration_ms> [speed]")
+                return
+            
+            try:
+                duration_ms = int(args[1])
+                speed = int(args[2]) if len(args) > 2 else 100
+                
+                if duration_ms <= 0:
+                    print("Duration must be greater than 0")
+                    return
+                if speed < 0 or speed > 100:
+                    print("Speed must be between 0 and 100")
+                    return
+                
+                self._post_actuator_command('foodpump', {'dose': duration_ms, 'speed': speed}, self.selected_device)
+            except ValueError:
+                print("Invalid numeric value. Usage: foodpump dose <duration_ms> [speed]")
+        else:
+            # Continuous PWM mode
+            try:
+                value = int(args[0])
+                if value < 0 or value > 100:
+                    print("Value must be between 0 and 100")
+                    return
+                
+                self._post_actuator_command('foodpump', {'value': value}, self.selected_device)
+            except ValueError:
+                print("Invalid numeric value. Usage: foodpump <value>")
+
     def do_led(self, arg):
         '''Set LED brightness: led <value> [channel]
         Examples:
@@ -1389,8 +1704,8 @@ class HydroponicsConsole(Cmd):
         light_sched = self._fetch_saved_schedule("light")
         planter_sched = self._fetch_saved_schedule("planter")
         
-        # Open the unified GUI window (load with current schedules from device)
-        config = prompt_unified_schedule_manager(light_sched, planter_sched)
+        # Open the unified GUI window (load with current schedules from device and existing schedules)
+        config = prompt_unified_schedule_manager(light_sched, planter_sched, self.schedules)
         
         if config is None:
             print("Schedule management cancelled.")
@@ -1409,6 +1724,63 @@ class HydroponicsConsole(Cmd):
             if config['planter_schedule']:
                 self._post_routine("planter_pod_schedule", {"schedule": config['planter_schedule']})
                 print("✓ Planter schedule updated")
+        
+        # Handle food schedule
+        if config['food_config']:
+            food = config['food_config']
+            
+            print("\n--- Setting Up Food Dosing Schedule ---")
+            print(f"  Total daily amount: {food['total_daily_ms']} ms")
+            print(f"  Number of intervals: {food['intervals']}")
+            print(f"  Dose per interval: {food['dose_per_interval']} ms")
+            print(f"  Pump speed: {food['speed']}%")
+            
+            # Calculate feeding times (evenly spaced throughout 24 hours)
+            hours_between = 24.0 / food['intervals']
+            
+            # Remove any existing food schedules
+            food_schedules = [name for name in self.schedules if name.startswith('food_dose_')]
+            for name in food_schedules:
+                try:
+                    scheduler.remove_job(name)
+                    del self.schedules[name]
+                    print(f"  Removed old schedule: {name}")
+                except Exception as e:
+                    print(f"  Warning: Could not remove old schedule {name}: {e}")
+            
+            # Create new food dosing schedules
+            device_info = devices[self.selected_device]
+            device_name = self.selected_device
+            
+            for i in range(food['intervals']):
+                # Calculate start hour for this interval
+                start_hour = int(i * hours_between)
+                start_minute = int((i * hours_between - start_hour) * 60)
+                schedule_name = f"food_dose_{i+1}"
+                
+                # Store the food dosing schedule
+                self.schedules[schedule_name] = {
+                    'device_name': device_name,
+                    'device_ip': device_info['address'],
+                    'start_time': f"{start_hour:02d}:{start_minute:02d}",
+                    'duration_minutes': 0,  # Instant dose
+                    'frequency': 'daily',
+                    'day_of_week': None,
+                    'actions': {
+                        'food_dose': {
+                            'duration_ms': food['dose_per_interval'],
+                            'speed': food['speed']
+                        }
+                    }
+                }
+                
+                # Schedule the job
+                self.schedule_job(schedule_name, self.schedules[schedule_name])
+                print(f"  ✓ Scheduled feeding {i+1} at {start_hour:02d}:{start_minute:02d} ({food['dose_per_interval']} ms)")
+            
+            # Save schedules to JSON
+            self.save_schedules()
+            print(f"\n✓ Food dosing schedule created with {food['intervals']} daily feedings")
         
         # Handle routine command schedule
         if config['routine_config']:
