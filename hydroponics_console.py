@@ -580,19 +580,35 @@ def prompt_unified_schedule_manager(initial_light_schedule=None, initial_planter
             scale.config(command=update_label)
             update_label(scale.get(), value_var)
             
-            # Add mouse wheel support
-            def on_mousewheel(event, s=scale):
+            # Add mouse wheel support for slider adjustment
+            def on_slider_mousewheel(event, s=scale):
                 current = s.get()
                 # Scroll up = increase, scroll down = decrease
                 if event.delta > 0:
                     s.set(min(100, current + 1))
                 else:
                     s.set(max(0, current - 1))
+                return "break"  # Prevent event propagation
             
-            scale.bind("<MouseWheel>", on_mousewheel)
+            scale.bind("<MouseWheel>", on_slider_mousewheel)
             
             scale.pack(side="left", fill="x", expand=True, padx=5)
             scales.append(scale)
+        
+        # Enable mouse wheel scrolling on canvas area
+        def on_canvas_mousewheel(event):
+            canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+        
+        # Bind to canvas, scrollable frame, and all labels/frames (but not sliders)
+        canvas.bind("<MouseWheel>", on_canvas_mousewheel)
+        scrollable_frame.bind("<MouseWheel>", on_canvas_mousewheel)
+        
+        # Bind to all child widgets except scales
+        for child in scrollable_frame.winfo_children():
+            child.bind("<MouseWheel>", on_canvas_mousewheel)
+            for grandchild in child.winfo_children():
+                if not isinstance(grandchild, tk.Scale):
+                    grandchild.bind("<MouseWheel>", on_canvas_mousewheel)
         
         # Pack canvas and scrollbar
         canvas.pack(side="left", fill="both", expand=True)
@@ -604,6 +620,12 @@ def prompt_unified_schedule_manager(initial_light_schedule=None, initial_planter
     root = tk.Tk()
     root.title("Unified Schedule Manager")
     root.geometry("750x750")
+    
+    # Bring window to foreground
+    root.lift()
+    root.attributes('-topmost', True)
+    root.after_idle(root.attributes, '-topmost', False)
+    root.focus_force()
     
     # Main frame
     main_frame = tk.Frame(root)
