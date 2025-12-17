@@ -7,7 +7,11 @@
 #include <time.h>
 #include "esp_sntp.h"
 #include <esp_wifi.h>
-#include "../filesystem/config_manager.h"
+#include "config_manager.h"
+#include "filesystem_manager.h"
+#include <sys/stat.h>
+#include <dirent.h>
+#include <ctype.h>
 
 #include "actuator_control.h"   // For set_air_pump_pwm, set_source_pump_pwm, set_drain_pump_pwm, set_planter_pump_pwm, set_led_array_binary (or set_led_array_pwm)
 #include "power_monitor_HAL.h"  // For power monitoring abstraction
@@ -32,6 +36,46 @@ static volatile int s_confirmed_level_mm = -1;
 void confirm_level(int mm)
 {
     s_confirmed_level_mm = mm;
+}
+
+/* ==========================================
+ *         DATE/TIME HELPER FUNCTIONS
+ * ========================================== */
+
+// Parse YYYY-MM-DD date string to Unix timestamp
+// Returns timestamp on success, -1 on failure
+static int32_t parse_date_to_timestamp(const char *date_str) {
+    if (!date_str || strlen(date_str) != 10) {
+        return -1;
+    }
+    
+    struct tm tm_info = {0};
+    
+    // Parse year, month, day
+    if (sscanf(date_str, "%d-%d-%d", 
+               &tm_info.tm_year, 
+               &tm_info.tm_mon, 
+               &tm_info.tm_mday) != 3) {
+        ESP_LOGE(TAG, "Failed to parse date: %s", date_str);
+        return -1;
+    }
+    
+    // Adjust for struct tm format
+    tm_info.tm_year -= 1900;  // Years since 1900
+    tm_info.tm_mon -= 1;       // Months since January (0-11)
+    tm_info.tm_hour = 0;       // Start of day
+    tm_info.tm_min = 0;
+    tm_info.tm_sec = 0;
+    tm_info.tm_isdst = -1;     // Auto-detect DST
+    
+    time_t timestamp = mktime(&tm_info);
+    if (timestamp == -1) {
+        ESP_LOGE(TAG, "mktime failed for date: %s", date_str);
+        return -1;
+    }
+    
+    ESP_LOGI(TAG, "Parsed date %s to timestamp %ld", date_str, (long)timestamp);
+    return (int32_t)timestamp;
 }
 
 /* ==========================================
@@ -125,6 +169,14 @@ static esp_err_t led_post_handler(httpd_req_t *req);
 static esp_err_t unit_metrics_get_handler(httpd_req_t *req);
 static esp_err_t hostname_suffix_post_handler(httpd_req_t *req);
 static esp_err_t device_restart_post_handler(httpd_req_t *req);
+
+// Filesystem API handlers
+static esp_err_t filesystem_list_get_handler(httpd_req_t *req);
+static esp_err_t filesystem_read_get_handler(httpd_req_t *req);
+
+// Plant info API handlers
+static esp_err_t plant_info_get_handler(httpd_req_t *req);
+static esp_err_t plant_info_post_handler(httpd_req_t *req);
 
 extern void schedule_manager_task(void *pvParam);
 extern void schedule_air_task(void *pvParam);
@@ -340,7 +392,7 @@ void init_schedule_manager(void)
 void start_https_server(void) {
     httpd_ssl_config_t config = HTTPD_SSL_CONFIG_DEFAULT();
     config.httpd.uri_match_fn = httpd_uri_match_wildcard;  // function pointer
-    config.httpd.max_uri_handlers = 15;
+    config.httpd.max_uri_handlers = 20;  // Increased from 15 to accommodate new endpoints
 
     extern const unsigned char server_cert_pem_start[] asm("_binary_server_crt_start");
     extern const unsigned char server_cert_pem_end[]   asm("_binary_server_crt_end");
@@ -467,6 +519,41 @@ void start_https_server(void) {
            .user_ctx = NULL
        };
        httpd_register_uri_handler(server, &schedules_uri);
+       
+        // Filesystem API endpoints
+        httpd_uri_t filesystem_list_uri = {
+            .uri      = "/api/filesystem/list",
+            .method   = HTTP_GET,
+            .handler  = filesystem_list_get_handler,
+            .user_ctx = NULL
+        };
+        httpd_register_uri_handler(server, &filesystem_list_uri);
+        
+        httpd_uri_t filesystem_read_uri = {
+            .uri      = "/api/filesystem/read",
+            .method   = HTTP_GET,
+            .handler  = filesystem_read_get_handler,
+            .user_ctx = NULL
+        };
+        httpd_register_uri_handler(server, &filesystem_read_uri);
+        
+        // Plant info API endpoints
+        httpd_uri_t plant_info_get_uri = {
+            .uri      = "/api/plant/info",
+            .method   = HTTP_GET,
+            .handler  = plant_info_get_handler,
+            .user_ctx = NULL
+        };
+        httpd_register_uri_handler(server, &plant_info_get_uri);
+        
+        httpd_uri_t plant_info_post_uri = {
+            .uri      = "/api/plant/info",
+            .method   = HTTP_POST,
+            .handler  = plant_info_post_handler,
+            .user_ctx = NULL
+        };
+        httpd_register_uri_handler(server, &plant_info_post_uri);
+        
         ESP_LOGI(TAG, "HTTPS server started successfully");
     } else {
         ESP_LOGE(TAG, "Failed to start HTTPS server");
@@ -1679,6 +1766,270 @@ static esp_err_t hostname_suffix_post_handler(httpd_req_t *req) {
 static esp_err_t device_restart_post_handler(httpd_req_t *req) {
     esp_restart();
     return ESP_OK; 
+}
+
+// ===== Filesystem API Handlers =====
+
+// Helper function to URL-decode a string in-place
+static void url_decode(char *dst, const char *src) {
+    char a, b;
+    while (*src) {
+        if ((*src == '%') &&
+            ((a = src[1]) && (b = src[2])) &&
+            (isxdigit(a) && isxdigit(b))) {
+            if (a >= 'a') a -= 'a'-'A';
+            if (a >= 'A') a -= ('A' - 10);
+            else a -= '0';
+            if (b >= 'a') b -= 'a'-'A';
+            if (b >= 'A') b -= ('A' - 10);
+            else b -= '0';
+            *dst++ = 16*a+b;
+            src+=3;
+        } else if (*src == '+') {
+            *dst++ = ' ';
+            src++;
+        } else {
+            *dst++ = *src++;
+        }
+    }
+    *dst = '\0';
+}
+
+static esp_err_t filesystem_list_get_handler(httpd_req_t *req) {
+    // Parse query parameter: path
+    char path_param[256] = "/lfs";  // Default to root
+    if (httpd_req_get_url_query_str(req, path_param, sizeof(path_param)) == ESP_OK) {
+        char path_value[256];
+        if (httpd_query_key_value(path_param, "path", path_value, sizeof(path_value)) == ESP_OK) {
+            // URL decode the path
+            url_decode(path_param, path_value);
+            path_param[sizeof(path_param) - 1] = '\0';
+        } else {
+            strcpy(path_param, "/lfs");  // Reset to default if parsing failed
+        }
+    }
+
+    ESP_LOGI(TAG, "Listing filesystem path: %s", path_param);
+
+    // Create JSON response
+    cJSON *root = cJSON_CreateObject();
+    cJSON *files_array = cJSON_CreateArray();
+    cJSON *dirs_array = cJSON_CreateArray();
+    
+    int total_files = 0;
+    int total_dirs = 0;
+
+    // Manually scan directory using POSIX opendir/readdir
+    DIR *dir = opendir(path_param);
+    if (dir != NULL) {
+        struct dirent *entry;
+        while ((entry = readdir(dir)) != NULL) {
+            struct stat st;
+            char full_path[512];  // Increased to accommodate longer paths
+            snprintf(full_path, sizeof(full_path), "%s/%s", path_param, entry->d_name);
+            
+            if (stat(full_path, &st) == 0) {
+                if (S_ISDIR(st.st_mode)) {
+                    // Directory
+                    cJSON_AddItemToArray(dirs_array, cJSON_CreateString(entry->d_name));
+                    total_dirs++;
+                } else {
+                    // File - add with size
+                    cJSON *file_obj = cJSON_CreateObject();
+                    cJSON_AddStringToObject(file_obj, "name", entry->d_name);
+                    cJSON_AddNumberToObject(file_obj, "size", (int)st.st_size);
+                    cJSON_AddItemToArray(files_array, file_obj);
+                    total_files++;
+                }
+            }
+        }
+        closedir(dir);
+    } else {
+        ESP_LOGW(TAG, "Failed to open directory: %s", path_param);
+    }
+
+    // Add arrays to response
+    cJSON_AddItemToObject(root, "directories", dirs_array);
+    cJSON_AddItemToObject(root, "files", files_array);
+    cJSON_AddNumberToObject(root, "total_files", total_files);
+    cJSON_AddNumberToObject(root, "total_dirs", total_dirs);
+    cJSON_AddStringToObject(root, "path", path_param);
+
+    // Send response
+    char *resp = cJSON_PrintUnformatted(root);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, resp);
+    free(resp);
+    cJSON_Delete(root);
+    
+    return ESP_OK;
+}
+
+static esp_err_t filesystem_read_get_handler(httpd_req_t *req) {
+    // Parse query parameter: path
+    char query[512];
+    char path[256] = {0};
+    char path_encoded[256] = {0};
+    
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing path parameter");
+        return ESP_FAIL;
+    }
+    
+    if (httpd_query_key_value(query, "path", path_encoded, sizeof(path_encoded)) != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing path parameter");
+        return ESP_FAIL;
+    }
+    
+    // URL decode the path
+    url_decode(path, path_encoded);
+
+    ESP_LOGI(TAG, "Reading file: %s", path);
+
+    // Read file content
+    char *content = NULL;
+    size_t size = 0;
+    esp_err_t err = filesystem_read_file(path, &content, &size);
+    
+    if (err != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "File not found or read error");
+        return ESP_FAIL;
+    }
+
+    // Create JSON response with file content and metadata
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "path", path);
+    cJSON_AddNumberToObject(root, "size", size);
+    cJSON_AddStringToObject(root, "content", content);
+    
+    char *resp = cJSON_PrintUnformatted(root);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, resp);
+    
+    free(resp);
+    free(content);
+    cJSON_Delete(root);
+    
+    return ESP_OK;
+}
+
+// ===== Plant Info API Handlers =====
+
+static esp_err_t plant_info_get_handler(httpd_req_t *req) {
+    plant_info_t plant_info;
+    
+    ESP_LOGI(TAG, "Getting plant info");
+    
+    esp_err_t err = config_load_plant_info(&plant_info);
+    
+    cJSON *root = cJSON_CreateObject();
+    
+    if (err == ESP_OK) {
+        // Plant info exists
+        cJSON_AddBoolToObject(root, "exists", true);
+        cJSON_AddStringToObject(root, "plant_name", plant_info.plant_name);
+        cJSON_AddStringToObject(root, "start_date", plant_info.start_date);
+        cJSON_AddNumberToObject(root, "start_timestamp", plant_info.start_timestamp);
+        
+        // Calculate days growing
+        int days = config_get_days_growing(&plant_info);
+        cJSON_AddNumberToObject(root, "days_growing", days);
+    } else {
+        // No plant info saved
+        cJSON_AddBoolToObject(root, "exists", false);
+        cJSON_AddStringToObject(root, "message", "No plant information configured");
+    }
+    
+    char *resp = cJSON_PrintUnformatted(root);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, resp);
+    free(resp);
+    cJSON_Delete(root);
+    
+    return ESP_OK;
+}
+
+static esp_err_t plant_info_post_handler(httpd_req_t *req) {
+    char body[512] = {0};
+    int ret = httpd_req_recv(req, body, sizeof(body) - 1);
+    
+    if (ret <= 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid body");
+        return ESP_FAIL;
+    }
+    
+    cJSON *root = cJSON_Parse(body);
+    if (!root) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Bad JSON");
+        return ESP_FAIL;
+    }
+    
+    // Extract plant name and start date
+    cJSON *name_item = cJSON_GetObjectItem(root, "plant_name");
+    cJSON *date_item = cJSON_GetObjectItem(root, "start_date");
+    
+    if (!name_item || !cJSON_IsString(name_item) || 
+        !date_item || !cJSON_IsString(date_item)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, 
+                           "Missing plant_name or start_date");
+        cJSON_Delete(root);
+        return ESP_FAIL;
+    }
+    
+    // Validate date format (basic check for YYYY-MM-DD)
+    const char *date_str = date_item->valuestring;
+    if (strlen(date_str) != 10 || date_str[4] != '-' || date_str[7] != '-') {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, 
+                           "Invalid date format. Use YYYY-MM-DD");
+        cJSON_Delete(root);
+        return ESP_FAIL;
+    }
+    
+    ESP_LOGI(TAG, "Setting plant info: %s, start date: %s", 
+             name_item->valuestring, date_str);
+    
+    // Save plant info
+    plant_info_t plant_info;
+    strncpy(plant_info.plant_name, name_item->valuestring, 
+            sizeof(plant_info.plant_name) - 1);
+    plant_info.plant_name[sizeof(plant_info.plant_name) - 1] = '\0';
+    
+    strncpy(plant_info.start_date, date_str, sizeof(plant_info.start_date) - 1);
+    plant_info.start_date[sizeof(plant_info.start_date) - 1] = '\0';
+    
+    // Parse the start_date string to timestamp
+    plant_info.start_timestamp = parse_date_to_timestamp(date_str);
+    if (plant_info.start_timestamp == -1) {
+        ESP_LOGE(TAG, "Failed to parse start date: %s", date_str);
+        cJSON_Delete(root);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, 
+                           "Invalid date format or date out of range");
+        return ESP_FAIL;
+    }
+    
+    esp_err_t err = config_save_plant_info(&plant_info);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to save plant info: %s", esp_err_to_name(err));
+        cJSON_Delete(root);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, 
+                           "Failed to save plant info");
+        return ESP_FAIL;
+    }
+    
+    cJSON_Delete(root);
+    
+    // Return success with updated info
+    cJSON *response = cJSON_CreateObject();
+    cJSON_AddBoolToObject(response, "success", true);
+    cJSON_AddStringToObject(response, "message", "Plant info saved");
+    
+    char *resp = cJSON_PrintUnformatted(response);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, resp);
+    free(resp);
+    cJSON_Delete(response);
+    
+    return ESP_OK;
 }
 
 // wrappers for console‐driven schedule start

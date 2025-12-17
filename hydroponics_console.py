@@ -8,7 +8,7 @@ from cmd2 import Cmd
 import requests
 import json
 from apscheduler.schedulers.background import BackgroundScheduler
-from datetime import datetime
+from datetime import datetime, timedelta
 import time
 import tkinter as tk
 from tkinter import messagebox, ttk
@@ -981,6 +981,1818 @@ def prompt_unified_schedule_manager(initial_light_schedule=None, initial_planter
     root.mainloop()
     return result
 
+# =============================================================================
+# Unified GUI Launcher - Main Application Interface
+# =============================================================================
+
+def launch_unified_gui(console_instance):
+    """
+    Main GUI application launcher that combines all features into a tabbed interface.
+    
+    Tabs:
+        - Schedules: Manage hourly light/planter schedules, food dosing, and routines
+        - Filesystem: Browse device filesystem, view/edit files
+        - Plant Info: Manage plant information and growing data
+    
+    This replaces the old manage_schedules command as the primary GUI entry point.
+    """
+    if not console_instance.selected_device:
+        tk.messagebox.showerror("No Device", "Please select a device first using 'select <device_name>'")
+        return
+    
+    root = tk.Tk()
+    root.title(f"GrowPod Control - {console_instance.selected_device}")
+    root.geometry("1400x900")  # Increased size to fit all elements
+    
+    # Main container
+    main_frame = tk.Frame(root, padx=10, pady=10)
+    main_frame.pack(fill="both", expand=True)
+    
+    # Device info header
+    device_info = devices[console_instance.selected_device]
+    header_frame = tk.Frame(main_frame, bg="#2c3e50", padx=10, pady=5)
+    header_frame.pack(fill="x", pady=(0, 10))
+    
+    device_label = tk.Label(
+        header_frame, 
+        text=f"🌱 Device: {console_instance.selected_device} ({device_info['address']})",
+        font=("Arial", 12, "bold"),
+        bg="#2c3e50",
+        fg="white"
+    )
+    device_label.pack(side="left")
+    
+    # Status indicator
+    status_label = tk.Label(
+        header_frame,
+        text="● Connected",
+        font=("Arial", 10),
+        bg="#2c3e50",
+        fg="#27ae60"
+    )
+    status_label.pack(side="right")
+    
+    # Create notebook (tabbed interface)
+    notebook = ttk.Notebook(main_frame)
+    notebook.pack(fill="both", expand=True)
+    
+    # Tab 1: Dashboard - Overview and sensor data
+    dashboard_tab = tk.Frame(notebook)
+    notebook.add(dashboard_tab, text="📊 Dashboard")
+    create_dashboard_tab(dashboard_tab, console_instance)
+    
+    # Tab 2: Light & Planter 24-hour curves
+    light_planter_tab = tk.Frame(notebook)
+    notebook.add(light_planter_tab, text="💡 Light & Planter")
+    create_light_planter_tab(light_planter_tab, console_instance)
+    
+    # Tab 3: Food Schedule
+    food_tab = tk.Frame(notebook)
+    notebook.add(food_tab, text="🍽️ Food Schedule")
+    create_food_schedule_tab(food_tab, console_instance)
+    
+    # Tab 4: Routine Calendar
+    routine_calendar_tab = tk.Frame(notebook)
+    notebook.add(routine_calendar_tab, text="📆 Routine Calendar")
+    create_routine_calendar_tab(routine_calendar_tab, console_instance)
+    
+    # Tab 5: Filesystem Browser
+    filesystem_tab = tk.Frame(notebook)
+    notebook.add(filesystem_tab, text="📁 Filesystem")
+    create_filesystem_tab(filesystem_tab, console_instance)
+    
+    # Tab 6: Plant Info
+    plant_tab = tk.Frame(notebook)
+    notebook.add(plant_tab, text="🌱 Plant Info")
+    create_plant_info_tab(plant_tab, console_instance)
+    
+    # Tab 7: Legacy Schedule Manager (moved to end)
+    schedules_tab = tk.Frame(notebook)
+    notebook.add(schedules_tab, text="⚙️ Legacy Schedule Manager")
+    create_schedules_tab(schedules_tab, console_instance)
+    
+    root.mainloop()
+
+
+def create_dashboard_tab(parent_frame, console_instance):
+    """
+    Create the Dashboard tab.
+    Shows device metadata, current sensor readings, and system status.
+    """
+    # Main container with scrollbar
+    canvas = tk.Canvas(parent_frame)
+    scrollbar = tk.Scrollbar(parent_frame, orient="vertical", command=canvas.yview)
+    scrollable_frame = tk.Frame(canvas)
+    
+    scrollable_frame.bind(
+        "<Configure>",
+        lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+    )
+    
+    canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+    canvas.configure(yscrollcommand=scrollbar.set)
+    
+    canvas.pack(side="left", fill="both", expand=True)
+    scrollbar.pack(side="right", fill="y")
+    
+    # Title
+    title_label = tk.Label(
+        scrollable_frame,
+        text="📊 GrowPod Dashboard",
+        font=("Arial", 16, "bold")
+    )
+    title_label.pack(pady=15)
+    
+    # Device Information Section
+    device_frame = tk.LabelFrame(scrollable_frame, text="Device Information", padx=20, pady=15, font=("Arial", 11, "bold"))
+    device_frame.pack(fill="x", padx=20, pady=10)
+    
+    device_info = devices[console_instance.selected_device]
+    
+    info_items = [
+        ("Device Name:", console_instance.selected_device, "🌱"),
+        ("IP Address:", device_info.get('address', 'Unknown'), "🔗"),
+        ("Port:", str(device_info.get('port', 'Unknown')), "🔌"),
+        ("Connection Status:", "Connected", "✅")
+    ]
+    
+    for i, (label, value, icon) in enumerate(info_items):
+        row_frame = tk.Frame(device_frame)
+        row_frame.pack(fill="x", pady=5)
+        
+        tk.Label(row_frame, text=f"{icon} {label}", font=("Arial", 10, "bold"), anchor="w", width=20).pack(side="left")
+        tk.Label(row_frame, text=value, font=("Arial", 10), fg="#2c3e50", anchor="w").pack(side="left", padx=10)
+    
+    # Plant Information Section
+    plant_frame = tk.LabelFrame(scrollable_frame, text="Plant Information", padx=20, pady=15, font=("Arial", 11, "bold"))
+    plant_frame.pack(fill="x", padx=20, pady=10)
+    
+    plant_info_labels = {}
+    
+    def refresh_plant_info():
+        result = console_instance._get_plant_info()
+        
+        if result and result.get('exists'):
+            plant_info_labels['name'].config(text=result.get('plant_name', 'Unknown'))
+            plant_info_labels['date'].config(text=result.get('start_date', 'Unknown'))
+            plant_info_labels['days'].config(text=f"{result.get('days_growing', 0)} days")
+        else:
+            plant_info_labels['name'].config(text="(not set)")
+            plant_info_labels['date'].config(text="(not set)")
+            plant_info_labels['days'].config(text="(not set)")
+    
+    plant_items = [
+        ("Plant Name:", "name", "🌿"),
+        ("Start Date:", "date", "📅"),
+        ("Days Growing:", "days", "⏳")
+    ]
+    
+    for label, key, icon in plant_items:
+        row_frame = tk.Frame(plant_frame)
+        row_frame.pack(fill="x", pady=5)
+        
+        tk.Label(row_frame, text=f"{icon} {label}", font=("Arial", 10, "bold"), anchor="w", width=20).pack(side="left")
+        plant_info_labels[key] = tk.Label(row_frame, text="Loading...", font=("Arial", 10), fg="#2c3e50", anchor="w")
+        plant_info_labels[key].pack(side="left", padx=10)
+    
+    # Current Sensor Readings Section
+    sensor_frame = tk.LabelFrame(scrollable_frame, text="Current Sensor Readings", padx=20, pady=15, font=("Arial", 11, "bold"))
+    sensor_frame.pack(fill="x", padx=20, pady=10)
+    
+    sensor_labels = {}
+    
+    def refresh_sensors():
+        try:
+            device = devices[console_instance.selected_device]
+            url = f"https://{device['address']}:{device['port']}/api/unit-metrics"
+            response = console_instance.session.get(url, timeout=5)
+            
+            if response.status_code == 200:
+                data = response.json()
+                
+                # Update MAC address if available
+                if 'mac_address' in data:
+                    devices[console_instance.selected_device]['mac'] = data['mac_address']
+                
+                # Overall device metrics
+                sensor_labels['total_current'].config(text=f"{data.get('current_mA', 0):.2f} mA")
+                sensor_labels['total_voltage'].config(text=f"{data.get('voltage_mV', 0):.2f} mV")
+                sensor_labels['total_power'].config(text=f"{data.get('power_consumption_mW', 0):.2f} mW")
+                sensor_labels['water_level'].config(text=f"{data.get('water_level_mm', -1)} mm")
+                
+                status_label.config(text="✅ Sensor data updated", fg="#27ae60")
+            else:
+                status_label.config(text="⚠️ Failed to fetch sensor data", fg="#e67e22")
+        except Exception as e:
+            status_label.config(text=f"❌ Error: {str(e)}", fg="#e74c3c")
+    
+    # Device metrics display
+    metrics_subframe = tk.LabelFrame(sensor_frame, text="Current Device Metrics", padx=15, pady=10)
+    metrics_subframe.pack(fill="x", pady=5)
+    
+    metrics_items = [
+        ("Total Current:", "total_current", "⚡", "mA"),
+        ("Voltage:", "total_voltage", "🔋", "mV"),
+        ("Power Consumption:", "total_power", "💡", "mW"),
+        ("Water Level:", "water_level", "💧", "mm")
+    ]
+    
+    for i, (label, key, icon, unit) in enumerate(metrics_items):
+        row_frame = tk.Frame(metrics_subframe)
+        row_frame.pack(fill="x", pady=5)
+        
+        tk.Label(row_frame, text=f"{icon} {label}", font=("Arial", 10, "bold"), anchor="w", width=25).pack(side="left")
+        sensor_labels[key] = tk.Label(row_frame, text=f"0.00 {unit}", font=("Arial", 10), fg="#2c3e50", anchor="w")
+        sensor_labels[key].pack(side="left", padx=10)
+    
+    # Additional sensors placeholder (for future expansion)
+    additional_subframe = tk.LabelFrame(sensor_frame, text="Additional Sensors (Future Expansion)", padx=15, pady=10)
+    additional_subframe.pack(fill="x", pady=5)
+    
+    tk.Label(
+        additional_subframe,
+        text="Per-actuator power metrics, temperature, humidity, pH, EC, and other sensors will appear here",
+        font=("Arial", 9),
+        fg="#999"
+    ).pack(pady=10)
+    
+    # Action buttons
+    action_frame = tk.Frame(scrollable_frame)
+    action_frame.pack(pady=20)
+    
+    def refresh_all():
+        refresh_plant_info()
+        refresh_sensors()
+    
+    tk.Button(
+        action_frame,
+        text="🔄 Refresh All Data",
+        command=refresh_all,
+        font=("Arial", 12, "bold"),
+        bg="#3498db",
+        fg="white",
+        padx=20,
+        pady=10
+    ).pack()
+    
+    # Status bar
+    status_label = tk.Label(scrollable_frame, text="Ready", font=("Arial", 10), fg="#555")
+    status_label.pack(side="bottom", fill="x", pady=10)
+    
+    # Initial load
+    refresh_all()
+
+
+def create_schedules_tab(parent_frame, console_instance):
+    """
+    Create the schedules management tab.
+    Embeds the existing unified schedule manager functionality.
+    """
+    # Instructions
+    instructions = tk.Label(
+        parent_frame,
+        text="Manage hourly schedules, food dosing, and routine commands",
+        font=("Arial", 10),
+        fg="#555"
+    )
+    instructions.pack(pady=10)
+    
+    # Button to open schedule manager
+    def open_schedule_manager():
+        # Fetch current hourly schedules from device
+        light_sched = console_instance._fetch_saved_schedule("light")
+        planter_sched = console_instance._fetch_saved_schedule("planter")
+        
+        # Open the existing unified GUI window
+        config = prompt_unified_schedule_manager(light_sched, planter_sched, console_instance.schedules)
+        
+        if config is None:
+            return
+        
+        # Handle hourly schedules
+        if config['light_schedule'] or config['planter_schedule']:
+            # Post light schedule
+            if config['light_schedule']:
+                console_instance._post_routine("light_schedule", {"schedule": config['light_schedule']})
+                print("✓ Light schedule updated")
+            
+            # Post planter schedule  
+            if config['planter_schedule']:
+                console_instance._post_routine("planter_pod_schedule", {"schedule": config['planter_schedule']})
+                print("✓ Planter schedule updated")
+        
+        # Handle food schedule
+        if config['food_config']:
+            food = config['food_config']
+            
+            # Calculate feeding times (evenly spaced throughout 24 hours)
+            hours_between = 24.0 / food['intervals']
+            
+            # Remove any existing food schedules
+            food_schedules = [name for name in console_instance.schedules if name.startswith('food_dose_')]
+            for name in food_schedules:
+                try:
+                    scheduler.remove_job(name)
+                    del console_instance.schedules[name]
+                except Exception:
+                    pass
+            
+            # Create new food dosing schedules
+            device_info = devices[console_instance.selected_device]
+            device_name = console_instance.selected_device
+            
+            for i in range(food['intervals']):
+                start_hour = int(i * hours_between)
+                start_minute = int((i * hours_between - start_hour) * 60)
+                schedule_name = f"food_dose_{i+1}"
+                
+                console_instance.schedules[schedule_name] = {
+                    'device_name': device_name,
+                    'device_ip': device_info['address'],
+                    'start_time': f"{start_hour:02d}:{start_minute:02d}",
+                    'duration_minutes': 0,
+                    'frequency': 'daily',
+                    'day_of_week': None,
+                    'actions': {
+                        'food_dose': {
+                            'duration_ms': food['dose_per_interval'],
+                            'speed': food['speed']
+                        }
+                    }
+                }
+                
+                console_instance.schedule_job(schedule_name, console_instance.schedules[schedule_name])
+            
+            console_instance.save_schedules()
+            tk.messagebox.showinfo("Success", f"Food dosing schedule created with {food['intervals']} daily feedings")
+        
+        # Handle routine command schedule
+        if config['routine_config']:
+            routine = config['routine_config']
+            schedule_name = routine['schedule_name']
+            
+            device_info = devices[console_instance.selected_device]
+            device_name = console_instance.selected_device
+            
+            # Create action based on routine command
+            actions = {}
+            command = routine['command']
+            
+            if command == 'empty_pod':
+                actions['routine'] = {'command': 'empty_pod'}
+            elif command == 'fill_pod':
+                actions['routine'] = {'command': 'fill_pod'}
+            elif command == 'calibrate_pod':
+                actions['routine'] = {'command': 'calibrate_pod'}
+            
+            console_instance.schedules[schedule_name] = {
+                'device_name': device_name,
+                'device_ip': device_info['address'],
+                'start_time': routine['start_time'],
+                'duration_minutes': 0,
+                'frequency': routine['frequency'],
+                'day_of_week': routine['day_of_week'],
+                'actions': actions
+            }
+            
+            console_instance.schedule_job(schedule_name, console_instance.schedules[schedule_name])
+            console_instance.save_schedules()
+            tk.messagebox.showinfo("Success", f"Routine schedule '{schedule_name}' created")
+    
+    btn_frame = tk.Frame(parent_frame)
+    btn_frame.pack(pady=20)
+    
+    open_btn = tk.Button(
+        btn_frame,
+        text="Open Schedule Manager",
+        command=open_schedule_manager,
+        font=("Arial", 12),
+        bg="#3498db",
+        fg="white",
+        padx=20,
+        pady=10
+    )
+    open_btn.pack()
+    
+    # Display existing schedules
+    schedules_list_frame = tk.LabelFrame(parent_frame, text="Active Schedules", padx=10, pady=10)
+    schedules_list_frame.pack(fill="both", expand=True, pady=10)
+    
+    # Scrollable text widget for schedules
+    schedules_text = tk.Text(schedules_list_frame, height=15, wrap="none", font=("Courier", 9))
+    schedules_text.pack(side="left", fill="both", expand=True)
+    
+    scrollbar = tk.Scrollbar(schedules_list_frame, command=schedules_text.yview)
+    scrollbar.pack(side="right", fill="y")
+    schedules_text.config(yscrollcommand=scrollbar.set)
+    
+    # Populate schedules
+    def refresh_schedules():
+        schedules_text.delete(1.0, tk.END)
+        if not console_instance.schedules:
+            schedules_text.insert(tk.END, "No active schedules.\n")
+        else:
+            for name, details in console_instance.schedules.items():
+                schedules_text.insert(tk.END, f"📌 {name}\n")
+                schedules_text.insert(tk.END, f"   Device: {details['device_name']}\n")
+                schedules_text.insert(tk.END, f"   Time: {details['start_time']}\n")
+                schedules_text.insert(tk.END, f"   Frequency: {details['frequency']}\n")
+                schedules_text.insert(tk.END, f"   Actions: {', '.join(details['actions'].keys())}\n")
+                schedules_text.insert(tk.END, "\n")
+    
+    refresh_schedules()
+    
+    refresh_btn = tk.Button(
+        parent_frame,
+        text="🔄 Refresh",
+        command=refresh_schedules,
+        font=("Arial", 10)
+    )
+    refresh_btn.pack(pady=5)
+
+
+def create_light_planter_tab(parent_frame, console_instance):
+    """
+    Create the Light & Planter 24-hour schedule tab.
+    Provides a more compact visualization than 24 horizontal sliders.
+    Shows LED and Planter schedules side-by-side with scrolling support.
+    """
+    # Main container with scrollbar
+    canvas = tk.Canvas(parent_frame)
+    scrollbar = tk.Scrollbar(parent_frame, orient="vertical", command=canvas.yview)
+    scrollable_frame = tk.Frame(canvas)
+    
+    scrollable_frame.bind(
+        "<Configure>",
+        lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+    )
+    
+    canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+    canvas.configure(yscrollcommand=scrollbar.set)
+    
+    # Enable mouse wheel scrolling for canvas only (not bind_all to avoid conflicts)
+    def _on_mousewheel(event):
+        canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+    
+    # Bind to canvas and scrollable_frame, but NOT bind_all
+    canvas.bind("<MouseWheel>", _on_mousewheel)
+    scrollable_frame.bind("<MouseWheel>", _on_mousewheel)
+    
+    canvas.pack(side="left", fill="both", expand=True)
+    scrollbar.pack(side="right", fill="y")
+    
+    # Title
+    title_label = tk.Label(
+        scrollable_frame,
+        text="24-Hour Light & Planter Schedules",
+        font=("Arial", 14, "bold")
+    )
+    title_label.pack(pady=10)
+    
+    instructions = tk.Label(
+        scrollable_frame,
+        text="Set hourly PWM values for LED brightness and planter pump operation (scroll to adjust sliders)",
+        font=("Arial", 10),
+        fg="#555"
+    )
+    instructions.pack(pady=5)
+    
+    # Current schedules from device
+    current_light = [0] * 24
+    current_planter = [0] * 24
+    
+    def load_current_schedules():
+        nonlocal current_light, current_planter
+        light_sched = console_instance._fetch_saved_schedule("light")
+        planter_sched = console_instance._fetch_saved_schedule("planter")
+        
+        if light_sched:
+            current_light = light_sched
+        if planter_sched:
+            current_planter = planter_sched
+        
+        update_displays()
+    
+    # Side-by-side container for LED and Planter
+    schedules_container = tk.Frame(scrollable_frame)
+    schedules_container.pack(fill="both", expand=True, padx=20, pady=10)
+    
+    # LED Schedule Section (LEFT SIDE)
+    led_frame = tk.LabelFrame(schedules_container, text="💡 LED Light Schedule", padx=15, pady=15)
+    led_frame.pack(side="left", fill="both", expand=True, padx=(0, 10))
+    
+    led_values_frame = tk.Frame(led_frame)
+    led_values_frame.pack(fill="both", expand=True)
+    
+    led_scales = []
+    led_value_labels = []
+    
+    # Create compact grid of sliders (4 rows of 6)
+    for row in range(4):
+        row_frame = tk.Frame(led_values_frame)
+        row_frame.pack(fill="x", pady=2)
+        
+        for col in range(6):
+            hour = row * 6 + col
+            
+            hour_container = tk.Frame(row_frame)
+            hour_container.pack(side="left", padx=5)
+            
+            hour_label = tk.Label(hour_container, text=f"{hour:02d}h", font=("Arial", 8, "bold"))
+            hour_label.pack()
+            
+            scale = tk.Scale(
+                hour_container,
+                from_=100,
+                to=0,
+                orient=tk.VERTICAL,
+                length=100,
+                width=18,
+                showvalue=0
+            )
+            scale.set(current_light[hour])
+            scale.pack()
+            led_scales.append(scale)
+            
+            value_label = tk.Label(hour_container, text=f"{current_light[hour]}%", font=("Arial", 8))
+            value_label.pack()
+            led_value_labels.append(value_label)
+            
+            # Update label when slider moves
+            scale.config(command=lambda val, h=hour: led_value_labels[h].config(text=f"{int(float(val))}%"))
+            
+            # Add mouse wheel scrolling for this slider
+            def make_scroll_handler(slider, hour_idx):
+                def on_scroll(event):
+                    current_val = slider.get()
+                    # Scroll up = increase value, scroll down = decrease value
+                    delta = 5 if event.delta > 0 else -5
+                    new_val = max(0, min(100, current_val + delta))
+                    slider.set(new_val)
+                    led_value_labels[hour_idx].config(text=f"{int(new_val)}%")
+                    return "break"  # Stop event propagation to prevent canvas scrolling
+                return on_scroll
+            
+            scale.bind("<MouseWheel>", make_scroll_handler(scale, hour))
+            # Also bind to the container for easier targeting
+            hour_container.bind("<MouseWheel>", make_scroll_handler(scale, hour))
+            # Bind to label too
+            hour_label.bind("<MouseWheel>", make_scroll_handler(scale, hour))
+            value_label.bind("<MouseWheel>", make_scroll_handler(scale, hour))
+    
+    # Planter Schedule Section (RIGHT SIDE)
+    planter_frame = tk.LabelFrame(schedules_container, text="💧 Planter Pump Schedule", padx=15, pady=15)
+    planter_frame.pack(side="left", fill="both", expand=True, padx=(10, 0))
+    
+    planter_values_frame = tk.Frame(planter_frame)
+    planter_values_frame.pack(fill="both", expand=True)
+    
+    planter_scales = []
+    planter_value_labels = []
+    
+    # Create compact grid of sliders (4 rows of 6)
+    for row in range(4):
+        row_frame = tk.Frame(planter_values_frame)
+        row_frame.pack(fill="x", pady=2)
+        
+        for col in range(6):
+            hour = row * 6 + col
+            
+            hour_container = tk.Frame(row_frame)
+            hour_container.pack(side="left", padx=5)
+            
+            hour_label = tk.Label(hour_container, text=f"{hour:02d}h", font=("Arial", 8, "bold"))
+            hour_label.pack()
+            
+            scale = tk.Scale(
+                hour_container,
+                from_=100,
+                to=0,
+                orient=tk.VERTICAL,
+                length=100,
+                width=18,
+                showvalue=0
+            )
+            scale.set(current_planter[hour])
+            scale.pack()
+            planter_scales.append(scale)
+            
+            value_label = tk.Label(hour_container, text=f"{current_planter[hour]}%", font=("Arial", 8))
+            value_label.pack()
+            planter_value_labels.append(value_label)
+            
+            scale.config(command=lambda val, h=hour: planter_value_labels[h].config(text=f"{int(float(val))}%"))
+            
+            # Add mouse wheel scrolling for this slider
+            def make_scroll_handler(slider, hour_idx):
+                def on_scroll(event):
+                    current_val = slider.get()
+                    # Scroll up = increase value, scroll down = decrease value
+                    delta = 5 if event.delta > 0 else -5
+                    new_val = max(0, min(100, current_val + delta))
+                    slider.set(new_val)
+                    planter_value_labels[hour_idx].config(text=f"{int(new_val)}%")
+                    return "break"  # Stop event propagation to prevent canvas scrolling
+                return on_scroll
+            
+            scale.bind("<MouseWheel>", make_scroll_handler(scale, hour))
+            # Also bind to the container for easier targeting
+            hour_container.bind("<MouseWheel>", make_scroll_handler(scale, hour))
+            # Bind to label too
+            hour_label.bind("<MouseWheel>", make_scroll_handler(scale, hour))
+            value_label.bind("<MouseWheel>", make_scroll_handler(scale, hour))
+    
+    def update_displays():
+        for i in range(24):
+            led_scales[i].set(current_light[i])
+            led_value_labels[i].config(text=f"{current_light[i]}%")
+            planter_scales[i].set(current_planter[i])
+            planter_value_labels[i].config(text=f"{current_planter[i]}%")
+    
+    # Preset buttons
+    preset_frame = tk.Frame(scrollable_frame)
+    preset_frame.pack(pady=15)
+    
+    def apply_preset_light(preset_type):
+        if preset_type == "off":
+            for i in range(24):
+                led_scales[i].set(0)
+        elif preset_type == "full":
+            for i in range(24):
+                led_scales[i].set(100)
+        elif preset_type == "day_night":
+            # Sunrise 6am, sunset 8pm
+            for i in range(24):
+                if 6 <= i < 20:
+                    led_scales[i].set(100)
+                else:
+                    led_scales[i].set(0)
+        elif preset_type == "gradual":
+            # Gradual sunrise/sunset
+            schedule = [0, 0, 0, 0, 0, 10, 30, 60, 80, 100, 100, 100,
+                       100, 100, 100, 100, 100, 100, 80, 60, 30, 10, 0, 0]
+            for i in range(24):
+                led_scales[i].set(schedule[i])
+    
+    tk.Label(preset_frame, text="LED Presets:", font=("Arial", 10, "bold")).pack(side="left", padx=5)
+    tk.Button(preset_frame, text="All Off", command=lambda: apply_preset_light("off"), padx=10, pady=5).pack(side="left", padx=2)
+    tk.Button(preset_frame, text="All On", command=lambda: apply_preset_light("full"), padx=10, pady=5).pack(side="left", padx=2)
+    tk.Button(preset_frame, text="Day/Night", command=lambda: apply_preset_light("day_night"), padx=10, pady=5).pack(side="left", padx=2)
+    tk.Button(preset_frame, text="Gradual", command=lambda: apply_preset_light("gradual"), padx=10, pady=5).pack(side="left", padx=2)
+    
+    # Action buttons
+    action_frame = tk.Frame(scrollable_frame)
+    action_frame.pack(pady=20)
+    
+    def load_schedules():
+        load_current_schedules()
+        tk.messagebox.showinfo("Success", "Schedules loaded from device")
+    
+    def save_schedules():
+        light_schedule = [led_scales[i].get() for i in range(24)]
+        planter_schedule = [planter_scales[i].get() for i in range(24)]
+        
+        # Post to device
+        console_instance._post_routine("light_schedule", {"schedule": light_schedule})
+        console_instance._post_routine("planter_pod_schedule", {"schedule": planter_schedule})
+        
+        tk.messagebox.showinfo("Success", "Schedules saved to device!")
+    
+    tk.Button(
+        action_frame,
+        text="🔄 Load from Device",
+        command=load_schedules,
+        font=("Arial", 11),
+        padx=15,
+        pady=8
+    ).pack(side="left", padx=5)
+    
+    tk.Button(
+        action_frame,
+        text="💾 Save to Device",
+        command=save_schedules,
+        font=("Arial", 11, "bold"),
+        bg="#27ae60",
+        fg="white",
+        padx=15,
+        pady=8
+    ).pack(side="left", padx=5)
+    
+    # Initial load
+    load_current_schedules()
+
+
+def create_food_schedule_tab(parent_frame, console_instance):
+    """
+    Create the Food Schedule tab.
+    Configure automated feeding times and doses.
+    """
+    # Main container
+    container = tk.Frame(parent_frame, padx=30, pady=30)
+    container.pack(fill="both", expand=True)
+    
+    # Title
+    title_label = tk.Label(
+        container,
+        text="🍽️ Automated Food Dosing Schedule",
+        font=("Arial", 14, "bold")
+    )
+    title_label.pack(pady=10)
+    
+    instructions = tk.Label(
+        container,
+        text="Configure automated nutrient dosing throughout the day",
+        font=("Arial", 10),
+        fg="#555"
+    )
+    instructions.pack(pady=5)
+    
+    # Configuration frame
+    config_frame = tk.LabelFrame(container, text="Dosing Configuration", padx=20, pady=20)
+    config_frame.pack(fill="x", pady=20)
+    
+    # Total daily amount
+    tk.Label(config_frame, text="Total Daily Amount (ms):", font=("Arial", 10, "bold")).grid(row=0, column=0, sticky="w", padx=5, pady=10)
+    total_entry = tk.Entry(config_frame, font=("Arial", 11), width=15)
+    total_entry.insert(0, "5000")
+    total_entry.grid(row=0, column=1, sticky="w", padx=5, pady=10)
+    tk.Label(config_frame, text="Total pump run time per day", font=("Arial", 9), fg="#666").grid(row=0, column=2, sticky="w", padx=5)
+    
+    # Number of intervals
+    tk.Label(config_frame, text="Number of Feedings:", font=("Arial", 10, "bold")).grid(row=1, column=0, sticky="w", padx=5, pady=10)
+    intervals_spinbox = tk.Spinbox(config_frame, from_=1, to=24, font=("Arial", 11), width=13)
+    intervals_spinbox.delete(0, tk.END)
+    intervals_spinbox.insert(0, "4")
+    intervals_spinbox.grid(row=1, column=1, sticky="w", padx=5, pady=10)
+    tk.Label(config_frame, text="Evenly distributed throughout day", font=("Arial", 9), fg="#666").grid(row=1, column=2, sticky="w", padx=5)
+    
+    # Pump speed
+    tk.Label(config_frame, text="Pump Speed (%):", font=("Arial", 10, "bold")).grid(row=2, column=0, sticky="w", padx=5, pady=10)
+    speed_scale = tk.Scale(config_frame, from_=0, to=100, orient=tk.HORIZONTAL, length=200)
+    speed_scale.set(100)
+    speed_scale.grid(row=2, column=1, columnspan=2, sticky="w", padx=5, pady=10)
+    
+    # Preview frame
+    preview_frame = tk.LabelFrame(container, text="Schedule Preview", padx=20, pady=20)
+    preview_frame.pack(fill="both", expand=True, pady=20)
+    
+    preview_text = tk.Text(preview_frame, height=12, font=("Courier", 10), wrap="none")
+    preview_text.pack(side="left", fill="both", expand=True)
+    
+    preview_scrollbar = tk.Scrollbar(preview_frame, command=preview_text.yview)
+    preview_scrollbar.pack(side="right", fill="y")
+    preview_text.config(yscrollcommand=preview_scrollbar.set)
+    
+    def update_preview():
+        try:
+            total_ms = int(total_entry.get())
+            intervals = int(intervals_spinbox.get())
+            speed = speed_scale.get()
+            
+            dose_per_interval = total_ms // intervals
+            hours_between = 24.0 / intervals
+            
+            preview_text.delete(1.0, tk.END)
+            preview_text.insert(tk.END, f"Configuration Summary\n")
+            preview_text.insert(tk.END, f"=" * 60 + "\n\n")
+            preview_text.insert(tk.END, f"Total Daily Dose:     {total_ms} ms\n")
+            preview_text.insert(tk.END, f"Number of Feedings:   {intervals}\n")
+            preview_text.insert(tk.END, f"Dose per Feeding:     {dose_per_interval} ms\n")
+            preview_text.insert(tk.END, f"Pump Speed:           {speed}%\n\n")
+            preview_text.insert(tk.END, f"Feeding Times\n")
+            preview_text.insert(tk.END, f"-" * 60 + "\n\n")
+            
+            for i in range(intervals):
+                start_hour = int(i * hours_between)
+                start_minute = int((i * hours_between - start_hour) * 60)
+                preview_text.insert(tk.END, f"Feeding {i+1:2d}:  {start_hour:02d}:{start_minute:02d}  ({dose_per_interval} ms @ {speed}%)\n")
+        
+        except ValueError:
+            preview_text.delete(1.0, tk.END)
+            preview_text.insert(tk.END, "⚠️ Invalid input. Please enter valid numbers.")
+    
+    # Update preview when values change
+    total_entry.bind("<KeyRelease>", lambda e: update_preview())
+    intervals_spinbox.bind("<ButtonRelease-1>", lambda e: update_preview())
+    intervals_spinbox.bind("<KeyRelease>", lambda e: update_preview())
+    speed_scale.config(command=lambda v: update_preview())
+    
+    # Action buttons
+    action_frame = tk.Frame(container)
+    action_frame.pack(pady=20)
+    
+    def apply_schedule():
+        try:
+            total_ms = int(total_entry.get())
+            intervals = int(intervals_spinbox.get())
+            speed = speed_scale.get()
+            
+            if total_ms <= 0 or intervals <= 0:
+                tk.messagebox.showerror("Error", "Values must be greater than 0")
+                return
+            
+            # Remove existing food schedules
+            food_schedules = [name for name in console_instance.schedules if name.startswith('food_dose_')]
+            for name in food_schedules:
+                try:
+                    scheduler.remove_job(name)
+                    del console_instance.schedules[name]
+                except Exception:
+                    pass
+            
+            # Create new schedules
+            dose_per_interval = total_ms // intervals
+            hours_between = 24.0 / intervals
+            device_info = devices[console_instance.selected_device]
+            
+            for i in range(intervals):
+                start_hour = int(i * hours_between)
+                start_minute = int((i * hours_between - start_hour) * 60)
+                schedule_name = f"food_dose_{i+1}"
+                
+                console_instance.schedules[schedule_name] = {
+                    'device_name': console_instance.selected_device,
+                    'device_ip': device_info['address'],
+                    'start_time': f"{start_hour:02d}:{start_minute:02d}",
+                    'duration_minutes': 0,
+                    'frequency': 'daily',
+                    'day_of_week': None,
+                    'actions': {
+                        'food_dose': {
+                            'duration_ms': dose_per_interval,
+                            'speed': speed
+                        }
+                    }
+                }
+                
+                console_instance.schedule_job(schedule_name, console_instance.schedules[schedule_name])
+            
+            console_instance.save_schedules()
+            tk.messagebox.showinfo("Success", f"Food schedule created with {intervals} daily feedings!")
+            
+        except ValueError:
+            tk.messagebox.showerror("Error", "Please enter valid numbers")
+    
+    tk.Button(
+        action_frame,
+        text="🔄 Update Preview",
+        command=update_preview,
+        font=("Arial", 11),
+        padx=15,
+        pady=8
+    ).pack(side="left", padx=5)
+    
+    tk.Button(
+        action_frame,
+        text="✅ Apply Schedule",
+        command=apply_schedule,
+        font=("Arial", 11, "bold"),
+        bg="#27ae60",
+        fg="white",
+        padx=15,
+        pady=8
+    ).pack(side="left", padx=5)
+    
+    # Initial preview
+    update_preview()
+
+
+def create_routine_calendar_tab(parent_frame, console_instance):
+    """
+    Create the Routine Calendar tab.
+    Google Calendar-style view for scheduling fill/empty/maintenance tasks.
+    """
+    # Main container
+    container = tk.Frame(parent_frame, padx=20, pady=20)
+    container.pack(fill="both", expand=True)
+    
+    # Title
+    title_label = tk.Label(
+        container,
+        text="📆 Routine Command Scheduler",
+        font=("Arial", 14, "bold")
+    )
+    title_label.pack(pady=10)
+    
+    instructions = tk.Label(
+        container,
+        text="Schedule maintenance routines like filling, emptying, and calibration",
+        font=("Arial", 10),
+        fg="#555"
+    )
+    instructions.pack(pady=5)
+    
+    # Split view: left = calendar/schedule list, right = create/edit form
+    paned = tk.PanedWindow(container, orient=tk.HORIZONTAL, sashrelief=tk.RAISED)
+    paned.pack(fill="both", expand=True, pady=10)
+    
+    # Left panel - Schedule list
+    left_panel = tk.Frame(paned)
+    paned.add(left_panel, minsize=400)
+    
+    list_label = tk.Label(left_panel, text="Scheduled Routines", font=("Arial", 11, "bold"))
+    list_label.pack(pady=5)
+    
+    # Filter buttons
+    filter_frame = tk.Frame(left_panel)
+    filter_frame.pack(fill="x", pady=5)
+    
+    filter_var = tk.StringVar(value="all")
+    
+    tk.Radiobutton(filter_frame, text="All", variable=filter_var, value="all").pack(side="left", padx=5)
+    tk.Radiobutton(filter_frame, text="Daily", variable=filter_var, value="daily").pack(side="left", padx=5)
+    tk.Radiobutton(filter_frame, text="Weekly", variable=filter_var, value="weekly").pack(side="left", padx=5)
+    
+    # Schedule list with scrollbar
+    list_frame = tk.Frame(left_panel)
+    list_frame.pack(fill="both", expand=True)
+    
+    schedule_listbox = tk.Listbox(list_frame, font=("Courier", 9), selectmode=tk.SINGLE)
+    schedule_listbox.pack(side="left", fill="both", expand=True)
+    
+    list_scrollbar = tk.Scrollbar(list_frame, command=schedule_listbox.yview)
+    list_scrollbar.pack(side="right", fill="y")
+    schedule_listbox.config(yscrollcommand=list_scrollbar.set)
+    
+    # Right panel - Create/Edit form
+    right_panel = tk.Frame(paned)
+    paned.add(right_panel, minsize=400)
+    
+    form_label = tk.Label(right_panel, text="Create New Routine", font=("Arial", 11, "bold"))
+    form_label.pack(pady=5)
+    
+    form_frame = tk.LabelFrame(right_panel, text="Routine Details", padx=15, pady=15)
+    form_frame.pack(fill="x", pady=10)
+    
+    # Schedule name
+    tk.Label(form_frame, text="Schedule Name:", font=("Arial", 10, "bold")).grid(row=0, column=0, sticky="w", pady=5)
+    name_entry = tk.Entry(form_frame, font=("Arial", 10), width=25)
+    name_entry.grid(row=0, column=1, sticky="w", pady=5, padx=5)
+    
+    # Routine command
+    tk.Label(form_frame, text="Routine Command:", font=("Arial", 10, "bold")).grid(row=1, column=0, sticky="w", pady=5)
+    command_var = tk.StringVar(value="fill_pod")
+    command_frame = tk.Frame(form_frame)
+    command_frame.grid(row=1, column=1, sticky="w", pady=5, padx=5)
+    
+    commands = [
+        ("Fill Pod", "fill_pod", "#3498db"),
+        ("Empty Pod", "empty_pod", "#e67e22"),
+        ("Calibrate", "calibrate_pod", "#9b59b6")
+    ]
+    
+    for i, (label, value, color) in enumerate(commands):
+        rb = tk.Radiobutton(
+            command_frame,
+            text=label,
+            variable=command_var,
+            value=value,
+            font=("Arial", 9)
+        )
+        rb.pack(anchor="w")
+    
+    # Start time
+    tk.Label(form_frame, text="Start Time (HH:MM):", font=("Arial", 10, "bold")).grid(row=2, column=0, sticky="w", pady=5)
+    time_entry = tk.Entry(form_frame, font=("Arial", 10), width=10)
+    time_entry.insert(0, "09:00")
+    time_entry.grid(row=2, column=1, sticky="w", pady=5, padx=5)
+    
+    # Frequency
+    tk.Label(form_frame, text="Frequency:", font=("Arial", 10, "bold")).grid(row=3, column=0, sticky="w", pady=5)
+    freq_var = tk.StringVar(value="daily")
+    freq_frame = tk.Frame(form_frame)
+    freq_frame.grid(row=3, column=1, sticky="w", pady=5, padx=5)
+    
+    tk.Radiobutton(freq_frame, text="Daily", variable=freq_var, value="daily", command=lambda: day_dropdown.config(state="disabled")).pack(anchor="w")
+    tk.Radiobutton(freq_frame, text="Weekly", variable=freq_var, value="weekly", command=lambda: day_dropdown.config(state="normal")).pack(anchor="w")
+    
+    # Day of week (for weekly)
+    tk.Label(form_frame, text="Day of Week:", font=("Arial", 10, "bold")).grid(row=4, column=0, sticky="w", pady=5)
+    day_var = tk.StringVar(value="Monday")
+    day_dropdown = ttk.Combobox(
+        form_frame,
+        textvariable=day_var,
+        values=["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"],
+        state="disabled",
+        width=15
+    )
+    day_dropdown.grid(row=4, column=1, sticky="w", pady=5, padx=5)
+    
+    # Visual preview
+    preview_frame = tk.LabelFrame(right_panel, text="Schedule Preview", padx=15, pady=15)
+    preview_frame.pack(fill="x", pady=10)
+    
+    preview_label = tk.Label(preview_frame, text="", font=("Arial", 10), justify="left", fg="#2c3e50")
+    preview_label.pack()
+    
+    def update_preview(*args):
+        name = name_entry.get() or "(unnamed)"
+        cmd = command_var.get()
+        time = time_entry.get()
+        freq = freq_var.get()
+        day = day_var.get() if freq == "weekly" else "N/A"
+        
+        cmd_display = {"fill_pod": "Fill Pod 💧", "empty_pod": "Empty Pod 🚰", "calibrate_pod": "Calibrate ⚙️"}
+        
+        preview_text = f"📋 {name}\n"
+        preview_text += f"🔧 Command: {cmd_display.get(cmd, cmd)}\n"
+        preview_text += f"⏰ Time: {time}\n"
+        preview_text += f"🔄 Frequency: {freq.title()}\n"
+        if freq == "weekly":
+            preview_text += f"📅 Day: {day}\n"
+        
+        preview_label.config(text=preview_text)
+    
+    # Bind updates
+    name_entry.bind("<KeyRelease>", update_preview)
+    command_var.trace("w", update_preview)
+    time_entry.bind("<KeyRelease>", update_preview)
+    freq_var.trace("w", update_preview)
+    day_var.trace("w", update_preview)
+    
+    # Action buttons
+    action_frame = tk.Frame(right_panel)
+    action_frame.pack(pady=15)
+    
+    def create_schedule():
+        name = name_entry.get().strip()
+        if not name:
+            tk.messagebox.showerror("Error", "Please enter a schedule name")
+            return
+        
+        time_str = time_entry.get().strip()
+        try:
+            datetime.strptime(time_str, "%H:%M")
+        except ValueError:
+            tk.messagebox.showerror("Error", "Invalid time format. Use HH:MM")
+            return
+        
+        freq = freq_var.get()
+        day = day_var.get() if freq == "weekly" else None
+        cmd = command_var.get()
+        
+        # Create schedule
+        device_info = devices[console_instance.selected_device]
+        actions = {'routine': {'command': cmd}}
+        
+        console_instance.schedules[name] = {
+            'device_name': console_instance.selected_device,
+            'device_ip': device_info['address'],
+            'start_time': time_str,
+            'duration_minutes': 0,
+            'frequency': freq,
+            'day_of_week': day,
+            'actions': actions
+        }
+        
+        console_instance.schedule_job(name, console_instance.schedules[name])
+        console_instance.save_schedules()
+        
+        tk.messagebox.showinfo("Success", f"Routine '{name}' scheduled!")
+        refresh_list()
+        
+        # Clear form
+        name_entry.delete(0, tk.END)
+        time_entry.delete(0, tk.END)
+        time_entry.insert(0, "09:00")
+    
+    def delete_selected():
+        selection = schedule_listbox.curselection()
+        if not selection:
+            tk.messagebox.showwarning("No Selection", "Please select a routine to delete")
+            return
+        
+        # Extract schedule name from listbox item
+        item = schedule_listbox.get(selection[0])
+        # Parse name from format "📋 name | ..."
+        name = item.split("|")[0].strip().replace("📋 ", "")
+        
+        if name in console_instance.schedules:
+            try:
+                scheduler.remove_job(name)
+                del console_instance.schedules[name]
+                console_instance.save_schedules()
+                tk.messagebox.showinfo("Success", f"Routine '{name}' deleted")
+                refresh_list()
+            except Exception as e:
+                tk.messagebox.showerror("Error", f"Failed to delete: {e}")
+    
+    def refresh_list():
+        schedule_listbox.delete(0, tk.END)
+        filter_val = filter_var.get()
+        
+        routine_schedules = {
+            name: details for name, details in console_instance.schedules.items()
+            if 'routine' in details.get('actions', {})
+        }
+        
+        if not routine_schedules:
+            schedule_listbox.insert(tk.END, "No routine schedules found")
+            return
+        
+        for name, details in routine_schedules.items():
+            freq = details.get('frequency', 'unknown')
+            
+            # Apply filter
+            if filter_val != "all" and freq != filter_val:
+                continue
+            
+            time = details.get('start_time', '??:??')
+            cmd = details.get('actions', {}).get('routine', {}).get('command', 'unknown')
+            day = details.get('day_of_week', '')
+            
+            cmd_icon = {"fill_pod": "💧", "empty_pod": "🚰", "calibrate_pod": "⚙️"}.get(cmd, "❓")
+            freq_icon = {"daily": "🔄", "weekly": "📅"}.get(freq, "❓")
+            
+            item = f"📋 {name} | {cmd_icon} {cmd} | {freq_icon} {freq.title()}"
+            if day:
+                item += f" ({day})"
+            item += f" | ⏰ {time}"
+            
+            schedule_listbox.insert(tk.END, item)
+    
+    tk.Button(
+        action_frame,
+        text="✅ Create Schedule",
+        command=create_schedule,
+        font=("Arial", 11, "bold"),
+        bg="#27ae60",
+        fg="white",
+        padx=15,
+        pady=8
+    ).pack(side="left", padx=5)
+    
+    tk.Button(
+        action_frame,
+        text="🗑️ Delete Selected",
+        command=delete_selected,
+        font=("Arial", 11),
+        bg="#e74c3c",
+        fg="white",
+        padx=15,
+        pady=8
+    ).pack(side="left", padx=5)
+    
+    tk.Button(
+        action_frame,
+        text="🔄 Refresh",
+        command=refresh_list,
+        font=("Arial", 11),
+        padx=15,
+        pady=8
+    ).pack(side="left", padx=5)
+    
+    # Initial load
+    filter_var.trace("w", lambda *args: refresh_list())
+    refresh_list()
+    update_preview()
+
+
+def create_filesystem_tab(parent_frame, console_instance):
+    """
+    Create the filesystem browser tab.
+    Allows browsing device filesystem, viewing files, and navigation.
+    """
+    # Split pane: left = directory/file list, right = content viewer
+    paned = tk.PanedWindow(parent_frame, orient=tk.HORIZONTAL, sashrelief=tk.RAISED)
+    paned.pack(fill="both", expand=True)
+    
+    # Left panel - Directory browser
+    left_frame = tk.Frame(paned)
+    paned.add(left_frame, minsize=300)
+    
+    # Control buttons
+    btn_frame = tk.Frame(left_frame)
+    btn_frame.pack(fill="x", pady=5)
+    
+    current_path = tk.StringVar(value="/lfs")
+    
+    def refresh_listing():
+        result = console_instance._get_filesystem_listing(current_path.get())
+        if not result:
+            tk.messagebox.showerror("Error", f"Failed to list directory: {current_path.get()}")
+            return
+        
+        # Clear list
+        file_list.delete(0, tk.END)
+        
+        # Add parent directory option if not at root
+        if current_path.get() != "/lfs":
+            file_list.insert(tk.END, "📁 ..")
+        
+        # Add directories
+        for dir_name in result.get('directories', []):
+            file_list.insert(tk.END, f"📁 {dir_name}")
+        
+        # Add files
+        for file_info in result.get('files', []):
+            file_list.insert(tk.END, f"📄 {file_info['name']} ({file_info['size']} bytes)")
+        
+        path_label.config(text=f"Path: {current_path.get()}")
+        status_label.config(text=f"✓ Listed {result['total_dirs']} directories, {result['total_files']} files")
+    
+    def on_item_double_click(event):
+        selection = file_list.curselection()
+        if not selection:
+            return
+        
+        item = file_list.get(selection[0])
+        
+        # Handle parent directory
+        if item == "📁 ..":
+            # Go up one level
+            parts = current_path.get().rstrip('/').split('/')
+            if len(parts) > 2:  # Don't go above /lfs
+                current_path.set('/'.join(parts[:-1]))
+            else:
+                current_path.set("/lfs")
+            refresh_listing()
+            return
+        
+        # Handle directory
+        if item.startswith("📁"):
+            dir_name = item.split(" ", 1)[1]
+            new_path = f"{current_path.get()}/{dir_name}".replace("//", "/")
+            current_path.set(new_path)
+            refresh_listing()
+            return
+        
+        # Handle file
+        if item.startswith("📄"):
+            file_name = item.split(" ", 1)[1].split(" (")[0]
+            file_path = f"{current_path.get()}/{file_name}".replace("//", "/")
+            
+            # Read file content
+            result = console_instance._read_file_content(file_path)
+            if not result:
+                tk.messagebox.showerror("Error", f"Failed to read file: {file_path}")
+                return
+            
+            # Display in right panel
+            content_text.delete(1.0, tk.END)
+            content = result.get('content', '')
+            
+            # Try to pretty-print JSON
+            try:
+                parsed = json.loads(content)
+                content = json.dumps(parsed, indent=2)
+            except:
+                pass
+            
+            content_text.insert(tk.END, content)
+            content_path_label.config(text=f"File: {file_path} ({result['size']} bytes)")
+            status_label.config(text=f"✓ Loaded file: {file_name}")
+    
+    refresh_btn = tk.Button(btn_frame, text="🔄 Refresh", command=refresh_listing, width=10)
+    refresh_btn.pack(side="left", padx=2)
+    
+    root_btn = tk.Button(btn_frame, text="🏠 Root", command=lambda: [current_path.set("/lfs"), refresh_listing()], width=10)
+    root_btn.pack(side="left", padx=2)
+    
+    config_btn = tk.Button(btn_frame, text="⚙️ Config", command=lambda: [current_path.set("/lfs/config"), refresh_listing()], width=10)
+    config_btn.pack(side="left", padx=2)
+    
+    # Path label
+    path_label = tk.Label(left_frame, text=f"Path: {current_path.get()}", font=("Arial", 10, "bold"))
+    path_label.pack(fill="x", pady=5)
+    
+    # File list
+    list_frame = tk.Frame(left_frame)
+    list_frame.pack(fill="both", expand=True)
+    
+    file_list = tk.Listbox(list_frame, font=("Courier", 10))
+    file_list.pack(side="left", fill="both", expand=True)
+    file_list.bind("<Double-Button-1>", on_item_double_click)
+    
+    list_scrollbar = tk.Scrollbar(list_frame, command=file_list.yview)
+    list_scrollbar.pack(side="right", fill="y")
+    file_list.config(yscrollcommand=list_scrollbar.set)
+    
+    # Right panel - Content viewer
+    right_frame = tk.Frame(paned)
+    paned.add(right_frame, minsize=400)
+    
+    content_path_label = tk.Label(right_frame, text="File: (select a file)", font=("Arial", 10, "bold"))
+    content_path_label.pack(fill="x", pady=5)
+    
+    content_frame = tk.Frame(right_frame)
+    content_frame.pack(fill="both", expand=True)
+    
+    content_text = tk.Text(content_frame, wrap="none", font=("Courier", 9))
+    content_text.pack(side="left", fill="both", expand=True)
+    
+    content_scrollbar_y = tk.Scrollbar(content_frame, command=content_text.yview)
+    content_scrollbar_y.pack(side="right", fill="y")
+    content_text.config(yscrollcommand=content_scrollbar_y.set)
+    
+    content_scrollbar_x = tk.Scrollbar(right_frame, orient=tk.HORIZONTAL, command=content_text.xview)
+    content_scrollbar_x.pack(fill="x")
+    content_text.config(xscrollcommand=content_scrollbar_x.set)
+    
+    # Status bar
+    status_label = tk.Label(parent_frame, text="Ready", relief=tk.SUNKEN, anchor="w")
+    status_label.pack(side="bottom", fill="x")
+    
+    # Initial load
+    refresh_listing()
+
+
+def create_plant_info_tab(parent_frame, console_instance):
+    """
+    Create the plant info management tab.
+    Allows viewing and editing plant information.
+    """
+    # Main container
+    container = tk.Frame(parent_frame, padx=20, pady=20)
+    container.pack(fill="both", expand=True)
+    
+    # Display section
+    display_frame = tk.LabelFrame(container, text="Current Plant Information", padx=15, pady=15)
+    display_frame.pack(fill="x", pady=(0, 20))
+    
+    info_labels = {}
+    
+    def refresh_plant_info():
+        result = console_instance._get_plant_info()
+        
+        if not result or not result.get('exists'):
+            for key in info_labels:
+                info_labels[key].config(text="(not set)")
+            status_label.config(text="ℹ️ No plant information found", fg="#e67e22")
+            return
+        
+        info_labels['name'].config(text=result.get('plant_name', 'Unknown'))
+        info_labels['date'].config(text=result.get('start_date', 'Unknown'))
+        info_labels['timestamp'].config(text=str(result.get('start_timestamp', 'Unknown')))
+        info_labels['days'].config(text=str(result.get('days_growing', 0)))
+        
+        status_label.config(text="✅ Plant information loaded", fg="#27ae60")
+    
+    # Info display grid
+    fields = [
+        ("Plant Name:", "name"),
+        ("Start Date:", "date"),
+        ("Start Timestamp:", "timestamp"),
+        ("Days Growing:", "days")
+    ]
+    
+    for i, (label_text, key) in enumerate(fields):
+        tk.Label(display_frame, text=label_text, font=("Arial", 10, "bold"), anchor="w").grid(row=i, column=0, sticky="w", padx=5, pady=5)
+        info_labels[key] = tk.Label(display_frame, text="(not set)", font=("Arial", 10), anchor="w", fg="#555")
+        info_labels[key].grid(row=i, column=1, sticky="w", padx=5, pady=5)
+    
+    # Edit section
+    edit_frame = tk.LabelFrame(container, text="Update Plant Information", padx=15, pady=15)
+    edit_frame.pack(fill="x", pady=(0, 20))
+    
+    tk.Label(edit_frame, text="Plant Name:", font=("Arial", 10)).grid(row=0, column=0, sticky="w", padx=5, pady=5)
+    name_entry = tk.Entry(edit_frame, font=("Arial", 10), width=30)
+    name_entry.grid(row=0, column=1, sticky="w", padx=5, pady=5)
+    
+    tk.Label(edit_frame, text="Start Date (YYYY-MM-DD):", font=("Arial", 10)).grid(row=1, column=0, sticky="w", padx=5, pady=5)
+    date_entry = tk.Entry(edit_frame, font=("Arial", 10), width=30)
+    date_entry.grid(row=1, column=1, sticky="w", padx=5, pady=5)
+    
+    # Date preset buttons
+    preset_frame = tk.Frame(edit_frame)
+    preset_frame.grid(row=1, column=2, padx=5)
+    
+    def set_today():
+        date_entry.delete(0, tk.END)
+        date_entry.insert(0, datetime.now().strftime("%Y-%m-%d"))
+    
+    def set_week_ago():
+        date_entry.delete(0, tk.END)
+        week_ago = datetime.now() - timedelta(days=7)
+        date_entry.insert(0, week_ago.strftime("%Y-%m-%d"))
+    
+    tk.Button(preset_frame, text="Today", command=set_today, width=8).pack(side="left", padx=2)
+    tk.Button(preset_frame, text="1 Week Ago", command=set_week_ago, width=12).pack(side="left", padx=2)
+    
+    # Save button
+    def save_plant_info():
+        name = name_entry.get().strip()
+        date = date_entry.get().strip()
+        
+        if not name:
+            tk.messagebox.showerror("Error", "Plant name cannot be empty")
+            return
+        
+        if not date:
+            tk.messagebox.showerror("Error", "Start date cannot be empty")
+            return
+        
+        # Validate date format
+        try:
+            datetime.strptime(date, "%Y-%m-%d")
+        except ValueError:
+            tk.messagebox.showerror("Error", "Invalid date format. Use YYYY-MM-DD")
+            return
+        
+        # Save to device
+        result = console_instance._set_plant_info(name, date)
+        
+        if result and result.get('success'):
+            status_label.config(text="✅ Plant information saved successfully!", fg="#27ae60")
+            refresh_plant_info()
+            tk.messagebox.showinfo("Success", "Plant information saved!")
+        else:
+            status_label.config(text="❌ Failed to save plant information", fg="#e74c3c")
+            tk.messagebox.showerror("Error", "Failed to save plant information")
+    
+    save_btn = tk.Button(
+        edit_frame,
+        text="💾 Save",
+        command=save_plant_info,
+        font=("Arial", 11, "bold"),
+        bg="#27ae60",
+        fg="white",
+        padx=20,
+        pady=5
+    )
+    save_btn.grid(row=2, column=1, sticky="w", padx=5, pady=15)
+    
+    # Action buttons
+    action_frame = tk.Frame(container)
+    action_frame.pack(fill="x")
+    
+    refresh_btn = tk.Button(
+        action_frame,
+        text="🔄 Refresh",
+        command=refresh_plant_info,
+        font=("Arial", 10),
+        padx=15,
+        pady=5
+    )
+    refresh_btn.pack(side="left", padx=5)
+    
+    # Status bar
+    status_label = tk.Label(container, text="Ready", font=("Arial", 10), fg="#555")
+    status_label.pack(side="bottom", fill="x", pady=(10, 0))
+    
+    # Initial load
+    refresh_plant_info()
+
+
+# =============================================================================
+# Phase 1 GUI Test Windows - Filesystem Browser and Plant Info
+# =============================================================================
+
+def test_filesystem_browser_gui(console_instance):
+    """
+    Standalone GUI test window for filesystem browser.
+    Shows directory tree, file list, and file content viewer.
+    Can be integrated as a tab in the main GUI later.
+    """
+    root = tk.Tk()
+    root.title("Filesystem Browser - Test Window")
+    root.geometry("900x600")
+    
+    # Main container
+    main_frame = tk.Frame(root, padx=10, pady=10)
+    main_frame.pack(fill="both", expand=True)
+    
+    # Title
+    title_label = tk.Label(main_frame, text="📁 Device Filesystem Browser", 
+                          font=("Arial", 16, "bold"))
+    title_label.pack(pady=(0, 10))
+    
+    # Current path display
+    path_frame = tk.Frame(main_frame)
+    path_frame.pack(fill="x", pady=(0, 10))
+    
+    tk.Label(path_frame, text="Current Path:", font=("Arial", 10, "bold")).pack(side="left", padx=(0, 5))
+    current_path = tk.StringVar(value="/lfs")
+    path_label = tk.Label(path_frame, textvariable=current_path, font=("Arial", 10), fg="#0066cc")
+    path_label.pack(side="left")
+    
+    # Split view: left = directory tree, right = file content
+    split_frame = tk.Frame(main_frame)
+    split_frame.pack(fill="both", expand=True)
+    
+    # Left panel - Directory and file listing
+    left_panel = tk.Frame(split_frame, width=400)
+    left_panel.pack(side="left", fill="both", expand=True, padx=(0, 5))
+    
+    tk.Label(left_panel, text="Directories & Files", font=("Arial", 11, "bold")).pack(anchor="w")
+    
+    # Listbox for directories and files
+    list_frame = tk.Frame(left_panel)
+    list_frame.pack(fill="both", expand=True, pady=(5, 0))
+    
+    scrollbar = tk.Scrollbar(list_frame)
+    scrollbar.pack(side="right", fill="y")
+    
+    items_listbox = tk.Listbox(list_frame, yscrollcommand=scrollbar.set, font=("Courier", 10))
+    items_listbox.pack(side="left", fill="both", expand=True)
+    scrollbar.config(command=items_listbox.yview)
+    
+    # Right panel - File content viewer
+    right_panel = tk.Frame(split_frame, width=400)
+    right_panel.pack(side="right", fill="both", expand=True, padx=(5, 0))
+    
+    tk.Label(right_panel, text="File Content", font=("Arial", 11, "bold")).pack(anchor="w")
+    
+    # Text widget for file content
+    content_frame = tk.Frame(right_panel)
+    content_frame.pack(fill="both", expand=True, pady=(5, 0))
+    
+    content_scrollbar = tk.Scrollbar(content_frame)
+    content_scrollbar.pack(side="right", fill="y")
+    
+    content_text = tk.Text(content_frame, yscrollcommand=content_scrollbar.set, 
+                          font=("Courier", 9), wrap="word")
+    content_text.pack(side="left", fill="both", expand=True)
+    content_scrollbar.config(command=content_text.yview)
+    
+    # Status label
+    status_var = tk.StringVar(value="Ready")
+    status_label = tk.Label(main_frame, textvariable=status_var, fg="#666", anchor="w")
+    status_label.pack(fill="x", pady=(10, 0))
+    
+    # Button frame
+    button_frame = tk.Frame(main_frame)
+    button_frame.pack(pady=(10, 0))
+    
+    def load_directory(path):
+        """Load and display directory contents"""
+        current_path.set(path)
+        status_var.set(f"Loading {path}...")
+        items_listbox.delete(0, tk.END)
+        content_text.delete(1.0, tk.END)
+        
+        # Get listing from device
+        data = console_instance._get_filesystem_listing(path)
+        
+        if not data:
+            status_var.set("Error: Failed to load directory")
+            items_listbox.insert(tk.END, "✗ Failed to load directory")
+            return
+        
+        # Add parent directory option if not at root
+        if path != "/lfs":
+            items_listbox.insert(tk.END, "📁 .. (parent)")
+        
+        # Add directories
+        dirs = sorted(data.get('directories', []))
+        for dir_name in dirs:
+            items_listbox.insert(tk.END, f"📁 {dir_name}/")
+        
+        # Add files
+        files = sorted(data.get('files', []), key=lambda x: x['name'])
+        for file in files:
+            size_kb = file['size'] / 1024.0
+            size_str = f"{size_kb:.1f}KB" if size_kb >= 1 else f"{file['size']}B"
+            items_listbox.insert(tk.END, f"📄 {file['name']} ({size_str})")
+        
+        total_items = len(dirs) + len(files)
+        status_var.set(f"Loaded {total_items} items from {path}")
+    
+    def on_item_double_click(event):
+        """Handle double-click on listbox item"""
+        selection = items_listbox.curselection()
+        if not selection:
+            return
+        
+        item = items_listbox.get(selection[0])
+        
+        # Handle parent directory
+        if item.startswith("📁 .. (parent)"):
+            parent_path = "/".join(current_path.get().rstrip('/').split('/')[:-1])
+            if not parent_path:
+                parent_path = "/lfs"
+            load_directory(parent_path)
+            return
+        
+        # Handle directory navigation
+        if item.startswith("📁"):
+            dir_name = item.split(" ", 1)[1].rstrip('/')
+            new_path = f"{current_path.get().rstrip('/')}/{dir_name}"
+            load_directory(new_path)
+            return
+        
+        # Handle file viewing
+        if item.startswith("📄"):
+            file_name = item.split(" ", 1)[1].split(" (")[0]
+            file_path = f"{current_path.get().rstrip('/')}/{file_name}"
+            
+            status_var.set(f"Loading {file_name}...")
+            content_text.delete(1.0, tk.END)
+            
+            # Read file content
+            data = console_instance._read_file_content(file_path)
+            
+            if not data:
+                status_var.set(f"Error: Failed to read {file_name}")
+                content_text.insert(1.0, f"✗ Failed to read file: {file_path}")
+                return
+            
+            content = data.get('content', '')
+            
+            # Try to pretty-print JSON
+            try:
+                json_content = json.loads(content)
+                formatted_content = json.dumps(json_content, indent=2)
+                content_text.insert(1.0, formatted_content)
+            except:
+                # Not JSON, display as-is
+                content_text.insert(1.0, content)
+            
+            status_var.set(f"Viewing: {file_name} ({data.get('size', 0)} bytes)")
+    
+    def refresh():
+        """Refresh current directory"""
+        load_directory(current_path.get())
+    
+    def go_to_root():
+        """Navigate to root directory"""
+        load_directory("/lfs")
+    
+    def go_to_config():
+        """Navigate to config directory"""
+        load_directory("/lfs/config")
+    
+    # Bind double-click event
+    items_listbox.bind("<Double-Button-1>", on_item_double_click)
+    
+    # Buttons
+    tk.Button(button_frame, text="🔄 Refresh", command=refresh, width=12).pack(side="left", padx=5)
+    tk.Button(button_frame, text="🏠 Root", command=go_to_root, width=12).pack(side="left", padx=5)
+    tk.Button(button_frame, text="⚙️ Config", command=go_to_config, width=12).pack(side="left", padx=5)
+    tk.Button(button_frame, text="Close", command=root.destroy, width=12).pack(side="left", padx=5)
+    
+    # Load initial directory
+    load_directory("/lfs")
+    
+    root.mainloop()
+
+
+def test_plant_info_gui(console_instance):
+    """
+    Standalone GUI test window for plant information.
+    Shows current plant info and allows editing.
+    Can be integrated as a tab in the main GUI later.
+    """
+    root = tk.Tk()
+    root.title("Plant Information - Test Window")
+    root.geometry("600x500")
+    
+    # Main container
+    main_frame = tk.Frame(root, padx=20, pady=20)
+    main_frame.pack(fill="both", expand=True)
+    
+    # Title
+    title_label = tk.Label(main_frame, text="🌱 Plant Information", 
+                          font=("Arial", 16, "bold"))
+    title_label.pack(pady=(0, 20))
+    
+    # Current plant info display frame
+    display_frame = tk.LabelFrame(main_frame, text="Current Plant Information", 
+                                  font=("Arial", 11, "bold"), padx=15, pady=15)
+    display_frame.pack(fill="x", pady=(0, 20))
+    
+    # Plant info labels
+    plant_name_var = tk.StringVar(value="Not configured")
+    start_date_var = tk.StringVar(value="N/A")
+    days_growing_var = tk.StringVar(value="N/A")
+    
+    info_labels_frame = tk.Frame(display_frame)
+    info_labels_frame.pack(fill="x")
+    
+    tk.Label(info_labels_frame, text="Plant Name:", font=("Arial", 10, "bold"), 
+             anchor="w", width=15).grid(row=0, column=0, sticky="w", pady=5)
+    tk.Label(info_labels_frame, textvariable=plant_name_var, font=("Arial", 10), 
+             anchor="w").grid(row=0, column=1, sticky="w", pady=5)
+    
+    tk.Label(info_labels_frame, text="Start Date:", font=("Arial", 10, "bold"), 
+             anchor="w", width=15).grid(row=1, column=0, sticky="w", pady=5)
+    tk.Label(info_labels_frame, textvariable=start_date_var, font=("Arial", 10), 
+             anchor="w").grid(row=1, column=1, sticky="w", pady=5)
+    
+    tk.Label(info_labels_frame, text="Days Growing:", font=("Arial", 10, "bold"), 
+             anchor="w", width=15).grid(row=2, column=0, sticky="w", pady=5)
+    tk.Label(info_labels_frame, textvariable=days_growing_var, font=("Arial", 10), 
+             anchor="w").grid(row=2, column=1, sticky="w", pady=5)
+    
+    # Edit form frame
+    edit_frame = tk.LabelFrame(main_frame, text="Update Plant Information", 
+                              font=("Arial", 11, "bold"), padx=15, pady=15)
+    edit_frame.pack(fill="x", pady=(0, 20))
+    
+    # Plant name entry
+    tk.Label(edit_frame, text="Plant Name:", anchor="w").grid(row=0, column=0, sticky="w", pady=5)
+    plant_name_entry = tk.Entry(edit_frame, width=30, font=("Arial", 10))
+    plant_name_entry.grid(row=0, column=1, sticky="w", pady=5, padx=(10, 0))
+    
+    # Start date entry with example
+    tk.Label(edit_frame, text="Start Date:", anchor="w").grid(row=1, column=0, sticky="w", pady=5)
+    date_frame = tk.Frame(edit_frame)
+    date_frame.grid(row=1, column=1, sticky="w", pady=5, padx=(10, 0))
+    
+    start_date_entry = tk.Entry(date_frame, width=15, font=("Arial", 10))
+    start_date_entry.pack(side="left")
+    tk.Label(date_frame, text="(YYYY-MM-DD)", fg="#666", font=("Arial", 9)).pack(side="left", padx=(5, 0))
+    
+    # Preset date buttons
+    preset_frame = tk.Frame(edit_frame)
+    preset_frame.grid(row=2, column=1, sticky="w", pady=5, padx=(10, 0))
+    
+    def set_today():
+        today = datetime.now().strftime('%Y-%m-%d')
+        start_date_entry.delete(0, tk.END)
+        start_date_entry.insert(0, today)
+    
+    def set_week_ago():
+        week_ago = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
+        start_date_entry.delete(0, tk.END)
+        start_date_entry.insert(0, week_ago)
+    
+    tk.Button(preset_frame, text="Today", command=set_today, width=10).pack(side="left", padx=(0, 5))
+    tk.Button(preset_frame, text="1 Week Ago", command=set_week_ago, width=12).pack(side="left")
+    
+    # Status message
+    status_var = tk.StringVar(value="")
+    status_label = tk.Label(main_frame, textvariable=status_var, fg="#666", 
+                           font=("Arial", 9), wraplength=500, justify="left")
+    status_label.pack(pady=(0, 10))
+    
+    def load_plant_info():
+        """Load current plant info from device"""
+        status_var.set("Loading plant information...")
+        
+        data = console_instance._get_plant_info()
+        
+        if not data:
+            status_var.set("❌ Error: Failed to load plant information")
+            plant_name_var.set("Error loading data")
+            start_date_var.set("N/A")
+            days_growing_var.set("N/A")
+            return
+        
+        if data.get('exists'):
+            plant_name_var.set(data.get('plant_name', 'N/A'))
+            start_date_var.set(data.get('start_date', 'N/A'))
+            days_growing_var.set(f"{data.get('days_growing', 'N/A')} days")
+            status_var.set("✓ Plant information loaded successfully")
+            
+            # Pre-fill edit fields
+            plant_name_entry.delete(0, tk.END)
+            plant_name_entry.insert(0, data.get('plant_name', ''))
+            start_date_entry.delete(0, tk.END)
+            start_date_entry.insert(0, data.get('start_date', ''))
+        else:
+            plant_name_var.set("Not configured")
+            start_date_var.set("N/A")
+            days_growing_var.set("N/A")
+            status_var.set("ℹ️ No plant information configured yet")
+    
+    def save_plant_info():
+        """Save plant info to device"""
+        plant_name = plant_name_entry.get().strip()
+        start_date = start_date_entry.get().strip()
+        
+        if not plant_name:
+            status_var.set("❌ Error: Plant name is required")
+            return
+        
+        if not start_date:
+            status_var.set("❌ Error: Start date is required")
+            return
+        
+        # Validate date format
+        try:
+            datetime.strptime(start_date, '%Y-%m-%d')
+        except ValueError:
+            status_var.set("❌ Error: Invalid date format. Use YYYY-MM-DD")
+            return
+        
+        status_var.set("Saving plant information...")
+        
+        success = console_instance._set_plant_info(plant_name, start_date)
+        
+        if success:
+            status_var.set("✅ Plant information saved successfully!")
+            load_plant_info()  # Reload to show updated info
+        else:
+            status_var.set("❌ Error: Failed to save plant information")
+    
+    # Button frame
+    button_frame = tk.Frame(main_frame)
+    button_frame.pack(pady=(10, 0))
+    
+    tk.Button(button_frame, text="🔄 Refresh", command=load_plant_info, 
+             width=15, bg="#4CAF50", fg="white", font=("Arial", 10, "bold")).pack(side="left", padx=5)
+    tk.Button(button_frame, text="💾 Save", command=save_plant_info, 
+             width=15, bg="#2196F3", fg="white", font=("Arial", 10, "bold")).pack(side="left", padx=5)
+    tk.Button(button_frame, text="Close", command=root.destroy, 
+             width=15, font=("Arial", 10)).pack(side="left", padx=5)
+    
+    # Load initial data
+    load_plant_info()
+    
+    root.mainloop()
+
+
 class HydroponicsServiceListener:
     def __init__(self, console):
         self.console = console
@@ -1022,9 +2834,14 @@ class HydroponicsConsole(Cmd):
         self.custom_commands = {
             'list': 'List all discovered devices.',
             'select': 'Select a device to interact with: select <device_number>',
+            # GUI
+            'launch_gui': 'Launch unified GrowPod GUI (main interface): launch_gui',
+            'manage_schedules': 'Unified schedule manager (hourly + routines): manage_schedules',
+            # Routine commands
             'routine': 'Send a routine command. Example: routine empty_pod',
             'routine_status': 'Check routine status by ID.',
             'status': 'Get sensor data from the selected device.',
+            # Actuator control
             'airpump': 'Set air pump PWM value: airpump <value>',
             # Water Pump → Source Pump
             'sourcepump': 'Set source pump PWM value: sourcepump <value>',
@@ -1033,19 +2850,29 @@ class HydroponicsConsole(Cmd):
             'drainpump': 'Set drain pump PWM value: drainpump <value>',
             'foodpump': 'Control food pump: foodpump <value> | dose <duration_ms> [speed]',
             'led': 'Set LED brightness: led <value> [channel]',
+            # Scheduling
             'schedule_actuators': 'Set actuator schedule: schedule_actuators',
-            'manage_schedules': 'Unified schedule manager (hourly + routines): manage_schedules',
             'view_schedules': 'View all actuator schedules: view_schedules',
             'delete_schedule': 'Delete a schedule: delete_schedule <schedule_name>',
             'start_feeding_cycle': 'Start the feeding cycle.',
             'stop_feeding_cycle': 'Stop the feeding cycle.',
             'start_emptying_water': 'Start emptying water.',
             'stop_emptying_water': 'Stop emptying water.',
+            'all_schedules' : 'Set schedules for all actuators at once: routine all_schedules',
+            'showschedules'  : 'Print current schedules on device console',
+            # Filesystem commands
+            'fs_browse': 'Browse device filesystem: fs_browse [path]',
+            'fs_cat': 'Display file contents: fs_cat <path>',
+            # Plant info commands
+            'plant_info': 'Display current plant information: plant_info',
+            'plant_set': 'Set plant information: plant_set <name> <date>',
+            # GUI test windows
+            'test_gui_filesystem': 'Launch filesystem browser GUI test window',
+            'test_gui_plant': 'Launch plant info GUI test window',
+            # System
             'exit': 'Exit the console.',
             'hostname_suffix': 'Set mDNS suffix: hostname_suffix <suffix>',
             'rescan': 'Re-initialize Zeroconf to discover devices again.',
-            'all_schedules' : 'Set schedules for all actuators at once: routine all_schedules',
-            'showschedules'  : 'Print current schedules on device console',
         }
 
         # Initialize flow status tracking
@@ -1592,6 +3419,543 @@ class HydroponicsConsole(Cmd):
                 self._post_actuator_command('foodpump', {'value': value}, self.selected_device)
             except ValueError:
                 print("Invalid numeric value. Usage: foodpump <value>")
+
+    # --------------------------------------------------------------------------
+    # Phase 1 Test Commands - Filesystem and Plant Info API Testing
+    # --------------------------------------------------------------------------
+    
+    def do_test_fs_list(self, arg):
+        '''Test filesystem list API: test_fs_list [path]
+        Examples:
+            test_fs_list           - List files in /lfs
+            test_fs_list /lfs/config - List files in /lfs/config
+        '''
+        if not self._check_device_selected():
+            return
+        
+        path = arg.strip() if arg.strip() else '/lfs'
+        
+        try:
+            device = devices[self.selected_device]
+            url = f"https://{device['address']}/api/filesystem/list"
+            params = {'path': path}
+            
+            print(f"\n--- Testing Filesystem List API ---")
+            print(f"Path: {path}")
+            print(f"URL: {url}?path={path}")
+            
+            response = self.session.get(url, params=params, timeout=10)
+            response.raise_for_status()
+            
+            data = response.json()
+            
+            print(f"\n✓ Response received:")
+            print(f"  Path: {data.get('path', 'N/A')}")
+            print(f"  Total Directories: {data.get('total_dirs', 0)}")
+            print(f"  Total Files: {data.get('total_files', 0)}")
+            
+            if data.get('directories'):
+                print(f"\n  Directories:")
+                for dir_name in data['directories']:
+                    print(f"    [DIR]  {dir_name}")
+            
+            if data.get('files'):
+                print(f"\n  Files:")
+                for file in data['files']:
+                    print(f"    [FILE] {file['name']} ({file['size']} bytes)")
+            
+            print(f"\n✓ Test passed!")
+            
+        except requests.exceptions.RequestException as e:
+            print(f"✗ Request failed: {e}")
+        except json.JSONDecodeError as e:
+            print(f"✗ Invalid JSON response: {e}")
+        except Exception as e:
+            print(f"✗ Error: {e}")
+    
+    def do_test_fs_read(self, arg):
+        '''Test filesystem read API: test_fs_read <path>
+        Examples:
+            test_fs_read /lfs/config/plant.json
+            test_fs_read /lfs/test.txt
+        '''
+        if not self._check_device_selected():
+            return
+        
+        if not arg.strip():
+            print("Usage: test_fs_read <path>")
+            print("Example: test_fs_read /lfs/config/plant.json")
+            return
+        
+        path = arg.strip()
+        
+        try:
+            device = devices[self.selected_device]
+            url = f"https://{device['address']}/api/filesystem/read"
+            params = {'path': path}
+            
+            print(f"\n--- Testing Filesystem Read API ---")
+            print(f"Path: {path}")
+            print(f"URL: {url}?path={path}")
+            
+            response = self.session.get(url, params=params, timeout=10)
+            response.raise_for_status()
+            
+            data = response.json()
+            
+            print(f"\n✓ Response received:")
+            print(f"  Path: {data.get('path', 'N/A')}")
+            print(f"  Size: {data.get('size', 0)} bytes")
+            print(f"\n  Content:")
+            print("  " + "-" * 60)
+            content = data.get('content', '')
+            # Pretty print JSON if possible
+            try:
+                json_content = json.loads(content)
+                print(json.dumps(json_content, indent=4))
+            except:
+                print(content)
+            print("  " + "-" * 60)
+            
+            print(f"\n✓ Test passed!")
+            
+        except requests.exceptions.RequestException as e:
+            print(f"✗ Request failed: {e}")
+        except json.JSONDecodeError as e:
+            print(f"✗ Invalid JSON response: {e}")
+        except Exception as e:
+            print(f"✗ Error: {e}")
+    
+    def do_test_plant_get(self, arg):
+        '''Test plant info GET API: test_plant_get
+        Retrieves current plant information from the device.
+        '''
+        if not self._check_device_selected():
+            return
+        
+        try:
+            device = devices[self.selected_device]
+            url = f"https://{device['address']}/api/plant/info"
+            
+            print(f"\n--- Testing Plant Info GET API ---")
+            print(f"URL: {url}")
+            
+            response = self.session.get(url, timeout=10)
+            response.raise_for_status()
+            
+            data = response.json()
+            
+            print(f"\n✓ Response received:")
+            
+            if data.get('exists'):
+                print(f"  Plant Name: {data.get('plant_name', 'N/A')}")
+                print(f"  Start Date: {data.get('start_date', 'N/A')}")
+                print(f"  Start Timestamp: {data.get('start_timestamp', 'N/A')}")
+                print(f"  Days Growing: {data.get('days_growing', 'N/A')}")
+            else:
+                print(f"  Status: No plant information configured")
+                print(f"  Message: {data.get('message', 'N/A')}")
+            
+            print(f"\n✓ Test passed!")
+            
+        except requests.exceptions.RequestException as e:
+            print(f"✗ Request failed: {e}")
+        except json.JSONDecodeError as e:
+            print(f"✗ Invalid JSON response: {e}")
+        except Exception as e:
+            print(f"✗ Error: {e}")
+    
+    def do_test_plant_set(self, arg):
+        '''Test plant info POST API: test_plant_set <plant_name> <start_date>
+        Examples:
+            test_plant_set "Micro Tom" 2025-12-16
+            test_plant_set Basil 2025-12-01
+        '''
+        if not self._check_device_selected():
+            return
+        
+        args = arg.strip().split(maxsplit=1)
+        if len(args) < 2:
+            print("Usage: test_plant_set <plant_name> <start_date>")
+            print("  plant_name: Name of the plant (use quotes if it contains spaces)")
+            print("  start_date: Start date in YYYY-MM-DD format")
+            print("\nExamples:")
+            print('  test_plant_set "Micro Tom" 2025-12-16')
+            print('  test_plant_set Basil 2025-12-01')
+            return
+        
+        # Parse plant_name and start_date
+        plant_name = args[0].strip('"').strip("'")
+        start_date = args[1].strip() if len(args) > 1 else args[0].split()[1] if len(args[0].split()) > 1 else None
+        
+        # Handle case where name has spaces and is quoted
+        if not start_date or len(start_date) != 10:
+            parts = arg.strip().split()
+            if len(parts) >= 2:
+                start_date = parts[-1]
+                plant_name = ' '.join(parts[:-1]).strip('"').strip("'")
+        
+        # Validate date format
+        try:
+            datetime.strptime(start_date, '%Y-%m-%d')
+        except ValueError:
+            print(f"✗ Invalid date format: {start_date}")
+            print("  Date must be in YYYY-MM-DD format")
+            return
+        
+        try:
+            device = devices[self.selected_device]
+            url = f"https://{device['address']}/api/plant/info"
+            
+            payload = {
+                'plant_name': plant_name,
+                'start_date': start_date
+            }
+            
+            print(f"\n--- Testing Plant Info POST API ---")
+            print(f"URL: {url}")
+            print(f"Payload:")
+            print(f"  Plant Name: {plant_name}")
+            print(f"  Start Date: {start_date}")
+            
+            response = self.session.post(url, json=payload, timeout=10)
+            response.raise_for_status()
+            
+            data = response.json()
+            
+            print(f"\n✓ Response received:")
+            print(f"  Success: {data.get('success', False)}")
+            print(f"  Message: {data.get('message', 'N/A')}")
+            
+            print(f"\n✓ Test passed!")
+            print(f"\nTip: Run 'test_plant_get' to verify the data was saved correctly.")
+            
+        except requests.exceptions.RequestException as e:
+            print(f"✗ Request failed: {e}")
+        except json.JSONDecodeError as e:
+            print(f"✗ Invalid JSON response: {e}")
+        except Exception as e:
+            print(f"✗ Error: {e}")
+
+    # --------------------------------------------------------------------------
+    # Phase 1 Helper Functions - Reusable API Access
+    # --------------------------------------------------------------------------
+    
+    def _get_filesystem_listing(self, path='/lfs'):
+        """
+        Helper function to get filesystem listing from device.
+        Returns dict with 'directories', 'files', 'total_dirs', 'total_files', 'path'
+        Returns None on error.
+        """
+        if not self._check_device_selected():
+            return None
+        
+        try:
+            device = devices[self.selected_device]
+            url = f"https://{device['address']}/api/filesystem/list"
+            params = {'path': path}
+            
+            response = self.session.get(url, params=params, timeout=10)
+            response.raise_for_status()
+            
+            return response.json()
+        except Exception as e:
+            print(f"Error fetching filesystem listing: {e}")
+            return None
+    
+    def _read_file_content(self, path):
+        """
+        Helper function to read file content from device.
+        Returns dict with 'path', 'size', 'content'
+        Returns None on error.
+        """
+        if not self._check_device_selected():
+            return None
+        
+        try:
+            device = devices[self.selected_device]
+            url = f"https://{device['address']}/api/filesystem/read"
+            params = {'path': path}
+            
+            response = self.session.get(url, params=params, timeout=10)
+            response.raise_for_status()
+            
+            return response.json()
+        except Exception as e:
+            print(f"Error reading file: {e}")
+            return None
+    
+    def _get_plant_info(self):
+        """
+        Helper function to get plant information from device.
+        Returns dict with plant info if exists, or {'exists': False} if not configured.
+        Returns None on error.
+        """
+        if not self._check_device_selected():
+            return None
+        
+        try:
+            device = devices[self.selected_device]
+            url = f"https://{device['address']}/api/plant/info"
+            
+            response = self.session.get(url, timeout=10)
+            response.raise_for_status()
+            
+            return response.json()
+        except Exception as e:
+            print(f"Error fetching plant info: {e}")
+            return None
+    
+    def _set_plant_info(self, plant_name, start_date):
+        """
+        Helper function to set plant information on device.
+        Returns True on success, False on error.
+        """
+        if not self._check_device_selected():
+            return False
+        
+        # Validate date format
+        try:
+            datetime.strptime(start_date, '%Y-%m-%d')
+        except ValueError:
+            print(f"Invalid date format: {start_date}. Use YYYY-MM-DD")
+            return False
+        
+        try:
+            device = devices[self.selected_device]
+            url = f"https://{device['address']}/api/plant/info"
+            
+            payload = {
+                'plant_name': plant_name,
+                'start_date': start_date
+            }
+            
+            response = self.session.post(url, json=payload, timeout=10)
+            response.raise_for_status()
+            
+            data = response.json()
+            return data.get('success', False)
+        except Exception as e:
+            print(f"Error setting plant info: {e}")
+            return False
+
+    # --------------------------------------------------------------------------
+    # Phase 1 Production Commands - User-Facing Filesystem and Plant Info
+    # --------------------------------------------------------------------------
+    
+    def do_fs_browse(self, arg):
+        '''Browse filesystem on device: fs_browse [path]
+        Examples:
+            fs_browse           - Browse /lfs root directory
+            fs_browse /lfs/config - Browse /lfs/config directory
+        '''
+        if not self._check_device_selected():
+            return
+        
+        path = arg.strip() if arg.strip() else '/lfs'
+        
+        print(f"\n{'='*70}")
+        print(f"  Filesystem Browser: {path}")
+        print(f"{'='*70}")
+        
+        data = self._get_filesystem_listing(path)
+        if not data:
+            print("Failed to retrieve filesystem listing.")
+            return
+        
+        # Display directories
+        if data.get('directories'):
+            print(f"\n📁 Directories ({data.get('total_dirs', 0)}):")
+            for dir_name in sorted(data['directories']):
+                print(f"   {dir_name}/")
+        
+        # Display files
+        if data.get('files'):
+            print(f"\n📄 Files ({data.get('total_files', 0)}):")
+            for file in sorted(data['files'], key=lambda x: x['name']):
+                size_kb = file['size'] / 1024.0
+                if size_kb < 1:
+                    size_str = f"{file['size']} B"
+                else:
+                    size_str = f"{size_kb:.2f} KB"
+                print(f"   {file['name']:<40} {size_str:>12}")
+        
+        if not data.get('directories') and not data.get('files'):
+            print("\n  (empty directory)")
+        
+        print(f"\n{'='*70}")
+        print(f"Tip: Use 'fs_cat <path>' to view file contents")
+        print(f"{'='*70}\n")
+    
+    def do_fs_cat(self, arg):
+        '''Display file contents: fs_cat <path>
+        Examples:
+            fs_cat /lfs/config/plant.json
+            fs_cat /lfs/config/system.json
+        '''
+        if not self._check_device_selected():
+            return
+        
+        if not arg.strip():
+            print("Usage: fs_cat <path>")
+            print("Example: fs_cat /lfs/config/plant.json")
+            return
+        
+        path = arg.strip()
+        
+        data = self._read_file_content(path)
+        if not data:
+            print(f"Failed to read file: {path}")
+            return
+        
+        print(f"\n{'='*70}")
+        print(f"  File: {data.get('path', path)}")
+        print(f"  Size: {data.get('size', 0)} bytes")
+        print(f"{'='*70}")
+        
+        content = data.get('content', '')
+        
+        # Try to pretty-print JSON
+        try:
+            json_content = json.loads(content)
+            print(json.dumps(json_content, indent=2))
+        except:
+            # Not JSON, print as-is
+            print(content)
+        
+        print(f"{'='*70}\n")
+    
+    def do_plant_info(self, arg):
+        '''Display current plant information: plant_info'''
+        if not self._check_device_selected():
+            return
+        
+        data = self._get_plant_info()
+        if not data:
+            print("Failed to retrieve plant information.")
+            return
+        
+        print(f"\n{'='*70}")
+        print(f"  🌱 Plant Information")
+        print(f"{'='*70}")
+        
+        if data.get('exists'):
+            print(f"\n  Plant Name:     {data.get('plant_name', 'N/A')}")
+            print(f"  Start Date:     {data.get('start_date', 'N/A')}")
+            print(f"  Days Growing:   {data.get('days_growing', 'N/A')} days")
+            print(f"  Start Timestamp: {data.get('start_timestamp', 'N/A')}")
+            
+            # Calculate some useful dates
+            start_date_str = data.get('start_date')
+            if start_date_str:
+                try:
+                    start_date = datetime.strptime(start_date_str, '%Y-%m-%d')
+                    today = datetime.now()
+                    days_elapsed = (today - start_date).days
+                    print(f"  Days Elapsed:   {days_elapsed} days (calculated from PC time)")
+                except:
+                    pass
+        else:
+            print(f"\n  Status: No plant information configured")
+            print(f"  Message: {data.get('message', 'N/A')}")
+            print(f"\n  💡 Tip: Use 'plant_set <name> <date>' to configure plant info")
+        
+        print(f"{'='*70}\n")
+    
+    def do_plant_set(self, arg):
+        '''Set plant information: plant_set <plant_name> <start_date>
+        Examples:
+            plant_set "Micro Tom" 2025-12-16
+            plant_set Basil 2025-12-01
+        '''
+        if not self._check_device_selected():
+            return
+        
+        args = arg.strip().split(maxsplit=1)
+        if len(args) < 2:
+            print("Usage: plant_set <plant_name> <start_date>")
+            print("  plant_name: Name of the plant (use quotes if it contains spaces)")
+            print("  start_date: Start date in YYYY-MM-DD format")
+            print("\nExamples:")
+            print('  plant_set "Micro Tom" 2025-12-16')
+            print('  plant_set Basil 2025-12-01')
+            return
+        
+        # Parse plant_name and start_date
+        plant_name = args[0].strip('"').strip("'")
+        start_date = args[1].strip() if len(args) > 1 else args[0].split()[1] if len(args[0].split()) > 1 else None
+        
+        # Handle case where name has spaces and is quoted
+        if not start_date or len(start_date) != 10:
+            parts = arg.strip().split()
+            if len(parts) >= 2:
+                start_date = parts[-1]
+                plant_name = ' '.join(parts[:-1]).strip('"').strip("'")
+        
+        print(f"\n{'='*70}")
+        print(f"  Setting Plant Information")
+        print(f"{'='*70}")
+        print(f"  Plant Name: {plant_name}")
+        print(f"  Start Date: {start_date}")
+        
+        success = self._set_plant_info(plant_name, start_date)
+        
+        if success:
+            print(f"\n  ✓ Plant information saved successfully!")
+            print(f"\n{'='*70}")
+            print(f"  💡 Tip: Use 'plant_info' to view the saved information")
+            print(f"{'='*70}\n")
+        else:
+            print(f"\n  ✗ Failed to save plant information.")
+            print(f"{'='*70}\n")
+
+    # --------------------------------------------------------------------------
+    # Main GUI Launcher
+    # --------------------------------------------------------------------------
+    
+    def do_launch_gui(self, arg):
+        '''Launch unified GrowPod GUI: launch_gui
+        Opens the main GUI application with all features:
+        - Schedules: Manage hourly schedules, food dosing, and routines
+        - Filesystem: Browse device filesystem and view files
+        - Plant Info: Manage plant information and growing data
+        '''
+        if not self._check_device_selected():
+            return
+        
+        print("\n🚀 Launching GrowPod Control GUI...")
+        print(f"📱 Device: {self.selected_device}")
+        print(f"🔗 Address: {devices[self.selected_device]['address']}\n")
+        
+        launch_unified_gui(self)
+    
+    # --------------------------------------------------------------------------
+    # Phase 1 GUI Test Commands - Launch Standalone GUI Test Windows
+    # --------------------------------------------------------------------------
+    
+    def do_test_gui_filesystem(self, arg):
+        '''Launch filesystem browser GUI test window: test_gui_filesystem
+        Opens a standalone window to browse device filesystem visually.
+        '''
+        if not self._check_device_selected():
+            return
+        
+        print("\n🖥️  Launching Filesystem Browser GUI...")
+        print("💡 This is a test window. Close it when done.\n")
+        
+        test_filesystem_browser_gui(self)
+    
+    def do_test_gui_plant(self, arg):
+        '''Launch plant info GUI test window: test_gui_plant
+        Opens a standalone window to view and edit plant information.
+        '''
+        if not self._check_device_selected():
+            return
+        
+        print("\n🖥️  Launching Plant Information GUI...")
+        print("💡 This is a test window. Close it when done.\n")
+        
+        test_plant_info_gui(self)
 
     def do_led(self, arg):
         '''Set LED brightness: led <value> [channel]
