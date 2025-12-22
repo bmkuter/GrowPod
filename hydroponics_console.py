@@ -1002,7 +1002,26 @@ def launch_unified_gui(console_instance):
     
     root = tk.Tk()
     root.title(f"GrowPod Control - {console_instance.selected_device}")
-    root.geometry("1400x900")  # Increased size to fit all elements
+    
+    # Get screen dimensions
+    screen_width = root.winfo_screenwidth()
+    screen_height = root.winfo_screenheight()
+    
+    # Set window to span full vertical height with reasonable width
+    window_width = 1400
+    window_height = screen_height - 80  # Leave space for taskbar
+    
+    # Center horizontally, position at top
+    x_position = (screen_width - window_width) // 2
+    y_position = 0
+    
+    root.geometry(f"{window_width}x{window_height}+{x_position}+{y_position}")
+    
+    # Bring window to foreground
+    root.lift()
+    root.attributes('-topmost', True)
+    root.after_idle(root.attributes, '-topmost', False)
+    root.focus_force()
     
     # Main container
     main_frame = tk.Frame(root, padx=10, pady=10)
@@ -2392,7 +2411,7 @@ def create_plant_info_tab(parent_frame, console_instance):
         # Save to device
         result = console_instance._set_plant_info(name, date)
         
-        if result and result.get('success'):
+        if result:
             status_label.config(text="✅ Plant information saved successfully!", fg="#27ae60")
             refresh_plant_info()
             tk.messagebox.showinfo("Success", "Plant information saved!")
