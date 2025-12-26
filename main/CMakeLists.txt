@@ -3,6 +3,7 @@
 idf_component_register(
     SRCS
         "main.c"
+        "peripheral_power.c"
         "ina_power_monitor/ina260.c"
         "ina_power_monitor/ina219.c"
         "ina_power_monitor/power_monitor_HAL.c"
@@ -12,6 +13,8 @@ idf_component_register(
         "sensors/distance_sensor.c"
         "sensors/fdc1004_distance_sensor.c"
         "sensors/sht45_sensor.c"
+        "sensors/tsl2591_sensor.c"
+        "sensors/i2c_scanner.c"
         "sensors/sensor_manager.c"
         "sensors/sensor_api.c"
         "https_server/https_server.c"

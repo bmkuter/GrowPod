@@ -7,6 +7,7 @@
 #include "distance_sensor.h"
 #include "https_server/https_server.h"
 #include "sensors/sensor_manager.h"  // NEW: Sensor manager
+#include "peripheral_power.h"  // Peripheral power control
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
@@ -185,6 +186,16 @@ void app_main(void) {
         }
     } else {
         ESP_LOGE(TAG, "Failed to initialize filesystem");
+    }
+
+    // Initialize peripheral power control BEFORE any I2C devices
+    // GPIO 21 controls power to sensors and display
+    ESP_LOGI(TAG, "Enabling peripheral power...");
+    ret = peripheral_power_init();
+    if (ret == ESP_OK) {
+        ESP_LOGI(TAG, "Peripheral power enabled successfully");
+    } else {
+        ESP_LOGE(TAG, "Failed to enable peripheral power");
     }
 
 // Initialize sensor manager (centralized sensor reading system)

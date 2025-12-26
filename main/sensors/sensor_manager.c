@@ -5,6 +5,8 @@
 
 #include "sensor_manager.h"
 #include "sht45_sensor.h"
+#include "tsl2591_sensor.h"
+#include "i2c_scanner.h"
 #include "../ina_power_monitor/power_monitor_HAL.h"
 #include "distance_sensor.h"
 #include "esp_log.h"
@@ -50,6 +52,7 @@ static sensor_manager_state_t g_sensor_mgr = {0};
 static void sensor_manager_task(void *arg);
 static esp_err_t read_power_sensor(sensor_type_t type, float *value);
 static esp_err_t read_sht45_sensor(sensor_type_t type, environment_data_t *env_data);
+static esp_err_t read_tsl2591_sensor(sensor_type_t type, light_data_t *light_data);
 static esp_err_t read_water_sensor(float *value);
 static esp_err_t update_sensor_cache(sensor_type_t type);
 static bool should_poll_sensor(sensor_type_t type, uint32_t cycle_count);
@@ -132,6 +135,8 @@ esp_err_t sensor_manager_init(const sensor_manager_config_t *config) {
         return ret;
     }
     
+
+    
     // Create mutexes
     g_sensor_mgr.cache_mutex = xSemaphoreCreateMutex();
     g_sensor_mgr.i2c_mutex = xSemaphoreCreateMutex();
@@ -160,6 +165,7 @@ esp_err_t sensor_manager_init(const sensor_manager_config_t *config) {
     g_sensor_mgr.priorities[SENSOR_TYPE_POWER_VOLTAGE] = SENSOR_PRIORITY_HIGH;
     g_sensor_mgr.priorities[SENSOR_TYPE_POWER_POWER] = SENSOR_PRIORITY_HIGH;
     g_sensor_mgr.priorities[SENSOR_TYPE_TEMPERATURE_AND_HUMIDITY] = SENSOR_PRIORITY_CRITICAL;
+    g_sensor_mgr.priorities[SENSOR_TYPE_LIGHT] = SENSOR_PRIORITY_MEDIUM;
     g_sensor_mgr.priorities[SENSOR_TYPE_WATER_LEVEL] = SENSOR_PRIORITY_MEDIUM;
     
     // Enable all sensors by default
@@ -181,6 +187,15 @@ esp_err_t sensor_manager_init(const sensor_manager_config_t *config) {
         ESP_LOGW(TAG, "SHT45 init failed (may not be connected): %s", esp_err_to_name(ret));
         // Disable environment sensor if init fails
         g_sensor_mgr.enabled[SENSOR_TYPE_TEMPERATURE_AND_HUMIDITY] = false;
+    }
+    
+    // Initialize TSL2591 light sensor
+    ESP_LOGI(TAG, "Initializing TSL2591 light sensor");
+    ret = tsl2591_init(I2C_MASTER_NUM, TSL2591_I2C_ADDR);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "TSL2591 init failed (may not be connected): %s", esp_err_to_name(ret));
+        // Disable light sensor if init fails
+        g_sensor_mgr.enabled[SENSOR_TYPE_LIGHT] = false;
     }
     
     ESP_LOGI(TAG, "Sensor manager initialized successfully");
@@ -322,6 +337,32 @@ static esp_err_t read_sht45_sensor(sensor_type_t type, environment_data_t *env_d
 }
 
 /**
+ * @brief Read TSL2591 light sensor
+ */
+static esp_err_t read_tsl2591_sensor(sensor_type_t type, light_data_t *light_data) {
+    ESP_LOGD(TAG, "[I2C] Reading TSL2591 sensor: %s", sensor_type_to_string(type));
+    
+    if (type != SENSOR_TYPE_LIGHT) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    
+    tsl2591_data_t data;
+    esp_err_t ret = tsl2591_read_data(I2C_MASTER_NUM, TSL2591_I2C_ADDR, &data);
+    
+    if (ret == ESP_OK && data.valid) {
+        light_data->lux = data.lux;
+        light_data->visible = data.visible;
+        light_data->infrared = data.ch1;
+        ESP_LOGD(TAG, "[I2C] TSL2591 read OK: %.2f lux (V:%u IR:%u)", 
+                 light_data->lux, light_data->visible, light_data->infrared);
+    } else {
+        ESP_LOGW(TAG, "[I2C] TSL2591 read failed: %s", esp_err_to_name(ret));
+    }
+    
+    return ret;
+}
+
+/**
  * @brief Read water level sensor
  */
 static esp_err_t read_water_sensor(float *value) {
@@ -359,6 +400,10 @@ static esp_err_t update_sensor_cache(sensor_type_t type) {
             
         case SENSOR_TYPE_TEMPERATURE_AND_HUMIDITY:
             ret = read_sht45_sensor(type, &sensor_data.environment);
+            break;
+            
+        case SENSOR_TYPE_LIGHT:
+            ret = read_tsl2591_sensor(type, &sensor_data.light);
             break;
             
         case SENSOR_TYPE_WATER_LEVEL:
@@ -560,6 +605,10 @@ esp_err_t sensor_manager_get_cached(sensor_type_t sensor_type, float *value, uin
             *value = entry->data.environment.temperature_c;
             break;
             
+        case SENSOR_TYPE_LIGHT:
+            *value = entry->data.light.lux;
+            break;
+            
         case SENSOR_TYPE_WATER_LEVEL:
             *value = entry->data.water_level.level_mm;
             break;
@@ -700,6 +749,11 @@ void sensor_manager_print_debug_info(void) {
                     }
                     break;
                     
+                case SENSOR_TYPE_LIGHT:
+                    snprintf(value_str, sizeof(value_str), "%.2f lux (V:%u IR:%u)", 
+                             entry->data.light.lux, entry->data.light.visible, entry->data.light.infrared);
+                    break;
+                    
                 case SENSOR_TYPE_WATER_LEVEL:
                     snprintf(value_str, sizeof(value_str), "%.2f mm", entry->data.water_level.level_mm);
                     break;
@@ -766,6 +820,7 @@ static const char* sensor_type_to_string(sensor_type_t type) {
         case SENSOR_TYPE_POWER_VOLTAGE: return "POWER_VOLTAGE";
         case SENSOR_TYPE_POWER_POWER: return "POWER_POWER";
         case SENSOR_TYPE_TEMPERATURE_AND_HUMIDITY: return "TEMPERATURE_AND_HUMIDITY";
+        case SENSOR_TYPE_LIGHT: return "LIGHT";
         case SENSOR_TYPE_WATER_LEVEL: return "WATER_LEVEL";
         default: return "UNKNOWN";
     }

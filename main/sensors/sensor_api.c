@@ -215,6 +215,17 @@ void sensor_api_print_all(void) {
         ESP_LOGW(TAG, "SHT45 Environment: Failed to read");
     }
     
+    // Light sensor
+    sensor_data_t light_data;
+    if (sensor_manager_get_data_cached(SENSOR_TYPE_LIGHT, &light_data, NULL) == ESP_OK) {
+        ESP_LOGI(TAG, "TSL2591 Light Sensor:");
+        ESP_LOGI(TAG, "  Lux: %.2f", light_data.light.lux);
+        ESP_LOGI(TAG, "  Visible: %u", light_data.light.visible);
+        ESP_LOGI(TAG, "  Infrared: %u", light_data.light.infrared);
+    } else {
+        ESP_LOGW(TAG, "TSL2591 Light Sensor: Failed to read");
+    }
+    
     // Water level
     if (sensor_api_read_water_level(&water_level_mm) == ESP_OK) {
         ESP_LOGI(TAG, "Water Level: %.2f mm", water_level_mm);

@@ -398,10 +398,9 @@ esp_lcd_panel_handle_t display_init(void)
 {
     ESP_LOGI(TAG, "Starting display_init()");
 
-    // Power on display
-    gpio_set_direction(PIN_NUM_POWER_TOGGLE, GPIO_MODE_OUTPUT);
-    gpio_set_level(PIN_NUM_POWER_TOGGLE, 1);
-    ESP_LOGI(TAG, "Power toggled on pin %d", PIN_NUM_POWER_TOGGLE);
+    // Note: Power control (GPIO 21) is now handled by peripheral_power_init()
+    // which is called in main.c before sensor manager initialization.
+    // This ensures sensors get power before we try to initialize them.
 
     // Configure SPI bus
     spi_bus_config_t buscfg = {

@@ -37,6 +37,7 @@ typedef enum {
     SENSOR_TYPE_POWER_VOLTAGE,      // INA219/260 voltage reading
     SENSOR_TYPE_POWER_POWER,        // INA219/260 power reading
     SENSOR_TYPE_TEMPERATURE_AND_HUMIDITY,  // SHT45 temperature and humidity (combined)
+    SENSOR_TYPE_LIGHT,              // TSL2591 light sensor (lux + visible + IR)
     SENSOR_TYPE_WATER_LEVEL,        // FDC1004 distance/water level
     SENSOR_TYPE_MAX                 // Total number of sensor types
 } sensor_type_t;
@@ -74,11 +75,21 @@ typedef struct {
 } water_level_data_t;
 
 /**
+ * @brief Light sensor data (TSL2591)
+ */
+typedef struct {
+    float lux;                  // Light intensity in lux
+    uint16_t visible;           // Visible light (CH0 - CH1)
+    uint16_t infrared;          // Infrared light (CH1)
+} light_data_t;
+
+/**
  * @brief Sensor data union - holds data for any sensor type
  */
 typedef union {
     power_data_t power;                     // Power monitor data
     environment_data_t environment;         // Temperature and humidity data
+    light_data_t light;                     // Light sensor data
     water_level_data_t water_level;         // Water level data
 } sensor_data_t;
 

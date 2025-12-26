@@ -5,6 +5,7 @@
 #include "https_server.h"   // For start_calibrate_pod_routine
 #include "sensors/sensor_api.h"  // For sensor manager API
 #include "sensors/sensor_manager.h"  // For sensor manager debug functions
+#include "sensors/i2c_scanner.h"  // For I2C bus scanner
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_vfs_dev.h"
@@ -27,6 +28,7 @@ static int cmd_drainpump(int argc, char **argv);
 static int cmd_led(int argc, char **argv);
 static int cmd_read_sensors(int argc, char **argv);
 static int cmd_sensors(int argc, char **argv);          // NEW: Sensor manager test command
+static int cmd_i2c_scan(int argc, char **argv);         // I2C bus scanner command
 static int cmd_fill_pod(int argc, char **argv);
 static int cmd_empty_pod(int argc, char **argv);
 static int cmd_calibrate_pod(int argc, char **argv); 
@@ -843,6 +845,28 @@ static int cmd_sensors(int argc, char **argv) {
     return 0;
 }
 
+/**
+ * @brief Command handler for the 'i2c_scan' command
+ * Scans the I2C bus and displays all detected devices
+ */
+static int cmd_i2c_scan(int argc, char **argv) {
+    printf("\n=== I2C Bus Scanner ===\n");
+    printf("Scanning I2C bus for connected devices...\n\n");
+    
+    // Use I2C_NUM_0 which is the default I2C port used by sensors
+    i2c_scanner_scan(I2C_NUM_0);
+    
+    printf("\nCommon I2C addresses:\n");
+    printf("  0x29 - TSL2591 (Light sensor)\n");
+    printf("  0x40 - INA219/INA260 (Power monitor)\n");
+    printf("  0x44 - SHT45 (Temperature/Humidity)\n");
+    printf("  0x60 - PCA9685 (Motor shield 1)\n");
+    printf("  0x61 - PCA9685 (Motor shield 2)\n");
+    printf("  0x0B - LC709203F (Battery gauge)\n\n");
+    
+    return 0;
+}
+
 static void register_console_commands(void) {
     // Air pump command
     {
@@ -935,6 +959,18 @@ static void register_console_commands(void) {
             .help = "Read all sensors via sensor manager (with detailed logging)",
             .hint = NULL,
             .func = &cmd_sensors,
+            .argtable = NULL
+        };
+        ESP_ERROR_CHECK(esp_console_cmd_register(&cmd));
+    }
+
+    // I2C Scanner command
+    {
+        const esp_console_cmd_t cmd = {
+            .command = "i2c_scan",
+            .help = "Scan I2C bus and display all detected devices",
+            .hint = NULL,
+            .func = &cmd_i2c_scan,
             .argtable = NULL
         };
         ESP_ERROR_CHECK(esp_console_cmd_register(&cmd));
