@@ -81,7 +81,7 @@ esp_err_t wifi_init(void) {
                                            WIFI_CONNECTED_BIT,
                                            pdFALSE,
                                            pdFALSE,
-                                           (10000 / portTICK_PERIOD_MS));
+                                           (20000 / portTICK_PERIOD_MS));
     if (bits & WIFI_CONNECTED_BIT) {
         ESP_LOGI(TAG, "Connected to Wi-Fi network: %s", WIFI_SSID);
     } else {

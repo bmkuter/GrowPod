@@ -50,14 +50,11 @@ esp_err_t ina219_write_register(uint8_t address, uint8_t reg_addr, uint16_t data
 
 // INA219 initialization
 esp_err_t ina219_init(uint8_t address) {
-    // Initialize I2C
-    esp_err_t ret = i2c_master_init();
-    if (ret != ESP_OK) {
-        return ret;
-    }
+    // Note: I2C bus is now initialized by sensor_manager_init() in main.c
+    // (GPIO 42 SDA, GPIO 41 SCL, 400kHz)
     
     // Set calibration for 32V, 2A by default
-    ret = ina219_set_calibration_32V_2A(address);
+    esp_err_t ret = ina219_set_calibration_32V_2A(address);
     if (ret == ESP_OK) {
         ESP_LOGI(TAG, "INA219 at 0x%02X initialized", address);
     } else {

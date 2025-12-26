@@ -6,6 +6,7 @@
 #include "power_monitor_HAL.h"
 #include "distance_sensor.h"
 #include "https_server/https_server.h"
+#include "sensors/sensor_manager.h"  // NEW: Sensor manager
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
@@ -130,10 +131,27 @@ void log_memory_stats(void)
     heap_caps_print_heap_info(MALLOC_CAP_8BIT);
 }
 
-void app_main(void) {
-    vTaskDelay(5000/portTICK_PERIOD_MS);
+void wait_for_time_sync() {
+    time_t now = 0;
+    struct tm timeinfo = { 0 };
+    int retry = 0;
+    const int retry_count = 100;
+    while (time(&now) < 1000000000 && retry < retry_count) {
+        ESP_LOGI(TAG, "Waiting for system time to be set... (%d/%d)", retry+1, retry_count);
+        vTaskDelay(pdMS_TO_TICKS(250));
+        retry++;
+    }
 
-    //Initialize NVS
+    // Set timezone to US Eastern (Boston) and update local time info
+    set_timezone_to_boston();
+    localtime_r(&now, &timeinfo);
+    ESP_LOGW(TAG, "Time is set: %s", asctime(&timeinfo));
+}
+
+void app_main(void) {
+    vTaskDelay(500/portTICK_PERIOD_MS);
+
+//Initialize NVS
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
       (nvs_flash_erase());
@@ -142,7 +160,7 @@ void app_main(void) {
     ESP_ERROR_CHECK(ret);
     ESP_LOGW(TAG, "NVS Status: %d", ret);
 
-    // Initialize LittleFS filesystem
+// Initialize LittleFS filesystem
     ESP_LOGI(TAG, "Initializing filesystem...");
     ret = filesystem_init();
     if (ret == ESP_OK) {
@@ -169,12 +187,26 @@ void app_main(void) {
         ESP_LOGE(TAG, "Failed to initialize filesystem");
     }
 
-    i2c_master_init();
-
-    // Init Screen
-    init_screen_wrapper();
+// Initialize sensor manager (centralized sensor reading system)
+    // Note: I2C initialization is now handled by sensor_manager_init()
+    ESP_LOGI(TAG, "Initializing sensor manager...");
+    sensor_manager_config_t sensor_config = sensor_manager_get_default_config();
+    ret = sensor_manager_init(&sensor_config);
+    if (ret == ESP_OK) {
+        ESP_LOGI(TAG, "Sensor manager initialized successfully");
+        
+        // Start sensor manager task
+        ret = sensor_manager_start();
+        if (ret == ESP_OK) {
+            ESP_LOGI(TAG, "Sensor manager task started");
+        } else {
+            ESP_LOGE(TAG, "Failed to start sensor manager task");
+        }
+    } else {
+        ESP_LOGE(TAG, "Failed to initialize sensor manager");
+    }
     
-    // Initialize Wi-Fi
+// Initialize Wi-Fi
     printf("Starting WiFi...\n");
     if (wifi_init() == ESP_OK) {
         // Start mDNS
@@ -190,26 +222,18 @@ void app_main(void) {
         ESP_LOGE("MAIN", "Failed to initialize Wi-Fi");
     }
 
-    time_t now = 0;
-    struct tm timeinfo = { 0 };
-    int retry = 0;
-    const int retry_count = 40;
-    while (time(&now) < 1000000000 && retry < retry_count) {
-        ESP_LOGI(TAG, "Waiting for system time to be set... (%d/%d)", retry+1, retry_count);
-        vTaskDelay(pdMS_TO_TICKS(250));
-        retry++;
-    }
-    // Set timezone to US Eastern (Boston) and update local time info
-    set_timezone_to_boston();
-    localtime_r(&now, &timeinfo);
-    ESP_LOGW(TAG, "Time is set: %s", asctime(&timeinfo));
+// Setting NTP time
+     wait_for_time_sync();
 
     vTaskDelay(100/portTICK_PERIOD_MS);
 
-    // Initialize UART console
+// Initialize UART console
     uart_comm_init();
 
-    xTaskCreate(uart_console_task, "uart_console_task", UI_TASK_SIZE, NULL, 5, NULL);
+    xTaskCreatePinnedToCore(uart_console_task, "uart_console_task", UI_TASK_SIZE, NULL, 5, NULL, 0);
+
+// Init Screen
+    init_screen_wrapper();
 
     actuator_control_init();
 
@@ -217,48 +241,31 @@ void app_main(void) {
 
 // Start schedule manager task
     ESP_LOGI(TAG, "Starting schedule manager task");
-    xTaskCreate(schedule_manager_task, "schedule_manager", ACTUATOR_TASK_SIZE, NULL,
-                configMAX_PRIORITIES - 2, NULL);
-
-// // Start air schedule task
-//     ESP_LOGI(TAG, "Starting air schedule task");
-//     xTaskCreate(schedule_air_task, "schedule_air", ACTUATOR_TASK_SIZE, NULL, configMAX_PRIORITIES - 3, NULL);
-
+    xTaskCreatePinnedToCore(schedule_manager_task, "schedule_manager", ACTUATOR_TASK_SIZE, NULL, configMAX_PRIORITIES - 2, NULL, 0);
 
 // Start LED schedule task
     ESP_LOGI(TAG, "Starting LED schedule task");
-    xTaskCreate(schedule_led_task, "schedule_led", ACTUATOR_TASK_SIZE, NULL, configMAX_PRIORITIES - 3, NULL);
+    xTaskCreatePinnedToCore(schedule_led_task, "schedule_led", ACTUATOR_TASK_SIZE, NULL, configMAX_PRIORITIES - 3, NULL, 0);
 
 // Start planter schedule task
     ESP_LOGI(TAG, "Starting planter schedule task");
-    xTaskCreate(schedule_planter_task, "schedule_planter", ACTUATOR_TASK_SIZE, NULL, configMAX_PRIORITIES - 3, NULL);
+    xTaskCreatePinnedToCore(schedule_planter_task, "schedule_planter", ACTUATOR_TASK_SIZE, NULL, configMAX_PRIORITIES - 3, NULL, 0);
 
-    ret = distance_sensor_init();
-    if (ret == ESP_OK) {
-        xTaskCreate(distance_sensor_task, "distance_sensor_task", (1024 * 8), NULL, 5, NULL);
-    } else {
-        ESP_LOGE("MAIN", "distance_sensor_init failed: %s", esp_err_to_name(ret));
-    }
+    // ret = distance_sensor_init();
+    // if (ret == ESP_OK) {
+    //     xTaskCreate(distance_sensor_task, "distance_sensor_task", (1024 * 8), NULL, 5, NULL);
+    // } else {
+    //     ESP_LOGE("MAIN", "distance_sensor_init failed: %s", esp_err_to_name(ret));
+    // }
     
-
-    // Start Power Monitor task (using INA219 or INA260)
-    // Use INA219 by default
-    power_monitor_init(POWER_MONITOR_CHIP_INA219, INA219_ADDRESS);
-    // xTaskCreate(power_monitor_task, "power_monitor_task", 4096, NULL, 5, NULL);
+    // Note: Power monitor is now initialized by sensor_manager_init()
+    // which was called earlier in app_main()
 
     vTaskDelay(1000/portTICK_PERIOD_MS);
 
 
     // Initialize actuators
-    xTaskCreate(actuator_control_task, "actuator_control_task", 4096, NULL, 5, NULL);
+    xTaskCreatePinnedToCore(actuator_control_task, "actuator_control_task", 4096, NULL, 5, NULL, 0);
 
-    // Note: Flowmeter has been removed - waiting for new hardware prototype
-    
-    // Note: Control logic temporarily disabled pending sensor updates
-    // ret = control_logic_init();
-    // if (ret != ESP_OK) {
-    //     ESP_LOGE("MAIN", "Failed to initialize control logic module");
-    // }
-    
     log_memory_stats();
 }

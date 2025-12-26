@@ -18,6 +18,7 @@
 #include "control_logic.h"      // For system_state_t, get_system_state, etc.
 #include "distance_sensor.h"    // For distance_sensor_read_mm()
 #include "pod_state.h"  // Add pod_state
+#include "sensors/sensor_api.h" // For centralized sensor readings
 
 /* ==========================================
  *         WATER LEVEL CONSTANTS
@@ -931,9 +932,7 @@ static void routine_empty_pod_task(void *pvParam)
         vTaskDelay(pdMS_TO_TICKS(250));              // poll every 250 ms
 
         float cur_mA=0, volt_mV=0, pwr_mW=0;
-        power_monitor_read_current(&cur_mA);
-        power_monitor_read_voltage(&volt_mV);
-        power_monitor_read_power(&pwr_mW);
+        sensor_api_read_power_all(&cur_mA, &volt_mV, &pwr_mW);
         total_power += (pwr_mW * 0.25f);             // integrate 0.25 s slices
 
         dist_mm = distance_sensor_read_mm();
@@ -1062,9 +1061,7 @@ static void routine_fill_pod_task(void *pvParam)
         vTaskDelay(pdMS_TO_TICKS(250));
 
         float cur_mA=0, volt_mV=0, pwr_mW=0;
-        power_monitor_read_current(&cur_mA);
-        power_monitor_read_voltage(&volt_mV);
-        power_monitor_read_power(&pwr_mW);
+        sensor_api_read_power_all(&cur_mA, &volt_mV, &pwr_mW);
         total_power += (pwr_mW * 0.25f);
 
         dist_mm = distance_sensor_read_mm();
@@ -1701,9 +1698,7 @@ static esp_err_t unit_metrics_get_handler(httpd_req_t *req) {
     cJSON *root = cJSON_CreateObject();
 
     float cur_mA = 0.0f, volt_mV = 0.0f, pwr_mW = 0.0f;
-    power_monitor_read_current(&cur_mA);
-    power_monitor_read_voltage(&volt_mV);
-    power_monitor_read_power(&pwr_mW);
+    sensor_api_read_power_all(&cur_mA, &volt_mV, &pwr_mW);
 
     int dist_mm = distance_sensor_read_mm();
     cJSON_AddNumberToObject(root, "current_mA", cur_mA);

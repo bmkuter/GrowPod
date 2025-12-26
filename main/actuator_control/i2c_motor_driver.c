@@ -245,18 +245,11 @@ esp_err_t i2c_motor_driver_init(i2c_port_t i2c_port, int sda_pin, int scl_pin, u
 {
     esp_err_t ret;
     
-    // Use the shared I2C port from the power monitor
+    // Use the shared I2C port (initialized by sensor_manager)
     i2c_motor_port = I2C_MASTER_NUM;
     
-    // Use the shared I2C initialization function from power_monitor_HAL
-    ret = i2c_master_init();
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to initialize I2C: %s", esp_err_to_name(ret));
-        return ret;
-    }
-    
-    // Note: We're now using the I2C configuration from the power monitor
-    // (SDA: GPIO_NUM_42, SCL: GPIO_NUM_41, 100kHz)
+    // Note: I2C bus is now initialized by sensor_manager_init() in main.c
+    // (GPIO 42 SDA, GPIO 41 SCL, 400kHz)
     
     // Initialize pump motor shield (0x60) - required
     ret = pca9685_init_shield(MOTOR_SHIELD_PUMP_ADDR, "Pump motor shield");

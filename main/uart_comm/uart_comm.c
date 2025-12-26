@@ -3,6 +3,8 @@
 #include "power_monitor_HAL.h"
 #include "distance_sensor.h"
 #include "https_server.h"   // For start_calibrate_pod_routine
+#include "sensors/sensor_api.h"  // For sensor manager API
+#include "sensors/sensor_manager.h"  // For sensor manager debug functions
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_vfs_dev.h"
@@ -24,6 +26,7 @@ static int cmd_planterpump(int argc, char **argv);
 static int cmd_drainpump(int argc, char **argv);
 static int cmd_led(int argc, char **argv);
 static int cmd_read_sensors(int argc, char **argv);
+static int cmd_sensors(int argc, char **argv);          // NEW: Sensor manager test command
 static int cmd_fill_pod(int argc, char **argv);
 static int cmd_empty_pod(int argc, char **argv);
 static int cmd_calibrate_pod(int argc, char **argv); 
@@ -127,56 +130,50 @@ void uart_console_task(void *pvParameter)
 
 /**
  * @brief Command handler for the 'read_sensors' command.
+ * Updated to use centralized sensor manager API.
  */
-// Example: cmd_read_sensors() but with power monitor (INA219 or INA260)
 static int cmd_read_sensors(int argc, char **argv) {
     esp_err_t ret;
-    float current_total, voltage_total, power_total;
-    static bool initialized = false;
+    float current_mA, voltage_mV, power_mW;
+    float temperature_c, humidity_rh;
 
-    // 1) Ensure I2C is initialized
-    ret = i2c_master_init(); 
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to init I2C: %s", esp_err_to_name(ret));
-        return 1;
+    printf("\n=== Sensor Readings ===\n\n");
+
+    // Read power monitor data through sensor manager
+    ret = sensor_api_read_power_all(&current_mA, &voltage_mV, &power_mW);
+    if (ret == ESP_OK) {
+        printf("Power Monitor:\n");
+        printf("  Current: %.2f mA\n", current_mA);
+        printf("  Voltage: %.2f mV\n", voltage_mV);
+        printf("  Power:   %.2f mW\n", power_mW);
+    } else {
+        printf("Power Monitor: Error reading (%s)\n", esp_err_to_name(ret));
     }
+    printf("\n");
 
-    // 2) Initialize the single INA260
-    if (!initialized) {
-        ESP_LOGI(TAG, "Initializing power monitor (INA219 or INA260)");
-        power_monitor_init(POWER_MONITOR_CHIP_INA219, INA219_ADDRESS);
-        initialized = true;
+    // Read temperature and humidity through sensor manager (single read)
+    ret = sensor_api_read_environment_all(&temperature_c, &humidity_rh);
+    if (ret == ESP_OK) {
+        printf("SHT45 Environment:\n");
+        printf("  Temperature: %.2f °C\n", temperature_c);
+        printf("  Humidity: %.1f %%RH\n", humidity_rh);
+    } else {
+        printf("SHT45 Environment: Error reading (%s)\n", esp_err_to_name(ret));
     }
+    printf("\n");
 
-    // 3) Read data from the power monitor
-    ret  = power_monitor_read_current(&current_total);
-    ret |= power_monitor_read_voltage(&voltage_total);
-    ret |= power_monitor_read_power(&power_total);
-
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to read power sensor data: %s", esp_err_to_name(ret));
-        // return 1;
-    }
-    else {
-    // 4) Print aggregated results 
-        printf("\n---------------------------------------\n");
-        printf(" Power Monitor Reading:\n");
-        printf("   Current: %.2f mA\n", current_total);
-        printf("   Voltage: %.2f mV\n", voltage_total);
-        printf("   Power:   %.2f mW\n", power_total);
-        printf("---------------------------------------\n\n");
-    }
-
-    // 5) Water level (using non-blocking function) and percent full
+    // Water level (using non-blocking function) and percent full
     int dist_mm = distance_sensor_read_mm();
-    printf("Water level: %d mm\n", dist_mm);
+    printf("Water Level: %d mm\n", dist_mm);
     
     int fill_percent = pod_state_calc_fill_percent_int(&s_pod_state);
     if (fill_percent >= 0) {
-        printf("Percent full: %d%%\n", fill_percent);
+        printf("Percent Full: %d%%\n", fill_percent);
     } else {
-        printf("Percent full: Not calibrated\n");
+        printf("Percent Full: Not calibrated\n");
     }
+
+    printf("\n======================\n\n");
 
     return 0;
 }
@@ -828,6 +825,24 @@ static int cmd_pwm_sweep(int argc, char **argv) {
     return 0;
 }
 
+/**
+ * @brief Command handler for the 'sensors' command - demonstrates sensor manager
+ */
+static int cmd_sensors(int argc, char **argv) {
+    ESP_LOGI(TAG, "=== SENSOR MANAGER TEST COMMAND ===");
+    ESP_LOGI(TAG, "Reading all sensors through sensor manager API...");
+    printf("\n");
+    
+    // This function will show all the logging and tracing
+    sensor_api_print_all();
+    
+    printf("\n");
+    ESP_LOGI(TAG, "Sensor manager internal state:");
+    sensor_manager_print_debug_info();
+    
+    return 0;
+}
+
 static void register_console_commands(void) {
     // Air pump command
     {
@@ -908,6 +923,18 @@ static void register_console_commands(void) {
             .help = "Read and display power monitor data (INA219 or INA260)",
             .hint = NULL,
             .func = &cmd_read_sensors,
+            .argtable = NULL
+        };
+        ESP_ERROR_CHECK(esp_console_cmd_register(&cmd));
+    }
+
+    // Sensors command (new sensor manager API)
+    {
+        const esp_console_cmd_t cmd = {
+            .command = "sensors",
+            .help = "Read all sensors via sensor manager (with detailed logging)",
+            .hint = NULL,
+            .func = &cmd_sensors,
             .argtable = NULL
         };
         ESP_ERROR_CHECK(esp_console_cmd_register(&cmd));

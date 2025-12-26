@@ -16,6 +16,7 @@
 #include "actuator_control.h"   
 #include "pod_state.h"          // For pod state and fill percent
 #include "filesystem/config_manager.h"  // For plant info
+#include "sensors/sensor_api.h" // For centralized sensor readings
 #include <string.h>
 
 static const char *TAG = "display";
@@ -42,45 +43,57 @@ static esp_lcd_panel_handle_t panel_handle = NULL;
 static esp_lcd_panel_io_handle_t panel_io_handle = NULL;
 
 // UI Labels for sensor data
-static lv_obj_t *title_label;
+static lv_obj_t *plant_info_label;       // Plant name + days
 static lv_obj_t *current_label;
 static lv_obj_t *voltage_label;
 static lv_obj_t *power_label;
+static lv_obj_t *temp_humidity_label;    // Temperature + Humidity
 static lv_obj_t *water_level_label;
-static lv_obj_t *plant_name_label;
-static lv_obj_t *timestamp_label;
 static lv_obj_t *planter_pwm_label;
 static lv_obj_t *led_pwm_label;
 
 // LVGL timer for updating sensor readings
 static lv_timer_t *sensor_update_timer = NULL;
 
+// Text scrolling state for plant info
+typedef enum {
+    SCROLL_STATE_IDLE,       // Paused at start position (5 seconds)
+    SCROLL_STATE_SCROLLING   // Continuously scrolling right with wrapping
+} scroll_state_t;
+
+static scroll_state_t scroll_state = SCROLL_STATE_IDLE;
+static uint32_t scroll_timer_ms = 0;
+static char plant_info_full_text[128] = {0};  // Store full text
+static char plant_info_display_text[300] = {0};  // Store text with wrapping for marquee (needs 2x + spacing)
+static int16_t scroll_offset = 0;
+static bool text_needs_scroll = false;
+
+// Scroll timing configuration (in milliseconds)
+#define SCROLL_PAUSE_MS         5000   // Pause 5s when text completes one full cycle
+#define SCROLL_SPEED_MS         100    // Scroll every 100ms (10 chars/sec)
+#define SCROLL_SPACING          30     // Space (in pixels) between end and start of text
+
+// Font definitions
+#define SIZE_16_FONT  &lv_font_unscii_16
+#define SIZE_8_FONT   &lv_font_unscii_8
+
+// Forward declarations
+static bool does_text_need_scroll(const char *text, const lv_font_t *font, int16_t max_width);
+static void update_plant_info_scroll(void);
+
 // Timer callback to update the display with sensor readings
 static void lvgl_sensor_update_cb(lv_timer_t *timer)
 {
     esp_err_t ret;
     float current_ma, voltage_mv, power_mw;
+    float temperature_c, humidity_rh;
     int water_level_mm;
-    // add buffers for actuator text
     char current_str[32], voltage_str[32], power_str[32],
-         water_level_str[32], plant_name_str[68], plant_info_str[32],
-         planter_pwm_str[32], led_pwm_str[32];
-    static bool power_monitor_initialized = false;
+         temp_humidity_str[40], water_level_str[32], plant_info_str[128],
+         planter_pwm_str[24], led_pwm_str[24];
     
-    // Initialize power monitor
-    if (!power_monitor_initialized) {
-        ret = power_monitor_init(POWER_MONITOR_CHIP_INA219, INA219_ADDRESS);
-        if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to initialize power monitor: %s", esp_err_to_name(ret));
-        } else {
-            power_monitor_initialized = true;
-        }
-    }
-
-    // Read power monitor data
-    ret = power_monitor_read_current(&current_ma);
-    ret |= power_monitor_read_voltage(&voltage_mv);
-    ret |= power_monitor_read_power(&power_mw);
+    // Read power monitor data through sensor manager API
+    ret = sensor_api_read_power_all(&current_ma, &voltage_mv, &power_mw);
     
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "Error reading power monitor data: %s", esp_err_to_name(ret));
@@ -90,57 +103,206 @@ static void lvgl_sensor_update_cb(lv_timer_t *timer)
         power_mw = 0.0f;
     }
     
+    // Read temperature and humidity
+    ret = sensor_api_read_environment_all(&temperature_c, &humidity_rh);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "Error reading environment data: %s", esp_err_to_name(ret));
+        temperature_c = 0.0f;
+        humidity_rh = 0.0f;
+    }
+    
     // Read water level sensor (use non-blocking function)
     water_level_mm = distance_sensor_read_mm();
     
     // Format strings for display
-    snprintf(current_str, sizeof(current_str), "Current: %.2f mA", current_ma);
-    snprintf(voltage_str, sizeof(voltage_str), "Voltage: %.2f mV", voltage_mv);
-    snprintf(power_str, sizeof(power_str), "Power:   %.2f mW", power_mw);
-    // Show water level as percent and then raw mm in ()
+    snprintf(current_str, sizeof(current_str), "I:%.1fmA", current_ma);
+    snprintf(voltage_str, sizeof(voltage_str), "V:%.1fmV", voltage_mv);
+    snprintf(power_str, sizeof(power_str), "P:%.1fmW", power_mw);
+    
+    // Temperature and humidity (compact format)
+    float temp_f = (temperature_c * 9.0f / 5.0f) + 32.0f;
+    snprintf(temp_humidity_str, sizeof(temp_humidity_str), "%.1fC(%.0fF) %.0f%%RH", 
+             temperature_c, temp_f, humidity_rh);
+    
+    // Water level with fill percent
     int fill_percent = pod_state_calc_fill_percent_int(&s_pod_state);
     if (fill_percent >= 0) {
-        snprintf(water_level_str, sizeof(water_level_str), "Water level: %d mm (%d%%)", water_level_mm, fill_percent);
+        snprintf(water_level_str, sizeof(water_level_str), "Water:%dmm(%d%%)", water_level_mm, fill_percent);
     } else {
-        snprintf(water_level_str, sizeof(water_level_str), "Water level: %d mm (Not cal)", water_level_mm);
+        snprintf(water_level_str, sizeof(water_level_str), "Water:%dmm(NC)", water_level_mm);
     }
     
     // Get plant info and calculate days growing
     plant_info_t plant_info = {0};
     esp_err_t plant_err = config_load_plant_info(&plant_info);
     if (plant_err == ESP_OK && strlen(plant_info.plant_name) > 0) {
-        snprintf(plant_name_str, sizeof(plant_name_str), "%s", plant_info.plant_name);
         int32_t days = config_get_days_growing(&plant_info);
         if (days >= 0) {
-            snprintf(plant_info_str, sizeof(plant_info_str), "Day: %ld", (long)days);
+            snprintf(plant_info_str, sizeof(plant_info_str), "%s - Day %ld", 
+                     plant_info.plant_name, (long)days);
         } else {
-            snprintf(plant_info_str, sizeof(plant_info_str), "Day: --");
+            snprintf(plant_info_str, sizeof(plant_info_str), "%s - Day --", 
+                     plant_info.plant_name);
         }
     } else {
-        snprintf(plant_name_str, sizeof(plant_name_str), "No plant set");
-        snprintf(plant_info_str, sizeof(plant_info_str), "Day: --");
+        snprintf(plant_info_str, sizeof(plant_info_str), "No plant set");
     }
 
-    // Read actuator states
+    // Update plant info and check if scrolling is needed
+    // Only reset scroll state if text changed
+    if (strcmp(plant_info_full_text, plant_info_str) != 0) {
+        strncpy(plant_info_full_text, plant_info_str, sizeof(plant_info_full_text) - 1);
+        plant_info_full_text[sizeof(plant_info_full_text) - 1] = '\0';
+        
+        // Check if text needs scrolling (leave ~10px margin on right)
+        text_needs_scroll = does_text_need_scroll(plant_info_full_text, SIZE_16_FONT, LCD_WIDTH - 10);
+        
+        // Create marquee text by duplicating with spacing for wrapping effect
+        if (text_needs_scroll) {
+            // Safely create wrapped text: "text     text"
+            size_t len = strlen(plant_info_full_text);
+            size_t max_len = sizeof(plant_info_display_text) - 1;
+            
+            // First part: original text
+            strncpy(plant_info_display_text, plant_info_full_text, max_len);
+            size_t pos = (len < max_len) ? len : max_len;
+            
+            // Middle part: spacing (5 spaces)
+            if (pos + 5 < max_len) {
+                memcpy(plant_info_display_text + pos, "     ", 5);
+                pos += 5;
+            }
+            
+            // Last part: repeated text
+            if (pos < max_len) {
+                strncpy(plant_info_display_text + pos, plant_info_full_text, max_len - pos);
+            }
+            
+            plant_info_display_text[max_len] = '\0';
+        } else {
+            strncpy(plant_info_display_text, plant_info_full_text, sizeof(plant_info_display_text) - 1);
+            plant_info_display_text[sizeof(plant_info_display_text) - 1] = '\0';
+        }
+        
+        // Reset scroll state when text changes
+        scroll_state = SCROLL_STATE_IDLE;
+        scroll_timer_ms = 0;
+        scroll_offset = 0;
+        lv_obj_set_x(plant_info_label, 3);
+    }
+    
+    lv_label_set_text(plant_info_label, plant_info_display_text);
+    
+    // For scrolling text, enable long mode to allow text to extend beyond width
+    if (text_needs_scroll) {
+        lv_label_set_long_mode(plant_info_label, LV_LABEL_LONG_CLIP);
+    } else {
+        lv_label_set_long_mode(plant_info_label, LV_LABEL_LONG_CLIP);
+    }
+    
+    // Update scrolling animation
+    update_plant_info_scroll();
+
+    // Read actuator states (compact format)
     const actuator_info_t *act = actuator_control_get_info();
     float planter_duty = act[ACTUATOR_IDX_PLANTER_PUMP].duty_percentage;
     float led_duty     = act[ACTUATOR_IDX_LED_ARRAY].duty_percentage;
-    snprintf(planter_pwm_str, sizeof(planter_pwm_str), "Planter: %.0f%%", planter_duty);
-    snprintf(led_pwm_str,     sizeof(led_pwm_str),     "LED: %.0f%%",     led_duty);
+    snprintf(planter_pwm_str, sizeof(planter_pwm_str), "Pump:%.0f%%", planter_duty);
+    snprintf(led_pwm_str,     sizeof(led_pwm_str),     "LED:%.0f%%",  led_duty);
 
-    // Update UI labels (uncomment as needed)
+    // Update UI labels (plant_info_label already updated above with scrolling)
     lv_label_set_text(current_label, current_str);
     lv_label_set_text(voltage_label, voltage_str);
     lv_label_set_text(power_label, power_str);
+    lv_label_set_text(temp_humidity_label, temp_humidity_str);
     lv_label_set_text(water_level_label, water_level_str);
-    lv_label_set_text(plant_name_label, plant_name_str);  // Show plant name
-    lv_label_set_text(timestamp_label, plant_info_str);  // Show days growing
     lv_label_set_text(planter_pwm_label, planter_pwm_str);
-    lv_label_set_text(led_pwm_label,     led_pwm_str);
+    lv_label_set_text(led_pwm_label, led_pwm_str);
 }
 
-#define SIZE_16_FONT  &lv_font_unscii_16
-#define SIZE_8_FONT   &lv_font_unscii_8
+/**
+ * @brief Check if text is too wide for the display
+ * @return true if text needs scrolling
+ */
+static bool does_text_need_scroll(const char *text, const lv_font_t *font, int16_t max_width)
+{
+    lv_point_t size;
+    lv_txt_get_size(&size, text, font, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+    return (size.x > max_width);
+}
+
+/**
+ * @brief Update scrolling animation for plant info label
+ * Called periodically from sensor update callback
+ * Implements circular/marquee scrolling with wrapping text
+ */
+static void update_plant_info_scroll(void)
+{
+    static uint32_t last_update_ms = 0;
+    uint32_t current_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
+    uint32_t elapsed_ms = current_ms - last_update_ms;
+    
+    if (!text_needs_scroll) {
+        // Text fits, no scrolling needed
+        scroll_state = SCROLL_STATE_IDLE;
+        scroll_offset = 0;
+        lv_obj_set_x(plant_info_label, 3);
+        return;
+    }
+    
+    // Get original text width (not the duplicated display text)
+    lv_point_t size;
+    lv_txt_get_size(&size, plant_info_full_text, SIZE_16_FONT, 0, 0, 
+                   LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+    int16_t text_width = size.x;
+    
+    // Calculate width of spacing (5 spaces in 16px font)
+    lv_point_t spacing_size;
+    lv_txt_get_size(&spacing_size, "     ", SIZE_16_FONT, 0, 0, 
+                   LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+    int16_t spacing_width = spacing_size.x;
+    
+    // Full cycle = original text + spacing between duplicates
+    int16_t full_cycle = text_width + spacing_width;
+    
+    switch (scroll_state) {
+        case SCROLL_STATE_IDLE:
+            // Pause at start position for 5 seconds
+            lv_obj_set_x(plant_info_label, 3);
+            scroll_offset = 0;
+            scroll_timer_ms += elapsed_ms;
+            if (scroll_timer_ms >= SCROLL_PAUSE_MS) {
+                scroll_state = SCROLL_STATE_SCROLLING;
+                scroll_timer_ms = 0;
+                scroll_offset = 0;
+            }
+            break;
+            
+        case SCROLL_STATE_SCROLLING:
+            // Continuously scroll LEFT (negative offset reveals text to the right)
+            scroll_timer_ms += elapsed_ms;
+            if (scroll_timer_ms >= SCROLL_SPEED_MS) {
+                scroll_offset -= 10;  // Move 10 pixels LEFT (negative = scroll left)
+                scroll_timer_ms = 0;
+                
+                // Check if we've completed one full cycle (text wrapped back to start)
+                // When offset reaches -(text_width + spacing), we've seen the full text wrap
+                if (scroll_offset <= -full_cycle) {
+                    // Reset to start and pause
+                    scroll_offset = 0;
+                    lv_obj_set_x(plant_info_label, 3);
+                    scroll_state = SCROLL_STATE_IDLE;
+                    scroll_timer_ms = 0;
+                } else {
+                    // Continue scrolling with wrapping effect
+                    lv_obj_set_x(plant_info_label, 3 + scroll_offset);
+                }
+            }
+            break;
+    }
+    
+    last_update_ms = current_ms;
+}
 
 void display_lvgl_init(void)
 {
@@ -152,68 +314,64 @@ void display_lvgl_init(void)
     lv_obj_clear_flag(lv_scr_act(), LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_scrollbar_mode(lv_scr_act(), LV_SCROLLBAR_MODE_OFF);
 
-    // Create title label (16 px high)
-    title_label = lv_label_create(lv_scr_act());
-    lv_obj_set_style_text_color(title_label, lv_color_white(), 0);
-    lv_obj_set_style_text_font(title_label, SIZE_16_FONT, LV_PART_MAIN);
-    lv_label_set_text(title_label, "GrowPod Sensors");
-    lv_obj_align(title_label, LV_ALIGN_TOP_MID, 0, 5);
+    // Top row: Plant name and days (y=3) - 16px font for prominence
+    plant_info_label = lv_label_create(lv_scr_act());
+    lv_obj_set_style_text_color(plant_info_label, lv_color_white(), 0);
+    lv_obj_set_style_text_font(plant_info_label, SIZE_16_FONT, LV_PART_MAIN);
+    lv_label_set_text(plant_info_label, "No plant set");
+    lv_obj_align(plant_info_label, LV_ALIGN_TOP_LEFT, 3, 3);
 
-    // Row y=25: current measurement
+    // Power metrics - Left column (compact)
+    // Row y=23: Current (adjusted down to account for larger font above)
     current_label = lv_label_create(lv_scr_act());
     lv_obj_set_style_text_color(current_label, lv_color_white(), 0);
     lv_obj_set_style_text_font(current_label, SIZE_8_FONT, LV_PART_MAIN);
-    lv_label_set_text(current_label, "Current: 0.00 mA");
-    lv_obj_align(current_label, LV_ALIGN_TOP_LEFT, 5, 25);
+    lv_label_set_text(current_label, "I:0.0mA");
+    lv_obj_align(current_label, LV_ALIGN_TOP_LEFT, 3, 23);
 
-    // Row y=37: voltage
+    // Row y=35: Voltage
     voltage_label = lv_label_create(lv_scr_act());
     lv_obj_set_style_text_color(voltage_label, lv_color_white(), 0);
     lv_obj_set_style_text_font(voltage_label, SIZE_8_FONT, LV_PART_MAIN);
-    lv_label_set_text(voltage_label, "Voltage: 0.00 mV");
-    lv_obj_align(voltage_label, LV_ALIGN_TOP_LEFT, 5, 37);
+    lv_label_set_text(voltage_label, "V:0.0mV");
+    lv_obj_align(voltage_label, LV_ALIGN_TOP_LEFT, 3, 35);
 
-    // Row y=49: power
+    // Row y=47: Power
     power_label = lv_label_create(lv_scr_act());
     lv_obj_set_style_text_color(power_label, lv_color_white(), 0);
     lv_obj_set_style_text_font(power_label, SIZE_8_FONT, LV_PART_MAIN);
-    lv_label_set_text(power_label, "Power:   0.00 mW");
-    lv_obj_align(power_label, LV_ALIGN_TOP_LEFT, 5, 49);
+    lv_label_set_text(power_label, "P:0.0mW");
+    lv_obj_align(power_label, LV_ALIGN_TOP_LEFT, 3, 47);
 
-    // Row y=61: water level
+    // Environment (spans full width)
+    // Row y=59: Temperature + Humidity
+    temp_humidity_label = lv_label_create(lv_scr_act());
+    lv_obj_set_style_text_color(temp_humidity_label, lv_color_white(), 0);
+    lv_obj_set_style_text_font(temp_humidity_label, SIZE_8_FONT, LV_PART_MAIN);
+    lv_label_set_text(temp_humidity_label, "0.0C(0F) 0%RH");
+    lv_obj_align(temp_humidity_label, LV_ALIGN_TOP_LEFT, 3, 59);
+
+    // Row y=71: Water level
     water_level_label = lv_label_create(lv_scr_act());
     lv_obj_set_style_text_color(water_level_label, lv_color_white(), 0);
     lv_obj_set_style_text_font(water_level_label, SIZE_8_FONT, LV_PART_MAIN);
-    lv_label_set_text(water_level_label, "Water level: 0 mm");
-    lv_obj_align(water_level_label, LV_ALIGN_TOP_LEFT, 5, 61);
+    lv_label_set_text(water_level_label, "Water:0mm(0%)");
+    lv_obj_align(water_level_label, LV_ALIGN_TOP_LEFT, 3, 71);
 
-    // Row y=73: planter PWM
+    // Actuators - Bottom rows
+    // Row y=83: Planter PWM
     planter_pwm_label = lv_label_create(lv_scr_act());
     lv_obj_set_style_text_color(planter_pwm_label, lv_color_white(), 0);
     lv_obj_set_style_text_font(planter_pwm_label, SIZE_8_FONT, LV_PART_MAIN);
-    lv_label_set_text(planter_pwm_label, "Planter: 0%");
-    lv_obj_align(planter_pwm_label, LV_ALIGN_TOP_LEFT, 5, 73);
+    lv_label_set_text(planter_pwm_label, "Pump:0%");
+    lv_obj_align(planter_pwm_label, LV_ALIGN_TOP_LEFT, 3, 83);
 
-    // Row y=85: LED PWM
+    // Row y=95: LED PWM
     led_pwm_label = lv_label_create(lv_scr_act());
     lv_obj_set_style_text_color(led_pwm_label, lv_color_white(), 0);
     lv_obj_set_style_text_font(led_pwm_label, SIZE_8_FONT, LV_PART_MAIN);
-    lv_label_set_text(led_pwm_label, "LED: 0%");
-    lv_obj_align(led_pwm_label, LV_ALIGN_TOP_LEFT, 5, 85);
-
-    // Plant name bottom right (above days growing)
-    plant_name_label = lv_label_create(lv_scr_act());
-    lv_obj_set_style_text_color(plant_name_label, lv_color_white(), 0);
-    lv_obj_set_style_text_font(plant_name_label, SIZE_8_FONT, LV_PART_MAIN);
-    lv_label_set_text(plant_name_label, "No plant set");
-    lv_obj_align(plant_name_label, LV_ALIGN_BOTTOM_RIGHT, -5, -24);  // Above the day counter
-    
-    // Plant info bottom right (days growing)
-    timestamp_label = lv_label_create(lv_scr_act());
-    lv_obj_set_style_text_color(timestamp_label, lv_color_white(), 0);
-    lv_obj_set_style_text_font(timestamp_label, SIZE_8_FONT, LV_PART_MAIN);
-    lv_label_set_text(timestamp_label, "Day: --");
-    lv_obj_align(timestamp_label, LV_ALIGN_BOTTOM_RIGHT, -5, -12);  // Increased offset from -5 to -12
+    lv_label_set_text(led_pwm_label, "LED:0%");
+    lv_obj_align(led_pwm_label, LV_ALIGN_TOP_LEFT, 3, 95);
 
     // Create LVGL timer for sensor updates (250ms = 4Hz)
     sensor_update_timer = lv_timer_create(lvgl_sensor_update_cb, 250, NULL);
