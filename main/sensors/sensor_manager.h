@@ -46,10 +46,10 @@ typedef enum {
  * @brief Sensor reading priority levels
  */
 typedef enum {
-    SENSOR_PRIORITY_LOW = 0,    // Polled every 20+ cycles (~20s)
-    SENSOR_PRIORITY_MEDIUM,     // Polled every 10 cycles (~10s)
-    SENSOR_PRIORITY_HIGH,       // Polled every 5 cycles (~5s)
-    SENSOR_PRIORITY_CRITICAL    // Polled every cycle (~1s)
+    SENSOR_PRIORITY_LOW = 0,    // Polled every 50 cycles (~5s)
+    SENSOR_PRIORITY_MEDIUM,     // Polled every 25 cycles (~2.5s)
+    SENSOR_PRIORITY_HIGH,       // Polled every 10 cycles (~1s)
+    SENSOR_PRIORITY_CRITICAL    // Polled every 5 cycles (~500ms)
 } sensor_priority_t;
 
 /**
@@ -120,7 +120,7 @@ typedef struct {
 typedef struct {
     uint32_t task_stack_size;       // Stack size for sensor task (default: 4096)
     UBaseType_t task_priority;      // FreeRTOS task priority (default: 5)
-    uint32_t poll_period_ms;        // Base polling period in ms (default: 1000)
+    uint32_t poll_period_ms;        // Base polling period in ms (default: 100)
     uint32_t cache_timeout_ms;      // Max age of cached data (default: 5000)
     size_t request_queue_size;      // Size of request queue (default: 10)
 } sensor_manager_config_t;

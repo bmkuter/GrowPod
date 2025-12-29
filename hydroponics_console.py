@@ -12,6 +12,17 @@ from datetime import datetime, timedelta
 import time
 import tkinter as tk
 from tkinter import messagebox, ttk
+import csv
+from collections import deque
+import matplotlib
+matplotlib.use('TkAgg')  # Use TkAgg backend for embedding in tkinter
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from matplotlib.figure import Figure
+import matplotlib.dates as mdates
+
+# Add SQLite for persistent historical data storage
+import sqlite3
 
 # JUST FOR DEBUG, REMOVE ME DURING PRODUCTION
 import urllib3
@@ -95,6 +106,299 @@ devices = {}
 # Initialize the scheduler
 scheduler = BackgroundScheduler()
 scheduler.start()
+
+# =============================================================================
+# Sensor Data Storage and Graphing
+# =============================================================================
+
+# Create data directory for sensor logs
+data_dir = os.path.join(script_dir, 'sensor_data')
+os.makedirs(data_dir, exist_ok=True)
+
+# In-memory data storage for graphing (last N readings)
+MAX_GRAPH_POINTS = 100  # Keep last 100 data points in memory for graphing
+
+class SensorDatabase:
+    """Handles persistent sensor data storage using SQLite"""
+    
+    def __init__(self, device_name):
+        self.device_name = device_name
+        self.db_path = os.path.join(data_dir, f"{device_name}_history.db")
+        self.conn = None
+        self._connect()
+        self._create_schema()
+    
+    def _connect(self):
+        """Establish database connection"""
+        self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        self.conn.row_factory = sqlite3.Row  # Enable column access by name
+        
+        # Enable WAL mode for better concurrency
+        self.conn.execute("PRAGMA journal_mode=WAL")
+        self.conn.execute("PRAGMA synchronous=NORMAL")
+        
+    def _create_schema(self):
+        """Create database schema if it doesn't exist"""
+        cursor = self.conn.cursor()
+        
+        # Create main sensor readings table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS sensor_readings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp INTEGER NOT NULL,
+                temperature_c REAL,
+                humidity_rh REAL,
+                light_lux REAL,
+                light_visible INTEGER,
+                light_infrared INTEGER,
+                power_mw REAL,
+                current_ma REAL,
+                voltage_mv REAL,
+                water_level_mm REAL,
+                UNIQUE(timestamp) ON CONFLICT IGNORE
+            )
+        """)
+        
+        # Create index on timestamp for fast time-range queries
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_timestamp 
+            ON sensor_readings(timestamp)
+        """)
+        
+        # Create metadata table for tracking sync status
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS sync_metadata (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )
+        """)
+        
+        self.conn.commit()
+        logging.info(f"Database initialized: {self.db_path}")
+    
+    def insert_readings(self, readings):
+        """
+        Insert multiple sensor readings (batch insert)
+        
+        Args:
+            readings: List of dicts with keys matching column names
+                     Each dict must have 'timestamp' key
+        
+        Returns:
+            Number of rows inserted (duplicates are ignored)
+        """
+        if not readings:
+            return 0
+        
+        cursor = self.conn.cursor()
+        
+        insert_sql = """
+            INSERT OR IGNORE INTO sensor_readings 
+            (timestamp, temperature_c, humidity_rh, light_lux, light_visible, 
+             light_infrared, power_mw, current_ma, voltage_mv, water_level_mm)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """
+        
+        rows = []
+        for reading in readings:
+            rows.append((
+                reading['timestamp'],
+                reading.get('temperature_c'),
+                reading.get('humidity_rh'),
+                reading.get('light_lux'),
+                reading.get('light_visible'),
+                reading.get('light_infrared'),
+                reading.get('power_mw'),
+                reading.get('current_ma'),
+                reading.get('voltage_mv'),
+                reading.get('water_level_mm')
+            ))
+        
+        cursor.executemany(insert_sql, rows)
+        inserted = cursor.rowcount
+        self.conn.commit()
+        
+        return inserted
+    
+    def get_latest_timestamp(self):
+        """
+        Get the most recent timestamp in the database
+        
+        Returns:
+            Integer timestamp or 0 if database is empty
+        """
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT MAX(timestamp) FROM sensor_readings")
+        result = cursor.fetchone()
+        
+        return result[0] if result[0] is not None else 0
+    
+    def get_readings(self, start_timestamp=None, end_timestamp=None, limit=None):
+        """
+        Query sensor readings within a time range
+        
+        Args:
+            start_timestamp: Unix timestamp (inclusive), None for no lower bound
+            end_timestamp: Unix timestamp (inclusive), None for no upper bound
+            limit: Maximum number of rows to return, None for all
+        
+        Returns:
+            List of dicts containing sensor readings
+        """
+        cursor = self.conn.cursor()
+        
+        query = "SELECT * FROM sensor_readings WHERE 1=1"
+        params = []
+        
+        if start_timestamp is not None:
+            query += " AND timestamp >= ?"
+            params.append(start_timestamp)
+        
+        if end_timestamp is not None:
+            query += " AND timestamp <= ?"
+            params.append(end_timestamp)
+        
+        query += " ORDER BY timestamp ASC"
+        
+        if limit is not None:
+            query += " LIMIT ?"
+            params.append(limit)
+        
+        cursor.execute(query, params)
+        rows = cursor.fetchall()
+        
+        # Convert to list of dicts
+        return [dict(row) for row in rows]
+    
+    def get_count(self, start_timestamp=None, end_timestamp=None):
+        """Get count of readings in database within optional time range"""
+        cursor = self.conn.cursor()
+        
+        query = "SELECT COUNT(*) FROM sensor_readings WHERE 1=1"
+        params = []
+        
+        if start_timestamp is not None:
+            query += " AND timestamp >= ?"
+            params.append(start_timestamp)
+        
+        if end_timestamp is not None:
+            query += " AND timestamp <= ?"
+            params.append(end_timestamp)
+        
+        cursor.execute(query, params)
+        return cursor.fetchone()[0]
+    
+    def get_stats(self):
+        """Get database statistics"""
+        cursor = self.conn.cursor()
+        
+        cursor.execute("""
+            SELECT 
+                COUNT(*) as total_entries,
+                MIN(timestamp) as oldest_timestamp,
+                MAX(timestamp) as newest_timestamp
+            FROM sensor_readings
+        """)
+        
+        row = cursor.fetchone()
+        return dict(row) if row else None
+    
+    def close(self):
+        """Close database connection"""
+        if self.conn:
+            self.conn.close()
+            self.conn = None
+
+class SensorDataLogger:
+    """Handles sensor data logging to CSV and in-memory storage for graphing"""
+    
+    def __init__(self, device_name):
+        self.device_name = device_name
+        self.csv_file = os.path.join(data_dir, f"{device_name}_sensor_data.csv")
+        
+        # In-memory storage using deque for efficient append/pop
+        self.timestamps = deque(maxlen=MAX_GRAPH_POINTS)
+        self.temperature = deque(maxlen=MAX_GRAPH_POINTS)
+        self.humidity = deque(maxlen=MAX_GRAPH_POINTS)
+        self.light_lux = deque(maxlen=MAX_GRAPH_POINTS)
+        self.light_visible = deque(maxlen=MAX_GRAPH_POINTS)
+        self.light_infrared = deque(maxlen=MAX_GRAPH_POINTS)
+        self.power_mw = deque(maxlen=MAX_GRAPH_POINTS)
+        self.current_ma = deque(maxlen=MAX_GRAPH_POINTS)
+        self.voltage_mv = deque(maxlen=MAX_GRAPH_POINTS)
+        self.water_level_mm = deque(maxlen=MAX_GRAPH_POINTS)
+        
+        # Create CSV file with headers if it doesn't exist
+        if not os.path.exists(self.csv_file):
+            with open(self.csv_file, 'w', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow([
+                    'timestamp', 'temperature_c', 'humidity_rh', 'light_lux', 
+                    'light_visible', 'light_infrared', 'power_mw', 'current_ma', 
+                    'voltage_mv', 'water_level_mm'
+                ])
+    
+    def log_data(self, sensor_data):
+        """
+        Log sensor data to CSV and in-memory storage
+        
+        Args:
+            sensor_data: Dictionary from /api/unit-metrics JSON response
+        """
+        timestamp = datetime.now()
+        
+        # Extract data with defaults for unavailable sensors
+        temp_c = sensor_data.get('temperature_c', -999)
+        humidity = sensor_data.get('humidity_rh', -999)
+        lux = sensor_data.get('light_lux', -999)
+        visible = sensor_data.get('light_visible', 0)
+        infrared = sensor_data.get('light_infrared', 0)
+        power = sensor_data.get('power_consumption_mW', 0)
+        current = sensor_data.get('current_mA', 0)
+        voltage = sensor_data.get('voltage_mV', 0)
+        water = sensor_data.get('water_level_mm', -1)
+        
+        # Store in memory (only valid data for graphing)
+        self.timestamps.append(timestamp)
+        self.temperature.append(temp_c if temp_c != -999 else None)
+        self.humidity.append(humidity if humidity != -999 else None)
+        self.light_lux.append(lux if lux != -999 else None)
+        self.light_visible.append(visible if visible > 0 else None)
+        self.light_infrared.append(infrared if infrared > 0 else None)
+        self.power_mw.append(power)
+        self.current_ma.append(current)
+        self.voltage_mv.append(voltage)
+        self.water_level_mm.append(water if water >= 0 else None)
+        
+        # Append to CSV file
+        try:
+            with open(self.csv_file, 'a', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow([
+                    timestamp.strftime('%Y-%m-%d %H:%M:%S'),
+                    temp_c, humidity, lux, visible, infrared,
+                    power, current, voltage, water
+                ])
+        except Exception as e:
+            logger.error(f"Failed to write sensor data to CSV: {e}")
+    
+    def get_graph_data(self):
+        """Return current in-memory data for graphing"""
+        return {
+            'timestamps': list(self.timestamps),
+            'temperature': list(self.temperature),
+            'humidity': list(self.humidity),
+            'light_lux': list(self.light_lux),
+            'light_visible': list(self.light_visible),
+            'light_infrared': list(self.light_infrared),
+            'power_mw': list(self.power_mw),
+            'current_ma': list(self.current_ma),
+            'voltage_mv': list(self.voltage_mv),
+            'water_level_mm': list(self.water_level_mm)
+        }
+
+# Global dictionary to store data loggers per device
+sensor_data_loggers = {}
 
 def prompt_schedule_24(initial_schedule=None):
     """
@@ -985,6 +1289,86 @@ def prompt_unified_schedule_manager(initial_light_schedule=None, initial_planter
 # Unified GUI Launcher - Main Application Interface
 # =============================================================================
 
+def sync_historical_data(console_instance, database):
+    """
+    Sync historical sensor data from device to local database.
+    Only requests data since the last recorded timestamp (gap filling).
+    
+    Args:
+        console_instance: HydroponicsConsole instance with session
+        database: SensorDatabase instance
+    
+    Returns:
+        Tuple of (success: bool, new_entries: int, message: str)
+    """
+    device_name = console_instance.selected_device
+    device_info = devices.get(device_name)
+    
+    if not device_info:
+        return (False, 0, "Device not found")
+    
+    # Get the latest timestamp we have in our database
+    last_timestamp = database.get_latest_timestamp()
+    
+    logging.info(f"Syncing historical data for {device_name}")
+    logging.info(f"Latest local timestamp: {last_timestamp}")
+    
+    try:
+        # Build API URL
+        base_url = f"https://{device_info['address']}:{device_info['port']}"
+        
+        if last_timestamp > 0:
+            # Request only data since our last timestamp
+            url = f"{base_url}/api/sensor-history?start={last_timestamp + 1}"
+            logging.info(f"Requesting data since timestamp {last_timestamp + 1}")
+        else:
+            # No existing data, get everything the device has
+            url = f"{base_url}/api/sensor-history"
+            logging.info("No existing data, requesting full history")
+        
+        # Make request with timeout
+        response = console_instance.session.get(url, timeout=30, verify=False)
+        response.raise_for_status()
+        
+        data = response.json()
+        
+        readings = data.get('readings', [])
+        stats = data.get('stats', {})
+        
+        logging.info(f"Received {len(readings)} readings from device")
+        logging.info(f"Device stats: {stats}")
+        
+        if readings:
+            # Insert readings into database (duplicates are automatically ignored)
+            inserted = database.insert_readings(readings)
+            
+            # Get updated database stats
+            db_stats = database.get_stats()
+            
+            message = f"Sync complete: {inserted} new entries added"
+            if db_stats:
+                total = db_stats['total_entries']
+                oldest = datetime.fromtimestamp(db_stats['oldest_timestamp']).strftime('%Y-%m-%d %H:%M:%S')
+                newest = datetime.fromtimestamp(db_stats['newest_timestamp']).strftime('%Y-%m-%d %H:%M:%S')
+                message += f"\nDatabase now has {total} total entries"
+                message += f"\nTime range: {oldest} to {newest}"
+            
+            logging.info(message)
+            return (True, inserted, message)
+        else:
+            message = "No new data to sync (database is up to date)"
+            logging.info(message)
+            return (True, 0, message)
+    
+    except requests.exceptions.RequestException as e:
+        error_msg = f"Failed to sync historical data: {e}"
+        logging.error(error_msg)
+        return (False, 0, error_msg)
+    except Exception as e:
+        error_msg = f"Unexpected error during sync: {e}"
+        logging.error(error_msg)
+        return (False, 0, error_msg)
+
 def launch_unified_gui(console_instance):
     """
     Main GUI application launcher that combines all features into a tabbed interface.
@@ -1090,17 +1474,74 @@ def launch_unified_gui(console_instance):
     notebook.add(schedules_tab, text="⚙️ Legacy Schedule Manager")
     create_schedules_tab(schedules_tab, console_instance)
     
+    # Handle tab changes - manage auto-refresh based on active tab
+    def on_tab_change(event):
+        current_tab = notebook.index(notebook.select())
+        # Dashboard is tab 0
+        if current_tab == 0:
+            # Restart auto-refresh when returning to dashboard
+            if hasattr(dashboard_tab, 'start_auto_refresh'):
+                dashboard_tab.start_auto_refresh()
+        else:
+            # Stop auto-refresh when leaving dashboard
+            if hasattr(dashboard_tab, 'stop_auto_refresh'):
+                dashboard_tab.stop_auto_refresh()
+    
+    notebook.bind("<<NotebookTabChanged>>", on_tab_change)
+    
+    # Handle window close - cleanup auto-refresh timer and database
+    def on_closing():
+        """Clean up resources when window is closed"""
+        if hasattr(dashboard_tab, 'stop_auto_refresh'):
+            dashboard_tab.stop_auto_refresh()
+        if hasattr(dashboard_tab, 'stop_periodic_sync'):
+            dashboard_tab.stop_periodic_sync()
+        if hasattr(dashboard_tab, 'database'):
+            dashboard_tab.database.close()
+        root.destroy()
+    
+    root.protocol("WM_DELETE_WINDOW", on_closing)
+    
     root.mainloop()
 
 
 def create_dashboard_tab(parent_frame, console_instance):
     """
     Create the Dashboard tab.
-    Shows device metadata, current sensor readings, and system status.
+    Shows device metadata, current sensor readings, and system status on the left.
+    Shows real-time graphs on the right.
     """
-    # Main container with scrollbar
-    canvas = tk.Canvas(parent_frame)
-    scrollbar = tk.Scrollbar(parent_frame, orient="vertical", command=canvas.yview)
+    # Initialize or get data logger for this device
+    device_name = console_instance.selected_device
+    if device_name not in sensor_data_loggers:
+        sensor_data_loggers[device_name] = SensorDataLogger(device_name)
+    data_logger = sensor_data_loggers[device_name]
+    
+    # Initialize database for persistent historical storage
+    database = SensorDatabase(device_name)
+    
+    # Sync historical data from device to local database
+    logging.info(f"Syncing historical data for {device_name}...")
+    success, new_entries, sync_message = sync_historical_data(console_instance, database)
+    
+    if success:
+        if new_entries > 0:
+            logging.info(f"[OK] Sync successful: {new_entries} new entries")
+        else:
+            logging.info("[OK] Database already up to date")
+    else:
+        logging.warning(f"[WARN] Sync failed: {sync_message}")
+    
+    # Split the frame into left (info) and right (graphs)
+    left_frame = tk.Frame(parent_frame)
+    left_frame.pack(side="left", fill="both", expand=False, padx=(0, 10))
+    
+    right_frame = tk.Frame(parent_frame)
+    right_frame.pack(side="right", fill="both", expand=True)
+    
+    # ========== LEFT PANEL: Sensor Info (with scrollbar) ==========
+    canvas = tk.Canvas(left_frame, width=600)
+    scrollbar = tk.Scrollbar(left_frame, orient="vertical", command=canvas.yview)
     scrollable_frame = tk.Frame(canvas)
     
     scrollable_frame.bind(
@@ -1189,6 +1630,9 @@ def create_dashboard_tab(parent_frame, console_instance):
             if response.status_code == 200:
                 data = response.json()
                 
+                # Log data for historical storage and graphing
+                data_logger.log_data(data)
+                
                 # Update MAC address if available
                 if 'mac_address' in data:
                     devices[console_instance.selected_device]['mac'] = data['mac_address']
@@ -1198,6 +1642,36 @@ def create_dashboard_tab(parent_frame, console_instance):
                 sensor_labels['total_voltage'].config(text=f"{data.get('voltage_mV', 0):.2f} mV")
                 sensor_labels['total_power'].config(text=f"{data.get('power_consumption_mW', 0):.2f} mW")
                 sensor_labels['water_level'].config(text=f"{data.get('water_level_mm', -1)} mm")
+                
+                # Environment sensors
+                temp_c = data.get('temperature_c', -999)
+                humidity = data.get('humidity_rh', -999)
+                if temp_c != -999:
+                    temp_f = (temp_c * 9/5) + 32
+                    sensor_labels['temperature'].config(text=f"{temp_c:.1f}°C ({temp_f:.1f}°F)")
+                else:
+                    sensor_labels['temperature'].config(text="N/A")
+                
+                if humidity != -999:
+                    sensor_labels['humidity'].config(text=f"{humidity:.1f}%")
+                else:
+                    sensor_labels['humidity'].config(text="N/A")
+                
+                # Light sensor
+                lux = data.get('light_lux', -999)
+                visible = data.get('light_visible', 0)
+                infrared = data.get('light_infrared', 0)
+                if lux != -999:
+                    sensor_labels['light_lux'].config(text=f"{lux:.1f} lux")
+                    sensor_labels['light_visible'].config(text=f"{visible}")
+                    sensor_labels['light_infrared'].config(text=f"{infrared}")
+                else:
+                    sensor_labels['light_lux'].config(text="N/A")
+                    sensor_labels['light_visible'].config(text="N/A")
+                    sensor_labels['light_infrared'].config(text="N/A")
+                
+                # Update graphs
+                update_graphs()
                 
                 status_label.config(text="✅ Sensor data updated", fg="#27ae60")
             else:
@@ -1224,13 +1698,52 @@ def create_dashboard_tab(parent_frame, console_instance):
         sensor_labels[key] = tk.Label(row_frame, text=f"0.00 {unit}", font=("Arial", 10), fg="#2c3e50", anchor="w")
         sensor_labels[key].pack(side="left", padx=10)
     
+    # Environment sensors display
+    env_subframe = tk.LabelFrame(sensor_frame, text="Environment Sensors", padx=15, pady=10)
+    env_subframe.pack(fill="x", pady=5)
+    
+    env_items = [
+        ("Temperature:", "temperature", "🌡️", "°C"),
+        ("Humidity:", "humidity", "💧", "%RH")
+    ]
+    
+    for i, (label, key, icon, unit) in enumerate(env_items):
+        row_frame = tk.Frame(env_subframe)
+        row_frame.pack(fill="x", pady=5)
+        
+        # Use grid for better alignment control - separate emoji and text
+        tk.Label(row_frame, text=icon, font=("Arial", 10, "bold"), anchor="w", width=3).grid(row=0, column=0, sticky="w", padx=(0, 5))
+        tk.Label(row_frame, text=label, font=("Arial", 10, "bold"), anchor="w", width=15).grid(row=0, column=1, sticky="w")
+        sensor_labels[key] = tk.Label(row_frame, text=f"N/A", font=("Arial", 10), fg="#2c3e50", anchor="w")
+        sensor_labels[key].grid(row=0, column=2, sticky="w", padx=(10, 0))
+    
+    # Light sensor display
+    light_subframe = tk.LabelFrame(sensor_frame, text="Light Sensor (TSL2591)", padx=15, pady=10)
+    light_subframe.pack(fill="x", pady=5)
+    
+    light_items = [
+        ("Illuminance:", "light_lux", "☀️", "lux"),
+        ("Visible Light:", "light_visible", "👁️", "counts"),
+        ("Infrared:", "light_infrared", "🔴", "counts")
+    ]
+    
+    for i, (label, key, icon, unit) in enumerate(light_items):
+        row_frame = tk.Frame(light_subframe)
+        row_frame.pack(fill="x", pady=5)
+        
+        # Use grid for better alignment control
+        tk.Label(row_frame, text=icon, font=("Arial", 10, "bold"), anchor="w", width=3).grid(row=0, column=0, sticky="w", padx=(0, 5))
+        tk.Label(row_frame, text=label, font=("Arial", 10, "bold"), anchor="w", width=15).grid(row=0, column=1, sticky="w")
+        sensor_labels[key] = tk.Label(row_frame, text=f"N/A", font=("Arial", 10), fg="#2c3e50", anchor="w")
+        sensor_labels[key].grid(row=0, column=2, sticky="w", padx=(10, 0))
+    
     # Additional sensors placeholder (for future expansion)
     additional_subframe = tk.LabelFrame(sensor_frame, text="Additional Sensors (Future Expansion)", padx=15, pady=10)
     additional_subframe.pack(fill="x", pady=5)
     
     tk.Label(
         additional_subframe,
-        text="Per-actuator power metrics, temperature, humidity, pH, EC, and other sensors will appear here",
+        text="Per-actuator power metrics, pH, EC, and other sensors will appear here",
         font=("Arial", 9),
         fg="#999"
     ).pack(pady=10)
@@ -1258,8 +1771,251 @@ def create_dashboard_tab(parent_frame, console_instance):
     status_label = tk.Label(scrollable_frame, text="Ready", font=("Arial", 10), fg="#555")
     status_label.pack(side="bottom", fill="x", pady=10)
     
-    # Initial load
-    refresh_all()
+    # ========== RIGHT PANEL: Real-time Graphs ==========
+    # Create matplotlib figure with subplots
+    fig = Figure(figsize=(10, 12), dpi=100, facecolor='#f0f0f0')
+    fig.subplots_adjust(hspace=0.4, left=0.1, right=0.95, top=0.97, bottom=0.08)
+    
+    # Create 4 subplots stacked vertically
+    ax_temp_humid = fig.add_subplot(411)
+    ax_light = fig.add_subplot(412)
+    ax_power = fig.add_subplot(413)
+    ax_water = fig.add_subplot(414)
+    
+    # Configure each subplot
+    ax_temp_humid.set_title("Temperature & Humidity", fontsize=11, fontweight='bold')
+    ax_temp_humid.set_ylabel("Temp (°C) / Humidity (%)", fontsize=9)
+    ax_temp_humid.grid(True, alpha=0.3)
+    ax_temp_humid.tick_params(labelsize=8)
+    
+    ax_light.set_title("Light Sensor (Illuminance)", fontsize=11, fontweight='bold')
+    ax_light.set_ylabel("Illuminance (lux)", fontsize=9)
+    ax_light.grid(True, alpha=0.3)
+    ax_light.tick_params(labelsize=8)
+    
+    ax_power.set_title("Power & Current", fontsize=11, fontweight='bold')
+    ax_power.set_ylabel("Power (mW) / Current (mA)", fontsize=9)
+    ax_power.grid(True, alpha=0.3)
+    ax_power.tick_params(labelsize=8)
+    
+    ax_water.set_title("Water Level", fontsize=11, fontweight='bold')
+    ax_water.set_ylabel("Level (mm)", fontsize=9)
+    ax_water.set_xlabel("Time", fontsize=9)
+    ax_water.grid(True, alpha=0.3)
+    ax_water.tick_params(labelsize=8)
+    
+    # Format x-axis to show time nicely
+    time_formatter = mdates.DateFormatter('%H:%M:%S')
+    for ax in [ax_temp_humid, ax_light, ax_power, ax_water]:
+        ax.xaxis.set_major_formatter(time_formatter)
+        ax.tick_params(axis='x', rotation=45)
+    
+    # Embed the figure in tkinter
+    canvas_graph = FigureCanvasTkAgg(fig, master=right_frame)
+    canvas_graph.draw()
+    canvas_graph.get_tk_widget().pack(fill="both", expand=True)
+    
+    # Initialize line objects (will be updated with data)
+    line_temp, = ax_temp_humid.plot([], [], 'r-', label='Temperature (°C)', linewidth=2)
+    line_humid, = ax_temp_humid.plot([], [], 'b-', label='Humidity (%)', linewidth=2)
+    ax_temp_humid.legend(loc='upper left', fontsize=8)
+    
+    line_lux, = ax_light.plot([], [], 'orange', label='Illuminance (lux)', linewidth=2)
+    ax_light.legend(loc='upper left', fontsize=8)
+    
+    line_power, = ax_power.plot([], [], 'g-', label='Power (mW)', linewidth=2)
+    line_current, = ax_power.plot([], [], 'purple', label='Current (mA)', linewidth=2)
+    ax_power.legend(loc='upper left', fontsize=8)
+    
+    line_water, = ax_water.plot([], [], 'cyan', label='Water Level (mm)', linewidth=2, marker='o', markersize=3)
+    ax_water.legend(loc='upper left', fontsize=8)
+    
+    def update_graphs():
+        """Update all graphs with data from database (last 24 hours by default)"""
+        try:
+            # Query last 24 hours from database
+            current_time = int(time.time())
+            start_time = current_time - (24 * 60 * 60)  # 24 hours ago
+            
+            readings = database.get_readings(start_timestamp=start_time, end_timestamp=current_time)
+            
+            if not readings:
+                return  # No data yet
+            
+            # Convert database readings to lists for plotting
+            timestamps = []
+            temperature = []
+            humidity = []
+            light_lux = []
+            power_mw = []
+            current_ma = []
+            water_level_mm = []
+            
+            for reading in readings:
+                ts = datetime.fromtimestamp(reading['timestamp'])
+                timestamps.append(ts)
+                
+                # Use None for invalid sensor values
+                temperature.append(reading['temperature_c'] if reading['temperature_c'] not in [None, -999] else None)
+                humidity.append(reading['humidity_rh'] if reading['humidity_rh'] not in [None, -999] else None)
+                light_lux.append(reading['light_lux'] if reading['light_lux'] not in [None, -999] else None)
+                power_mw.append(reading['power_mw'] if reading['power_mw'] is not None else None)
+                current_ma.append(reading['current_ma'] if reading['current_ma'] is not None else None)
+                water_level_mm.append(reading['water_level_mm'] if reading['water_level_mm'] not in [None, -1] else None)
+            
+            # Filter out None values for plotting
+            def filter_data(times, values):
+                filtered_times = []
+                filtered_values = []
+                for t, v in zip(times, values):
+                    if v is not None:
+                        filtered_times.append(t)
+                        filtered_values.append(v)
+                return filtered_times, filtered_values
+            
+            # Update temperature & humidity
+            temp_times, temp_values = filter_data(timestamps, temperature)
+            humid_times, humid_values = filter_data(timestamps, humidity)
+            
+            line_temp.set_data(temp_times, temp_values)
+            line_humid.set_data(humid_times, humid_values)
+            
+            if temp_times or humid_times:
+                all_times = temp_times + humid_times
+                all_values = temp_values + humid_values
+                # Add small padding if min==max to avoid singular transformation
+                time_min, time_max = min(all_times), max(all_times)
+                if time_min == time_max:
+                    time_min = time_min - timedelta(seconds=30)
+                    time_max = time_max + timedelta(seconds=30)
+                ax_temp_humid.set_xlim(time_min, time_max)
+                ax_temp_humid.set_ylim(min(all_values) - 5, max(all_values) + 5)
+            
+            # Update light
+            lux_times, lux_values = filter_data(timestamps, light_lux)
+            line_lux.set_data(lux_times, lux_values)
+            
+            if lux_times:
+                time_min, time_max = min(lux_times), max(lux_times)
+                if time_min == time_max:
+                    time_min = time_min - timedelta(seconds=30)
+                    time_max = time_max + timedelta(seconds=30)
+                ax_light.set_xlim(time_min, time_max)
+                ax_light.set_ylim(0, max(lux_values) * 1.1 if lux_values else 100)
+            
+            # Update power & current
+            power_times, power_values = filter_data(timestamps, power_mw)
+            current_times, current_values = filter_data(timestamps, current_ma)
+            
+            line_power.set_data(power_times, power_values)
+            line_current.set_data(current_times, current_values)
+            
+            if power_times or current_times:
+                all_times = power_times + current_times
+                all_values = power_values + current_values
+                time_min, time_max = min(all_times), max(all_times)
+                if time_min == time_max:
+                    time_min = time_min - timedelta(seconds=30)
+                    time_max = time_max + timedelta(seconds=30)
+                ax_power.set_xlim(time_min, time_max)
+                ax_power.set_ylim(0, max(all_values) * 1.1 if all_values else 100)
+            
+            # Update water level
+            water_times, water_values = filter_data(timestamps, water_level_mm)
+            line_water.set_data(water_times, water_values)
+            
+            if water_times:
+                time_min, time_max = min(water_times), max(water_times)
+                if time_min == time_max:
+                    time_min = time_min - timedelta(seconds=30)
+                    time_max = time_max + timedelta(seconds=30)
+                ax_water.set_xlim(time_min, time_max)
+                ax_water.set_ylim(0, max(water_values) * 1.2 if water_values else 100)
+            
+            # Redraw the canvas
+            canvas_graph.draw()
+            
+        except Exception as e:
+            logging.error(f"Failed to update graphs: {e}", exc_info=True)
+    
+    # Auto-refresh mechanism (every 5 seconds)
+    auto_refresh_id = None
+    auto_refresh_enabled = True  # Flag to track if auto-refresh should run
+    
+    def auto_refresh():
+        """Automatically refresh sensor data every 5 seconds"""
+        nonlocal auto_refresh_id, auto_refresh_enabled
+        if auto_refresh_enabled:
+            try:
+                refresh_all()
+                # Schedule next refresh in 5000ms (5 seconds)
+                auto_refresh_id = scrollable_frame.after(5000, auto_refresh)
+            except tk.TclError:
+                # Widget was destroyed, stop the refresh
+                auto_refresh_enabled = False
+                auto_refresh_id = None
+    
+    def stop_auto_refresh():
+        """Stop the auto-refresh timer"""
+        nonlocal auto_refresh_id, auto_refresh_enabled
+        auto_refresh_enabled = False
+        if auto_refresh_id is not None:
+            scrollable_frame.after_cancel(auto_refresh_id)
+            auto_refresh_id = None
+    
+    def start_auto_refresh():
+        """Start or restart the auto-refresh timer"""
+        nonlocal auto_refresh_id, auto_refresh_enabled
+        auto_refresh_enabled = True
+        # Cancel any existing timer first
+        if auto_refresh_id is not None:
+            scrollable_frame.after_cancel(auto_refresh_id)
+        # Refresh immediately and schedule next
+        refresh_all()
+        auto_refresh_id = scrollable_frame.after(5000, auto_refresh)
+    
+    # Store functions so they can be called when switching tabs
+    parent_frame.stop_auto_refresh = stop_auto_refresh
+    parent_frame.start_auto_refresh = start_auto_refresh
+    
+    # Periodic database sync (every 5 minutes to catch new historical data)
+    sync_timer_id = None
+    sync_enabled = True
+    
+    def periodic_sync():
+        """Sync database with device every 5 minutes"""
+        nonlocal sync_timer_id, sync_enabled
+        if sync_enabled:
+            try:
+                logging.info("Performing periodic database sync...")
+                success, new_entries, sync_message = sync_historical_data(console_instance, database)
+                if success and new_entries > 0:
+                    logging.info(f"[OK] Periodic sync: {new_entries} new entries added")
+                    # Refresh graphs to show new data
+                    update_graphs()
+                # Schedule next sync in 5 minutes (300,000 ms)
+                sync_timer_id = scrollable_frame.after(300000, periodic_sync)
+            except tk.TclError:
+                sync_enabled = False
+                sync_timer_id = None
+    
+    def stop_periodic_sync():
+        """Stop the periodic sync timer"""
+        nonlocal sync_timer_id, sync_enabled
+        sync_enabled = False
+        if sync_timer_id is not None:
+            scrollable_frame.after_cancel(sync_timer_id)
+            sync_timer_id = None
+    
+    # Store sync stop function and database reference
+    parent_frame.stop_periodic_sync = stop_periodic_sync
+    parent_frame.database = database
+    
+    # Start periodic sync (first one in 5 minutes)
+    sync_timer_id = scrollable_frame.after(300000, periodic_sync)
+    
+    # Initial load and start auto-refresh
+    start_auto_refresh()
 
 
 def create_schedules_tab(parent_frame, console_instance):
@@ -3302,6 +4058,31 @@ class HydroponicsConsole(Cmd):
             print(f"Voltage: {data['voltage_mV']} mV")
             print(f"Power: {data['power_consumption_mW']} mW")
             print(f"Water Level: {data['water_level_mm']} mm")
+            
+            print("\n=== Environment Sensors ===")
+            temp_c = data.get('temperature_c', -999)
+            humidity = data.get('humidity_rh', -999)
+            if temp_c != -999:
+                temp_f = (temp_c * 9/5) + 32
+                print(f"Temperature: {temp_c:.1f}°C ({temp_f:.1f}°F)")
+            else:
+                print("Temperature: N/A")
+            
+            if humidity != -999:
+                print(f"Humidity: {humidity:.1f}%")
+            else:
+                print("Humidity: N/A")
+            
+            print("\n=== Light Sensor (TSL2591) ===")
+            lux = data.get('light_lux', -999)
+            visible = data.get('light_visible', 0)
+            infrared = data.get('light_infrared', 0)
+            if lux != -999:
+                print(f"Illuminance: {lux:.1f} lux")
+                print(f"Visible Light: {visible} counts")
+                print(f"Infrared: {infrared} counts")
+            else:
+                print("Light sensor: N/A")
         except requests.exceptions.RequestException as e:
             print(f"Device Name: {self.selected_device}")
             print(f"Device IP: {device_info['address']}")
@@ -4551,6 +5332,179 @@ class HydroponicsConsole(Cmd):
         except Exception as e:
             print(f"Error fetching schedules: {e}")
 
+# =============================================================================
+# Device Selector GUI
+# =============================================================================
+
+def create_device_selector_gui():
+    """
+    Opens a device selector GUI that scans for devices and allows user to select one.
+    Returns the selected device name, or None if cancelled.
+    """
+    selected_device = None
+    
+    def on_select():
+        nonlocal selected_device
+        selection = device_listbox.curselection()
+        if selection:
+            index = selection[0]
+            selected_device = device_names[index]
+            root.destroy()
+        else:
+            tk.messagebox.showwarning("No Selection", "Please select a device from the list")
+    
+    def on_cancel():
+        nonlocal selected_device
+        selected_device = None
+        root.destroy()
+    
+    def refresh_devices():
+        """Refresh the device list"""
+        device_listbox.delete(0, tk.END)
+        device_names.clear()
+        
+        if not devices:
+            device_listbox.insert(tk.END, "No devices found. Waiting for discovery...")
+            status_label.config(text="🔍 Scanning for devices...", fg="#e67e22")
+        else:
+            for name, info in devices.items():
+                device_names.append(name)
+                display_text = f"🌱 {name} ({info['address']}:{info['port']})"
+                device_listbox.insert(tk.END, display_text)
+            status_label.config(text=f"✅ Found {len(devices)} device(s)", fg="#27ae60")
+    
+    def auto_refresh():
+        """Automatically refresh device list every 2 seconds"""
+        refresh_devices()
+        root.after(2000, auto_refresh)
+    
+    # Create main window
+    root = tk.Tk()
+    root.title("GrowPod Device Selector")
+    root.geometry("600x520")
+    root.minsize(550, 500)
+    
+    # Bring to front
+    root.lift()
+    root.attributes('-topmost', True)
+    root.after_idle(root.attributes, '-topmost', False)
+    root.focus_force()
+    
+    # Header
+    header_frame = tk.Frame(root, bg="#2c3e50", padx=15, pady=15)
+    header_frame.pack(fill="x")
+    
+    title_label = tk.Label(
+        header_frame,
+        text="🌱 GrowPod Device Selector",
+        font=("Arial", 16, "bold"),
+        bg="#2c3e50",
+        fg="white"
+    )
+    title_label.pack()
+    
+    subtitle_label = tk.Label(
+        header_frame,
+        text="Select a device to manage",
+        font=("Arial", 10),
+        bg="#2c3e50",
+        fg="#bdc3c7"
+    )
+    subtitle_label.pack()
+    
+    # Main content frame
+    content_frame = tk.Frame(root, padx=20, pady=20)
+    content_frame.pack(fill="both", expand=True)
+    
+    # Instructions
+    instructions = tk.Label(
+        content_frame,
+        text="Scanning for GrowPod devices on the local network...",
+        font=("Arial", 10),
+        fg="#555"
+    )
+    instructions.pack(pady=(0, 10))
+    
+    # Device list frame
+    list_frame = tk.LabelFrame(content_frame, text="Available Devices", padx=10, pady=10)
+    list_frame.pack(fill="both", expand=True)
+    
+    # Listbox with scrollbar
+    scrollbar = tk.Scrollbar(list_frame)
+    scrollbar.pack(side="right", fill="y")
+    
+    device_listbox = tk.Listbox(
+        list_frame,
+        font=("Arial", 11),
+        selectmode=tk.SINGLE,
+        yscrollcommand=scrollbar.set,
+        height=10
+    )
+    device_listbox.pack(side="left", fill="both", expand=True)
+    scrollbar.config(command=device_listbox.yview)
+    
+    # Double-click to select
+    device_listbox.bind('<Double-Button-1>', lambda e: on_select())
+    
+    device_names = []
+    
+    # Status label
+    status_label = tk.Label(content_frame, text="🔍 Scanning...", font=("Arial", 10))
+    status_label.pack(pady=10)
+    
+    # Buttons frame
+    button_frame = tk.Frame(content_frame)
+    button_frame.pack(pady=15)
+    
+    refresh_btn = tk.Button(
+        button_frame,
+        text="🔄 Refresh",
+        command=refresh_devices,
+        font=("Arial", 11),
+        padx=15,
+        pady=8
+    )
+    refresh_btn.pack(side="left", padx=5)
+    
+    select_btn = tk.Button(
+        button_frame,
+        text="✅ Select Device",
+        command=on_select,
+        font=("Arial", 11, "bold"),
+        bg="#27ae60",
+        fg="white",
+        padx=20,
+        pady=8
+    )
+    select_btn.pack(side="left", padx=5)
+    
+    cancel_btn = tk.Button(
+        button_frame,
+        text="❌ Cancel",
+        command=on_cancel,
+        font=("Arial", 11),
+        padx=15,
+        pady=8
+    )
+    cancel_btn.pack(side="left", padx=5)
+    
+    # Help text
+    help_text = tk.Label(
+        content_frame,
+        text="💡 Tip: Double-click a device to select it quickly",
+        font=("Arial", 9),
+        fg="#999"
+    )
+    help_text.pack()
+    
+    # Initial refresh and start auto-refresh
+    refresh_devices()
+    auto_refresh()
+    
+    root.mainloop()
+    
+    return selected_device
+
 def start_service_discovery(console):
     zeroconf = Zeroconf()
     listener = HydroponicsServiceListener(console)
@@ -4561,24 +5515,58 @@ def start_service_discovery(console):
     return zeroconf
 
 def main():
+    """
+    Main entry point - launches GUI mode by default.
+    Use --console flag to start in console mode.
+    """
+    import sys
+    
+    # Check if console mode is requested
+    console_mode = '--console' in sys.argv or '-c' in sys.argv
+    
     # Create the console instance
     console = HydroponicsConsole()
 
-    # Start mDNS service discovery in a separate thread
+    # Start mDNS service discovery
     zeroconf = start_service_discovery(console)
     
-    try:
-        console.cmdloop()
-    except KeyboardInterrupt:
-        print("\nExiting Hydroponics console.")
-    finally:
+    if console_mode:
+        # Traditional console mode
+        print("Starting in console mode...")
+        try:
+            console.cmdloop()
+        except KeyboardInterrupt:
+            print("\nExiting Hydroponics console.")
+        finally:
+            zeroconf.close()
+            scheduler.shutdown()
+    else:
+        # GUI mode (default)
+        print("🚀 Starting GrowPod Control GUI...")
+        print("🔍 Scanning for devices...")
+        
+        # Wait a moment for device discovery to start
+        time.sleep(2)
+        
+        # Show device selector
+        selected_device = create_device_selector_gui()
+        
+        if selected_device:
+            # User selected a device, set it in console and launch main GUI
+            console.selected_device = selected_device
+            print(f"\n📱 Selected device: {selected_device}")
+            print(f"🔗 Address: {devices[selected_device]['address']}\n")
+            
+            # Launch main control GUI
+            launch_unified_gui(console)
+            
+            print("\n✅ GUI closed")
+        else:
+            print("\n❌ No device selected. Exiting.")
+        
+        # Cleanup
         zeroconf.close()
         scheduler.shutdown()
 
 if __name__ == '__main__':
-    # schedule = prompt_schedule_24([10] * 24)
-    # if schedule is not None:
-    #     print("Schedule:", schedule)
-    # else:
-    #     print("Cancelled")
     main()

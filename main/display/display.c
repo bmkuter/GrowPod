@@ -17,6 +17,7 @@
 #include "pod_state.h"          // For pod state and fill percent
 #include "filesystem/config_manager.h"  // For plant info
 #include "sensors/sensor_api.h" // For centralized sensor readings
+#include "sensors/sensor_manager.h" // For sensor_data_t and SENSOR_TYPE_LIGHT
 #include <string.h>
 
 static const char *TAG = "display";
@@ -44,10 +45,9 @@ static esp_lcd_panel_io_handle_t panel_io_handle = NULL;
 
 // UI Labels for sensor data
 static lv_obj_t *plant_info_label;       // Plant name + days
-static lv_obj_t *current_label;
-static lv_obj_t *voltage_label;
-static lv_obj_t *power_label;
+static lv_obj_t *power_label;            // Consolidated: Current, Voltage, Power
 static lv_obj_t *temp_humidity_label;    // Temperature + Humidity
+static lv_obj_t *light_label;            // Light sensor (lux)
 static lv_obj_t *water_level_label;
 static lv_obj_t *planter_pwm_label;
 static lv_obj_t *led_pwm_label;
@@ -88,8 +88,8 @@ static void lvgl_sensor_update_cb(lv_timer_t *timer)
     float current_ma, voltage_mv, power_mw;
     float temperature_c, humidity_rh;
     int water_level_mm;
-    char current_str[32], voltage_str[32], power_str[32],
-         temp_humidity_str[40], water_level_str[32], plant_info_str[128],
+    char power_str[48], temp_humidity_str[40], light_str[32],
+         water_level_str[32], plant_info_str[128],
          planter_pwm_str[24], led_pwm_str[24];
     
     // Read power monitor data through sensor manager API
@@ -111,18 +111,30 @@ static void lvgl_sensor_update_cb(lv_timer_t *timer)
         humidity_rh = 0.0f;
     }
     
+    // Read light sensor
+    sensor_data_t light_data;
+    ret = sensor_manager_get_data_cached(SENSOR_TYPE_LIGHT, &light_data, NULL);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "Error reading light sensor: %s", esp_err_to_name(ret));
+        light_data.light.lux = 0.0f;
+    }
+    
     // Read water level sensor (use non-blocking function)
     water_level_mm = distance_sensor_read_mm();
     
-    // Format strings for display
-    snprintf(current_str, sizeof(current_str), "I:%.1fmA", current_ma);
-    snprintf(voltage_str, sizeof(voltage_str), "V:%.1fmV", voltage_mv);
-    snprintf(power_str, sizeof(power_str), "P:%.1fmW", power_mw);
+    // Format power in SI units (A, V, W)
+    float current_a = current_ma / 1000.0f;
+    float voltage_v = voltage_mv / 1000.0f;
+    float power_w = power_mw / 1000.0f;
+    snprintf(power_str, sizeof(power_str), "%.2fA %.2fV %.2fW", current_a, voltage_v, power_w);
     
     // Temperature and humidity (compact format)
     float temp_f = (temperature_c * 9.0f / 5.0f) + 32.0f;
     snprintf(temp_humidity_str, sizeof(temp_humidity_str), "%.1fC(%.0fF) %.0f%%RH", 
              temperature_c, temp_f, humidity_rh);
+    
+    // Light sensor (lux)
+    snprintf(light_str, sizeof(light_str), "Light:%.0flux", light_data.light.lux);
     
     // Water level with fill percent
     int fill_percent = pod_state_calc_fill_percent_int(&s_pod_state);
@@ -211,10 +223,9 @@ static void lvgl_sensor_update_cb(lv_timer_t *timer)
     snprintf(led_pwm_str,     sizeof(led_pwm_str),     "LED:%.0f%%",  led_duty);
 
     // Update UI labels (plant_info_label already updated above with scrolling)
-    lv_label_set_text(current_label, current_str);
-    lv_label_set_text(voltage_label, voltage_str);
     lv_label_set_text(power_label, power_str);
     lv_label_set_text(temp_humidity_label, temp_humidity_str);
+    lv_label_set_text(light_label, light_str);
     lv_label_set_text(water_level_label, water_level_str);
     lv_label_set_text(planter_pwm_label, planter_pwm_str);
     lv_label_set_text(led_pwm_label, led_pwm_str);
@@ -306,6 +317,14 @@ static void update_plant_info_scroll(void)
 
 void display_lvgl_init(void)
 {
+    /* Lock LVGL mutex - CRITICAL when LVGL task runs on different core!
+     * All LVGL API calls from outside the LVGL task must be protected.
+     */
+    if (!lvgl_port_lock(1000)) {
+        ESP_LOGE(TAG, "Failed to acquire LVGL lock within 1000ms");
+        return;
+    }
+
     /* Set LVGL background to black */
     lv_obj_set_style_bg_color(lv_scr_act(), lv_color_black(), 0);
     lv_obj_set_style_bg_opa(lv_scr_act(), LV_OPA_COVER, 0);
@@ -321,63 +340,57 @@ void display_lvgl_init(void)
     lv_label_set_text(plant_info_label, "No plant set");
     lv_obj_align(plant_info_label, LV_ALIGN_TOP_LEFT, 3, 3);
 
-    // Power metrics - Left column (compact)
-    // Row y=23: Current (adjusted down to account for larger font above)
-    current_label = lv_label_create(lv_scr_act());
-    lv_obj_set_style_text_color(current_label, lv_color_white(), 0);
-    lv_obj_set_style_text_font(current_label, SIZE_8_FONT, LV_PART_MAIN);
-    lv_label_set_text(current_label, "I:0.0mA");
-    lv_obj_align(current_label, LV_ALIGN_TOP_LEFT, 3, 23);
-
-    // Row y=35: Voltage
-    voltage_label = lv_label_create(lv_scr_act());
-    lv_obj_set_style_text_color(voltage_label, lv_color_white(), 0);
-    lv_obj_set_style_text_font(voltage_label, SIZE_8_FONT, LV_PART_MAIN);
-    lv_label_set_text(voltage_label, "V:0.0mV");
-    lv_obj_align(voltage_label, LV_ALIGN_TOP_LEFT, 3, 35);
-
-    // Row y=47: Power
+    // Row y=23: Power (consolidated - Current, Voltage, Power in SI units)
     power_label = lv_label_create(lv_scr_act());
     lv_obj_set_style_text_color(power_label, lv_color_white(), 0);
     lv_obj_set_style_text_font(power_label, SIZE_8_FONT, LV_PART_MAIN);
-    lv_label_set_text(power_label, "P:0.0mW");
-    lv_obj_align(power_label, LV_ALIGN_TOP_LEFT, 3, 47);
+    lv_label_set_text(power_label, "0.00A 0.00V 0.00W");
+    lv_obj_align(power_label, LV_ALIGN_TOP_LEFT, 3, 23);
 
-    // Environment (spans full width)
-    // Row y=59: Temperature + Humidity
+    // Row y=35: Temperature + Humidity
     temp_humidity_label = lv_label_create(lv_scr_act());
     lv_obj_set_style_text_color(temp_humidity_label, lv_color_white(), 0);
     lv_obj_set_style_text_font(temp_humidity_label, SIZE_8_FONT, LV_PART_MAIN);
     lv_label_set_text(temp_humidity_label, "0.0C(0F) 0%RH");
-    lv_obj_align(temp_humidity_label, LV_ALIGN_TOP_LEFT, 3, 59);
+    lv_obj_align(temp_humidity_label, LV_ALIGN_TOP_LEFT, 3, 35);
 
-    // Row y=71: Water level
+    // Row y=47: Light sensor
+    light_label = lv_label_create(lv_scr_act());
+    lv_obj_set_style_text_color(light_label, lv_color_white(), 0);
+    lv_obj_set_style_text_font(light_label, SIZE_8_FONT, LV_PART_MAIN);
+    lv_label_set_text(light_label, "Light:0lux");
+    lv_obj_align(light_label, LV_ALIGN_TOP_LEFT, 3, 47);
+
+    // Row y=59: Water level
     water_level_label = lv_label_create(lv_scr_act());
     lv_obj_set_style_text_color(water_level_label, lv_color_white(), 0);
     lv_obj_set_style_text_font(water_level_label, SIZE_8_FONT, LV_PART_MAIN);
     lv_label_set_text(water_level_label, "Water:0mm(0%)");
-    lv_obj_align(water_level_label, LV_ALIGN_TOP_LEFT, 3, 71);
+    lv_obj_align(water_level_label, LV_ALIGN_TOP_LEFT, 3, 59);
 
     // Actuators - Bottom rows
-    // Row y=83: Planter PWM
+    // Row y=71: Planter PWM
     planter_pwm_label = lv_label_create(lv_scr_act());
     lv_obj_set_style_text_color(planter_pwm_label, lv_color_white(), 0);
     lv_obj_set_style_text_font(planter_pwm_label, SIZE_8_FONT, LV_PART_MAIN);
     lv_label_set_text(planter_pwm_label, "Pump:0%");
-    lv_obj_align(planter_pwm_label, LV_ALIGN_TOP_LEFT, 3, 83);
+    lv_obj_align(planter_pwm_label, LV_ALIGN_TOP_LEFT, 3, 71);
 
-    // Row y=95: LED PWM
+    // Row y=83: LED PWM
     led_pwm_label = lv_label_create(lv_scr_act());
     lv_obj_set_style_text_color(led_pwm_label, lv_color_white(), 0);
     lv_obj_set_style_text_font(led_pwm_label, SIZE_8_FONT, LV_PART_MAIN);
     lv_label_set_text(led_pwm_label, "LED:0%");
-    lv_obj_align(led_pwm_label, LV_ALIGN_TOP_LEFT, 3, 95);
+    lv_obj_align(led_pwm_label, LV_ALIGN_TOP_LEFT, 3, 83);
 
     // Create LVGL timer for sensor updates (250ms = 4Hz)
     sensor_update_timer = lv_timer_create(lvgl_sensor_update_cb, 250, NULL);
     if (sensor_update_timer == NULL) {
         ESP_LOGE(TAG, "Failed to create LVGL sensor update timer");
     }
+
+    /* Unlock LVGL mutex */
+    lvgl_port_unlock();
 }
 
 // Helper: fill entire screen with a solid color

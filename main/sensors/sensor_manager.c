@@ -4,6 +4,7 @@
  */
 
 #include "sensor_manager.h"
+#include "sensor_logger.h"
 #include "sht45_sensor.h"
 #include "tsl2591_sensor.h"
 #include "i2c_scanner.h"
@@ -34,6 +35,7 @@ typedef struct {
     SemaphoreHandle_t i2c_mutex;
     sensor_cache_entry_t cache[SENSOR_TYPE_MAX];
     sensor_priority_t priorities[SENSOR_TYPE_MAX];
+    uint8_t poll_offsets[SENSOR_TYPE_MAX];  // Stagger offset for each sensor
     bool enabled[SENSOR_TYPE_MAX];
     bool running;
     sensor_manager_config_t config;
@@ -66,7 +68,7 @@ sensor_manager_config_t sensor_manager_get_default_config(void) {
     sensor_manager_config_t config = {
         .task_stack_size = 4096,
         .task_priority = 5,
-        .poll_period_ms = 1000,
+        .poll_period_ms = 100,  // Base period 100ms for faster polling
         .cache_timeout_ms = 5000,
         .request_queue_size = 10
     };
@@ -164,13 +166,30 @@ esp_err_t sensor_manager_init(const sensor_manager_config_t *config) {
     g_sensor_mgr.priorities[SENSOR_TYPE_POWER_CURRENT] = SENSOR_PRIORITY_HIGH;
     g_sensor_mgr.priorities[SENSOR_TYPE_POWER_VOLTAGE] = SENSOR_PRIORITY_HIGH;
     g_sensor_mgr.priorities[SENSOR_TYPE_POWER_POWER] = SENSOR_PRIORITY_HIGH;
-    g_sensor_mgr.priorities[SENSOR_TYPE_TEMPERATURE_AND_HUMIDITY] = SENSOR_PRIORITY_CRITICAL;
+    g_sensor_mgr.priorities[SENSOR_TYPE_TEMPERATURE_AND_HUMIDITY] = SENSOR_PRIORITY_LOW;
     g_sensor_mgr.priorities[SENSOR_TYPE_LIGHT] = SENSOR_PRIORITY_MEDIUM;
     g_sensor_mgr.priorities[SENSOR_TYPE_WATER_LEVEL] = SENSOR_PRIORITY_MEDIUM;
+    
+    // Calculate staggered poll offsets to spread I2C load
+    // Group sensors by priority and assign sequential offsets within each group
+    uint8_t offset_counters[4] = {0};  // One counter per priority level
+    for (int i = 0; i < SENSOR_TYPE_MAX; i++) {
+        sensor_priority_t prio = g_sensor_mgr.priorities[i];
+        g_sensor_mgr.poll_offsets[i] = offset_counters[prio]++;
+    }
     
     // Enable all sensors by default
     for (int i = 0; i < SENSOR_TYPE_MAX; i++) {
         g_sensor_mgr.enabled[i] = true;
+    }
+    
+    // Log staggered schedule
+    ESP_LOGI(TAG, "Staggered polling schedule:");
+    for (int i = 0; i < SENSOR_TYPE_MAX; i++) {
+        ESP_LOGI(TAG, "  %s: priority=%s, offset=%d",
+                 sensor_type_to_string(i),
+                 priority_to_string(g_sensor_mgr.priorities[i]),
+                 g_sensor_mgr.poll_offsets[i]);
     }
     
     // Initialize sensors
@@ -257,7 +276,16 @@ esp_err_t sensor_manager_stop(void) {
 }
 
 /**
- * @brief Check if sensor should be polled this cycle
+ * @brief Check if sensor should be polled this cycle (with staggered scheduling)
+ * 
+ * This function implements a staggered polling schedule to avoid I2C bus congestion.
+ * Instead of all sensors with the same priority polling on the same cycles,
+ * each sensor is assigned a unique offset to spread the load evenly.
+ * 
+ * Example: HIGH priority (every 5 cycles) with 3 sensors:
+ *   - Sensor A: cycles 0, 5, 10, 15... (offset 0)
+ *   - Sensor B: cycles 1, 6, 11, 16... (offset 1)
+ *   - Sensor C: cycles 2, 7, 12, 17... (offset 2)
  */
 static bool should_poll_sensor(sensor_type_t type, uint32_t cycle_count) {
     if (!g_sensor_mgr.enabled[type]) {
@@ -265,19 +293,29 @@ static bool should_poll_sensor(sensor_type_t type, uint32_t cycle_count) {
     }
     
     sensor_priority_t priority = g_sensor_mgr.priorities[type];
+    uint8_t offset = g_sensor_mgr.poll_offsets[type];
+    uint32_t interval;
     
     switch (priority) {
         case SENSOR_PRIORITY_CRITICAL:
-            return true;  // Every cycle
+            interval = 5;   // Every 5 cycles (~500ms)
+            break;
         case SENSOR_PRIORITY_HIGH:
-            return (cycle_count % 5) == 0;  // Every 5 cycles
+            interval = 10;  // Every 10 cycles (~1s)
+            break;
         case SENSOR_PRIORITY_MEDIUM:
-            return (cycle_count % 10) == 0;  // Every 10 cycles
+            interval = 25;  // Every 25 cycles (~2.5s)
+            break;
         case SENSOR_PRIORITY_LOW:
-            return (cycle_count % 20) == 0;  // Every 20 cycles
+            interval = 50;  // Every 50 cycles (~5s)
+            break;
         default:
             return false;
     }
+    
+    // Check if (cycle_count - offset) is divisible by interval
+    // This staggers sensors across different cycles
+    return ((cycle_count >= offset) && ((cycle_count - offset) % interval) == 0);
 }
 
 /**
@@ -446,24 +484,43 @@ static void sensor_manager_task(void *arg) {
     TickType_t last_wake_time = xTaskGetTickCount();
     const TickType_t poll_period = pdMS_TO_TICKS(g_sensor_mgr.config.poll_period_ms);
     
+    // Initialize sensor logger for historical data storage
+    esp_err_t logger_ret = sensor_logger_init();
+    if (logger_ret == ESP_OK) {
+        ESP_LOGI(TAG, "Sensor logger initialized");
+    } else {
+        ESP_LOGW(TAG, "Failed to initialize sensor logger: %s", esp_err_to_name(logger_ret));
+    }
+    
+    // Calculate cycles per minute for logging (poll_period_ms is typically 100ms)
+    // 60 seconds * 1000ms / poll_period_ms = cycles per minute
+    // Example: 60000 / 100 = 600 cycles per minute
+    uint32_t cycles_per_minute = 60000 / g_sensor_mgr.config.poll_period_ms;
+    uint32_t last_log_cycle = 0;
+    ESP_LOGI(TAG, "Sensor logging interval: 1 minute (%lu poll cycles)", cycles_per_minute);
+    
     while (g_sensor_mgr.running) {
         g_sensor_mgr.poll_cycles++;
         uint32_t cycle = g_sensor_mgr.poll_cycles;
         
         ESP_LOGD(TAG, "=== Poll cycle %lu ===", cycle);
         
-        // Poll sensors based on priority
+        // Poll sensors based on priority with staggered scheduling
+        // Staggering ensures at most one sensor per priority level polls each cycle,
+        // preventing I2C bus congestion
         for (int type = 0; type < SENSOR_TYPE_MAX; type++) {
             if (should_poll_sensor(type, cycle)) {
-                ESP_LOGD(TAG, "Polling %s (priority=%s, cycle=%lu)",
+                ESP_LOGD(TAG, "Polling %s (priority=%s, offset=%d, cycle=%lu)",
                          sensor_type_to_string(type),
                          priority_to_string(g_sensor_mgr.priorities[type]),
+                         g_sensor_mgr.poll_offsets[type],
                          cycle);
                 update_sensor_cache(type);
                 
-                // Add a small delay between sensor reads to prevent I2C bus contention
-                // This is especially important when multiple sensors are polled in the same cycle
-                vTaskDelay(pdMS_TO_TICKS(25));
+                // Small delay to allow I2C bus to settle between transactions
+                // This is much smaller than before since staggering prevents multiple
+                // sensors from polling in the same cycle
+                vTaskDelay(pdMS_TO_TICKS(10));
             }
         }
         
@@ -487,6 +544,16 @@ static void sensor_manager_task(void *arg) {
             if (request.done_sem != NULL) {
                 xSemaphoreGive(request.done_sem);
             }
+        }
+        
+        // Log sensor snapshot to persistent storage every minute
+        if (logger_ret == ESP_OK && (cycle - last_log_cycle) >= cycles_per_minute) {
+            ESP_LOGI(TAG, "Logging sensor snapshot (cycle=%lu)", cycle);
+            esp_err_t log_ret = sensor_logger_log_snapshot();
+            if (log_ret != ESP_OK) {
+                ESP_LOGW(TAG, "Failed to log sensor snapshot: %s", esp_err_to_name(log_ret));
+            }
+            last_log_cycle = cycle;
         }
         
         // Sleep until next poll period
@@ -525,17 +592,17 @@ esp_err_t sensor_manager_read(sensor_type_t sensor_type, float *value, uint32_t 
             return ESP_OK;
         }
         // Cache exists but is stale
-        ESP_LOGW(TAG, "Cache miss for %s: data stale (age=%lums > timeout=%lums)", 
+        ESP_LOGD(TAG, "Cache miss for %s: data stale (age=%lums > timeout=%lums)", 
                  sensor_type_to_string(sensor_type), age_ms, g_sensor_mgr.config.cache_timeout_ms);
     } else {
         // No valid cache entry
         const char* reason = (ret == ESP_ERR_NOT_FOUND) ? "no valid data" : "cache access failed";
-        ESP_LOGW(TAG, "Cache miss for %s: %s (%s)", 
+        ESP_LOGD(TAG, "Cache miss for %s: %s (%s)", 
                  sensor_type_to_string(sensor_type), reason, esp_err_to_name(ret));
     }
     
     g_sensor_mgr.cache_misses++;
-    ESP_LOGW(TAG, "Queuing request for fresh data from %s (total misses: %lu)", 
+    ESP_LOGD(TAG, "Queuing request for fresh data from %s (total misses: %lu)", 
              sensor_type_to_string(sensor_type), g_sensor_mgr.cache_misses);
     
     // Create request
@@ -567,7 +634,7 @@ esp_err_t sensor_manager_read(sensor_type_t sensor_type, float *value, uint32_t 
     
     vSemaphoreDelete(done_sem);
     
-    ESP_LOGW(TAG, "Request completed for %s: value=%.2f, error=%s",
+    ESP_LOGD(TAG, "Request completed for %s: value=%.2f, error=%s",
              sensor_type_to_string(sensor_type), *value, esp_err_to_name(ret));
     
     return ret;
@@ -831,10 +898,10 @@ static const char* sensor_type_to_string(sensor_type_t type) {
  */
 static const char* priority_to_string(sensor_priority_t priority) {
     switch (priority) {
-        case SENSOR_PRIORITY_CRITICAL: return "CRITICAL(1s)";
-        case SENSOR_PRIORITY_HIGH: return "HIGH(5s)";
-        case SENSOR_PRIORITY_MEDIUM: return "MEDIUM(10s)";
-        case SENSOR_PRIORITY_LOW: return "LOW(20s)";
+        case SENSOR_PRIORITY_CRITICAL: return "CRITICAL(500ms)";
+        case SENSOR_PRIORITY_HIGH: return "HIGH(1s)";
+        case SENSOR_PRIORITY_MEDIUM: return "MEDIUM(2.5s)";
+        case SENSOR_PRIORITY_LOW: return "LOW(5s)";
         default: return "UNKNOWN";
     }
 }

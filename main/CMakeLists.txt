@@ -17,6 +17,7 @@ idf_component_register(
         "sensors/i2c_scanner.c"
         "sensors/sensor_manager.c"
         "sensors/sensor_api.c"
+        "sensors/sensor_logger.c"
         "https_server/https_server.c"
         "Networking/wifi_manager.c"
         "control_logic/control_logic.c"

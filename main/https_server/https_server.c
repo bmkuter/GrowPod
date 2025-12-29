@@ -19,6 +19,8 @@
 #include "distance_sensor.h"    // For distance_sensor_read_mm()
 #include "pod_state.h"  // Add pod_state
 #include "sensors/sensor_api.h" // For centralized sensor readings
+#include "sensors/sensor_manager.h" // For sensor_data_t and SENSOR_TYPE_LIGHT
+#include "sensors/sensor_logger.h" // For historical sensor data
 
 /* ==========================================
  *         WATER LEVEL CONSTANTS
@@ -178,6 +180,9 @@ static esp_err_t filesystem_read_get_handler(httpd_req_t *req);
 // Plant info API handlers
 static esp_err_t plant_info_get_handler(httpd_req_t *req);
 static esp_err_t plant_info_post_handler(httpd_req_t *req);
+
+// Sensor history API handler
+static esp_err_t sensor_history_get_handler(httpd_req_t *req);
 
 extern void schedule_manager_task(void *pvParam);
 extern void schedule_air_task(void *pvParam);
@@ -554,6 +559,15 @@ void start_https_server(void) {
             .user_ctx = NULL
         };
         httpd_register_uri_handler(server, &plant_info_post_uri);
+        
+        // Sensor history API endpoint
+        httpd_uri_t sensor_history_uri = {
+            .uri      = "/api/sensor-history",
+            .method   = HTTP_GET,
+            .handler  = sensor_history_get_handler,
+            .user_ctx = NULL
+        };
+        httpd_register_uri_handler(server, &sensor_history_uri);
         
         ESP_LOGI(TAG, "HTTPS server started successfully");
     } else {
@@ -1697,14 +1711,46 @@ static esp_err_t led_post_handler(httpd_req_t *req)
 static esp_err_t unit_metrics_get_handler(httpd_req_t *req) {
     cJSON *root = cJSON_CreateObject();
 
+    // Power sensor readings
     float cur_mA = 0.0f, volt_mV = 0.0f, pwr_mW = 0.0f;
     sensor_api_read_power_all(&cur_mA, &volt_mV, &pwr_mW);
 
+    // Water level
     int dist_mm = distance_sensor_read_mm();
+    
+    // Temperature and humidity
+    float temperature_c = 0.0f, humidity_rh = 0.0f;
+    esp_err_t env_ret = sensor_api_read_environment_all(&temperature_c, &humidity_rh);
+    
+    // Light sensor readings
+    sensor_data_t light_data = {0};
+    esp_err_t light_ret = sensor_manager_get_data_cached(SENSOR_TYPE_LIGHT, &light_data, NULL);
+    
+    // Add all sensor data to JSON
     cJSON_AddNumberToObject(root, "current_mA", cur_mA);
     cJSON_AddNumberToObject(root, "voltage_mV", volt_mV);
     cJSON_AddNumberToObject(root, "power_consumption_mW", pwr_mW);
     cJSON_AddNumberToObject(root, "water_level_mm", (dist_mm >= 0) ? dist_mm : -1);
+    
+    // Add environment data (use -999 to indicate error/no data)
+    if (env_ret == ESP_OK) {
+        cJSON_AddNumberToObject(root, "temperature_c", temperature_c);
+        cJSON_AddNumberToObject(root, "humidity_rh", humidity_rh);
+    } else {
+        cJSON_AddNumberToObject(root, "temperature_c", -999.0);
+        cJSON_AddNumberToObject(root, "humidity_rh", -999.0);
+    }
+    
+    // Add light sensor data
+    if (light_ret == ESP_OK) {
+        cJSON_AddNumberToObject(root, "light_lux", light_data.light.lux);
+        cJSON_AddNumberToObject(root, "light_visible", light_data.light.visible);
+        cJSON_AddNumberToObject(root, "light_infrared", light_data.light.infrared);
+    } else {
+        cJSON_AddNumberToObject(root, "light_lux", -999.0);
+        cJSON_AddNumberToObject(root, "light_visible", 0);
+        cJSON_AddNumberToObject(root, "light_infrared", 0);
+    }
 
     // Retrieve MAC address
     uint8_t mac[6];
@@ -2026,6 +2072,138 @@ static esp_err_t plant_info_post_handler(httpd_req_t *req) {
     
     return ESP_OK;
 }
+
+/**
+ * @brief GET /api/sensor-history - Retrieve historical sensor data
+ * 
+ * Query parameters:
+ *   - start: Unix timestamp (optional, default: 0 for all data)
+ *   - end: Unix timestamp (optional, default: current time)
+ * 
+ * Example: /api/sensor-history?start=1735420800&end=1735510800
+ */
+static esp_err_t sensor_history_get_handler(httpd_req_t *req) {
+    ESP_LOGI(TAG, "GET /api/sensor-history");
+    
+    // Parse query parameters
+    char query[256];
+    int64_t start_timestamp = 0;
+    int64_t end_timestamp = 0;
+    
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
+        char param[32];
+        
+        // Parse start timestamp
+        if (httpd_query_key_value(query, "start", param, sizeof(param)) == ESP_OK) {
+            start_timestamp = atoll(param);
+            ESP_LOGI(TAG, "Query parameter: start=%lld", start_timestamp);
+        }
+        
+        // Parse end timestamp
+        if (httpd_query_key_value(query, "end", param, sizeof(param)) == ESP_OK) {
+            end_timestamp = atoll(param);
+            ESP_LOGI(TAG, "Query parameter: end=%lld", end_timestamp);
+        }
+    }
+    
+    // Allocate buffer for history entries
+    #define MAX_HISTORY_RESPONSE 500  // Return up to 500 entries per request
+    sensor_history_entry_t *entries = malloc(MAX_HISTORY_RESPONSE * sizeof(sensor_history_entry_t));
+    if (entries == NULL) {
+        ESP_LOGE(TAG, "Failed to allocate memory for history entries");
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, 
+                           "Out of memory");
+        return ESP_FAIL;
+    }
+    
+    // Get history from sensor logger
+    uint32_t count = 0;
+    esp_err_t ret = sensor_logger_get_history(start_timestamp, end_timestamp, 
+                                               entries, MAX_HISTORY_RESPONSE, &count);
+    
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to get sensor history: %s", esp_err_to_name(ret));
+        free(entries);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, 
+                           "Failed to retrieve history");
+        return ESP_FAIL;
+    }
+    
+    ESP_LOGI(TAG, "Retrieved %lu history entries", count);
+    
+    // Build JSON response
+    cJSON *root = cJSON_CreateObject();
+    if (root == NULL) {
+        free(entries);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, 
+                           "JSON creation failed");
+        return ESP_FAIL;
+    }
+    
+    cJSON_AddNumberToObject(root, "count", count);
+    cJSON_AddNumberToObject(root, "start", start_timestamp);
+    cJSON_AddNumberToObject(root, "end", end_timestamp);
+    
+    // Add readings array
+    cJSON *readings = cJSON_CreateArray();
+    if (readings == NULL) {
+        cJSON_Delete(root);
+        free(entries);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, 
+                           "JSON array creation failed");
+        return ESP_FAIL;
+    }
+    
+    for (uint32_t i = 0; i < count; i++) {
+        cJSON *entry = cJSON_CreateObject();
+        if (entry == NULL) continue;
+        
+        cJSON_AddNumberToObject(entry, "timestamp", entries[i].timestamp);
+        cJSON_AddNumberToObject(entry, "temperature_c", entries[i].temperature_c);
+        cJSON_AddNumberToObject(entry, "humidity_rh", entries[i].humidity_rh);
+        cJSON_AddNumberToObject(entry, "light_lux", entries[i].light_lux);
+        cJSON_AddNumberToObject(entry, "light_visible", entries[i].light_visible);
+        cJSON_AddNumberToObject(entry, "light_infrared", entries[i].light_infrared);
+        cJSON_AddNumberToObject(entry, "power_mw", entries[i].power_mw);
+        cJSON_AddNumberToObject(entry, "current_ma", entries[i].current_ma);
+        cJSON_AddNumberToObject(entry, "voltage_mv", entries[i].voltage_mv);
+        cJSON_AddNumberToObject(entry, "water_level_mm", entries[i].water_level_mm);
+        
+        cJSON_AddItemToArray(readings, entry);
+    }
+    
+    cJSON_AddItemToObject(root, "readings", readings);
+    
+    // Get logger statistics
+    sensor_logger_stats_t stats;
+    if (sensor_logger_get_stats(&stats) == ESP_OK) {
+        cJSON *stats_obj = cJSON_CreateObject();
+        cJSON_AddNumberToObject(stats_obj, "total_entries", stats.total_entries);
+        cJSON_AddNumberToObject(stats_obj, "current_count", stats.current_count);
+        cJSON_AddNumberToObject(stats_obj, "buffer_wraps", stats.buffer_wraps);
+        cJSON_AddNumberToObject(stats_obj, "write_errors", stats.write_errors);
+        cJSON_AddNumberToObject(stats_obj, "oldest_timestamp", stats.oldest_timestamp);
+        cJSON_AddNumberToObject(stats_obj, "newest_timestamp", stats.newest_timestamp);
+        cJSON_AddItemToObject(root, "stats", stats_obj);
+    }
+    
+    // Send response
+    char *response_str = cJSON_PrintUnformatted(root);
+    if (response_str != NULL) {
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, response_str);
+        free(response_str);
+    } else {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, 
+                           "Failed to serialize JSON");
+    }
+    
+    cJSON_Delete(root);
+    free(entries);
+    
+    return ESP_OK;
+}
+
 
 // wrappers for console‐driven schedule start
 void start_light_schedule(uint8_t schedule[24])

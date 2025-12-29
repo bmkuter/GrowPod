@@ -164,6 +164,19 @@ static int cmd_read_sensors(int argc, char **argv) {
     }
     printf("\n");
 
+    // Read light sensor data
+    sensor_data_t light_data;
+    ret = sensor_manager_get_data_cached(SENSOR_TYPE_LIGHT, &light_data, NULL);
+    if (ret == ESP_OK) {
+        printf("TSL2591 Light Sensor:\n");
+        printf("  Illuminance: %.2f lux\n", light_data.light.lux);
+        printf("  Visible: %u counts\n", light_data.light.visible);
+        printf("  Infrared: %u counts\n", light_data.light.infrared);
+    } else {
+        printf("TSL2591 Light Sensor: Error reading (%s)\n", esp_err_to_name(ret));
+    }
+    printf("\n");
+
     // Water level (using non-blocking function) and percent full
     int dist_mm = distance_sensor_read_mm();
     printf("Water Level: %d mm\n", dist_mm);

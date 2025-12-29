@@ -81,8 +81,17 @@ void set_timezone_to_boston(void) {
 
 void init_screen_wrapper()
 {
-        /* Initialize LVGL port with more reasonable timer period */
-    lvgl_port_init(&((const lvgl_port_cfg_t) { .task_priority = 4, .task_stack = 4096, .timer_period_ms = 20 }));
+    /* Initialize LVGL port with core affinity set to core 1 
+     * This keeps display/UI processing separate from sensor I2C operations on core 0
+     */
+    const lvgl_port_cfg_t lvgl_cfg = {
+        .task_priority = 4,
+        .task_stack = 8192,              // Increased from 4096 - layout updates can be stack-intensive
+        .task_affinity = 1,              // Pin LVGL task to core 1
+        .task_max_sleep_ms = 500,
+        .timer_period_ms = 20
+    };
+    lvgl_port_init(&lvgl_cfg);
 
     /* Initialize display driver and get handles */
     esp_lcd_panel_handle_t panel = display_init();
@@ -105,6 +114,8 @@ void init_screen_wrapper()
     };
     lvgl_port_add_disp(&disp_cfg);
 
+    /* Give LVGL task time to fully initialize on Core 1 before creating objects */
+    vTaskDelay(pdMS_TO_TICKS(100));
 
     display_lvgl_init();
 }
