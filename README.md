@@ -6,7 +6,27 @@
 
 An intelligent, energy-efficient deep water culture (DWC) hydroponic system designed for scalable at-home food production and scientific plant research. Built on ESP32-S3 with custom peristaltic pumps and Adafruit electronics for maximum efficiency and water recycling.
 
-## 🎯 Mission
+## � Recent Updates (December 2024)
+
+### Python GUI Console Improvements
+1. **Advanced LED Control Panel** - Added expandable individual channel control for 4-channel LED arrays
+   - Toggle between unified control (all channels together) and individual channel mode
+   - Bidirectional synchronization: adjusting any control updates all related controls
+   - Preset buttons (OFF/50%/100%) work in both modes
+   - Real-time PWM value display for each channel
+
+2. **Fixed Command Log UI** - Relocated scrollable command log to left sensor panel
+   - Commands no longer push buttons around when results appear
+   - Color-coded log entries (green for success, red for errors, blue for info)
+   - Timestamps for each command execution
+   - Fixed position ensures stable, professional UI layout
+
+3. **Auto-Refresh Implementation** - Automatic sensor data updates in Manual Control tab
+   - Consistent 5-second refresh rate matching Dashboard behavior
+   - Properly scoped closure functions prevent variable capture bugs
+   - Tab-aware: auto-refresh pauses when switching away from active tabs
+
+## �🎯 Mission
 
 **Efficiency-First Hydroponics**: Create a low-power, water-recycling hydroponic system that maximizes yield while minimizing resource consumption. Perfect for home food production and laboratory plant research.
 
@@ -68,6 +88,33 @@ An intelligent, energy-efficient deep water culture (DWC) hydroponic system desi
 - **Web Interface**: HTTPS server for remote monitoring and control
 - **UART Console**: Direct command-line access for debugging and calibration
 - **Data Logging**: Track system performance and plant growth metrics
+
+### Python GUI Console (New!)
+- **Device Discovery**: Automatic mDNS/Zeroconf discovery of GrowPod devices on local network
+- **Multi-Tab Interface**: Dashboard with real-time graphs, Manual Control for direct actuator management
+- **Historical Data Viewer**: SQLite-backed sensor data with time-range selection (1h, 6h, 24h, 7d, 30d)
+- **Manual Actuator Control**: Individual PWM control for all actuators with preset buttons
+- **Advanced LED Control**: Expandable individual channel control for 4-channel LED arrays with bidirectional sync
+- **Scrollable Command Log**: Color-coded command results with timestamps for easy debugging
+- **CSV Export**: Export historical sensor data for analysis
+- **Auto-Refresh**: Configurable automatic sensor data updates
+
+## 📸 Screenshots
+
+### GrowPod Device Selector
+Auto-discovers devices on your local network using mDNS/Zeroconf:
+
+![Device Selector](docs/images/device_selector.png)
+
+### Dashboard View
+Real-time sensor monitoring with historical graphs:
+
+![Dashboard](docs/images/dashboard.png)
+
+### Manual Control Panel
+Direct actuator control with advanced LED channel management:
+
+![Manual Control](docs/images/manual_control.png)
 
 ## 🔧 Hardware Setup
 

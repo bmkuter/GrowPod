@@ -11,7 +11,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from datetime import datetime, timedelta
 import time
 import tkinter as tk
-from tkinter import messagebox, ttk
+from tkinter import messagebox, ttk, filedialog
 import csv
 from collections import deque
 import matplotlib
@@ -1391,8 +1391,8 @@ def launch_unified_gui(console_instance):
     screen_width = root.winfo_screenwidth()
     screen_height = root.winfo_screenheight()
     
-    # Set window to span full vertical height with reasonable width
-    window_width = 1400
+    # Set window to span full vertical height with reasonable width (15% larger than original 1400)
+    window_width = 1610  # Increased by 15% from 1400
     window_height = screen_height - 80  # Leave space for taskbar
     
     # Center horizontally, position at top
@@ -1444,7 +1444,12 @@ def launch_unified_gui(console_instance):
     notebook.add(dashboard_tab, text="📊 Dashboard")
     create_dashboard_tab(dashboard_tab, console_instance)
     
-    # Tab 2: Light & Planter 24-hour curves
+    # Tab 2: Manual Control - Direct actuator control
+    manual_control_tab = tk.Frame(notebook)
+    notebook.add(manual_control_tab, text="🎮 Manual Control")
+    create_manual_control_tab(manual_control_tab, console_instance)
+    
+    # Tab 3: Light & Planter 24-hour curves
     light_planter_tab = tk.Frame(notebook)
     notebook.add(light_planter_tab, text="💡 Light & Planter")
     create_light_planter_tab(light_planter_tab, console_instance)
@@ -1475,17 +1480,31 @@ def launch_unified_gui(console_instance):
     create_schedules_tab(schedules_tab, console_instance)
     
     # Handle tab changes - manage auto-refresh based on active tab
+    # NOTE: Periodic sync (database updates) runs continuously in background regardless of tab
     def on_tab_change(event):
         current_tab = notebook.index(notebook.select())
-        # Dashboard is tab 0
+        # Dashboard is tab 0, Manual Control is tab 1
         if current_tab == 0:
-            # Restart auto-refresh when returning to dashboard
+            # Restart dashboard auto-refresh (sensor readings every 5 seconds)
             if hasattr(dashboard_tab, 'start_auto_refresh'):
                 dashboard_tab.start_auto_refresh()
-        else:
-            # Stop auto-refresh when leaving dashboard
+            # Stop manual control auto-refresh
+            if hasattr(manual_control_tab, 'stop_auto_refresh'):
+                manual_control_tab.stop_auto_refresh()
+        elif current_tab == 1:
+            # Restart manual control auto-refresh (sensor readings every 5 seconds)
+            if hasattr(manual_control_tab, 'start_auto_refresh'):
+                manual_control_tab.start_auto_refresh()
+            # Stop dashboard auto-refresh (but keep periodic sync running)
             if hasattr(dashboard_tab, 'stop_auto_refresh'):
                 dashboard_tab.stop_auto_refresh()
+        else:
+            # Stop sensor auto-refresh for both tabs when on other tabs
+            # But periodic sync continues running in background
+            if hasattr(dashboard_tab, 'stop_auto_refresh'):
+                dashboard_tab.stop_auto_refresh()
+            if hasattr(manual_control_tab, 'stop_auto_refresh'):
+                manual_control_tab.stop_auto_refresh()
     
     notebook.bind("<<NotebookTabChanged>>", on_tab_change)
     
@@ -1493,6 +1512,9 @@ def launch_unified_gui(console_instance):
     def on_closing():
         """Clean up resources when window is closed"""
         if hasattr(dashboard_tab, 'stop_auto_refresh'):
+            dashboard_tab.stop_auto_refresh()
+        if hasattr(manual_control_tab, 'stop_auto_refresh'):
+            manual_control_tab.stop_auto_refresh()
             dashboard_tab.stop_auto_refresh()
         if hasattr(dashboard_tab, 'stop_periodic_sync'):
             dashboard_tab.stop_periodic_sync()
@@ -1772,6 +1794,136 @@ def create_dashboard_tab(parent_frame, console_instance):
     status_label.pack(side="bottom", fill="x", pady=10)
     
     # ========== RIGHT PANEL: Real-time Graphs ==========
+    # Time range selector and controls
+    control_frame = tk.Frame(right_frame, bg="#ecf0f1", padx=10, pady=10)
+    control_frame.pack(side="top", fill="x")
+    
+    # Title for controls
+    tk.Label(
+        control_frame, 
+        text="📊 Historical Data View", 
+        font=("Arial", 12, "bold"),
+        bg="#ecf0f1"
+    ).pack(side="left", padx=(0, 20))
+    
+    # Time range variable and buttons
+    selected_time_range = tk.StringVar(value="24h")
+    
+    time_ranges = [
+        ("1h", "1 Hour", 1),
+        ("6h", "6 Hours", 6),
+        ("24h", "24 Hours", 24),
+        ("7d", "7 Days", 24 * 7),
+        ("30d", "30 Days", 24 * 30),
+    ]
+    
+    def set_time_range(hours):
+        """Update graphs to show selected time range"""
+        update_graphs(hours)
+    
+    # Create time range buttons
+    button_frame = tk.Frame(control_frame, bg="#ecf0f1")
+    button_frame.pack(side="left", padx=(0, 20))
+    
+    for value, label, hours in time_ranges:
+        btn = tk.Radiobutton(
+            button_frame,
+            text=label,
+            variable=selected_time_range,
+            value=value,
+            command=lambda h=hours: set_time_range(h),
+            font=("Arial", 9),
+            bg="#ecf0f1",
+            activebackground="#ecf0f1",
+            selectcolor="#3498db",
+            indicatoron=False,
+            width=10,
+            padx=5,
+            pady=3
+        )
+        btn.pack(side="left", padx=2)
+    
+    # Export button
+    def export_to_csv():
+        """Export current time range to CSV file"""
+        try:
+            # Get time range in hours
+            range_map = {"1h": 1, "6h": 6, "24h": 24, "7d": 168, "30d": 720}
+            hours = range_map.get(selected_time_range.get(), 24)
+            
+            # Calculate timestamps
+            current_time = int(time.time())
+            start_time = current_time - (hours * 60 * 60)
+            
+            # Query database
+            readings = database.get_readings(start_timestamp=start_time, end_timestamp=current_time)
+            
+            if not readings:
+                messagebox.showwarning("No Data", "No data available for the selected time range.")
+                return
+            
+            # Ask user for save location
+            filename = filedialog.asksaveasfilename(
+                defaultextension=".csv",
+                filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+                initialfile=f"{device_name}_export_{selected_time_range.get()}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+            )
+            
+            if not filename:
+                return  # User cancelled
+            
+            # Write to CSV
+            with open(filename, 'w', newline='') as f:
+                writer = csv.writer(f)
+                
+                # Write header
+                writer.writerow([
+                    'Timestamp', 'DateTime', 'Temperature (°C)', 'Humidity (%RH)', 
+                    'Light (lux)', 'Visible Light', 'Infrared', 
+                    'Power (mW)', 'Current (mA)', 'Voltage (mV)', 'Water Level (mm)'
+                ])
+                
+                # Write data
+                for reading in readings:
+                    dt = datetime.fromtimestamp(reading['timestamp']).strftime('%Y-%m-%d %H:%M:%S')
+                    writer.writerow([
+                        reading['timestamp'],
+                        dt,
+                        reading['temperature_c'] if reading['temperature_c'] not in [None, -999] else '',
+                        reading['humidity_rh'] if reading['humidity_rh'] not in [None, -999] else '',
+                        reading['light_lux'] if reading['light_lux'] not in [None, -999] else '',
+                        reading['light_visible'] if reading['light_visible'] is not None else '',
+                        reading['light_infrared'] if reading['light_infrared'] is not None else '',
+                        reading['power_mw'] if reading['power_mw'] is not None else '',
+                        reading['current_ma'] if reading['current_ma'] is not None else '',
+                        reading['voltage_mv'] if reading['voltage_mv'] is not None else '',
+                        reading['water_level_mm'] if reading['water_level_mm'] not in [None, -1] else ''
+                    ])
+            
+            messagebox.showinfo(
+                "Export Complete", 
+                f"Successfully exported {len(readings)} entries to:\n{filename}"
+            )
+            logging.info(f"Exported {len(readings)} readings to {filename}")
+            
+        except Exception as e:
+            messagebox.showerror("Export Error", f"Failed to export data:\n{str(e)}")
+            logging.error(f"Export failed: {e}", exc_info=True)
+    
+    export_btn = tk.Button(
+        control_frame,
+        text="📥 Export to CSV",
+        command=export_to_csv,
+        font=("Arial", 10, "bold"),
+        bg="#27ae60",
+        fg="white",
+        padx=15,
+        pady=5,
+        relief="raised",
+        cursor="hand2"
+    )
+    export_btn.pack(side="left")
+    
     # Create matplotlib figure with subplots
     fig = Figure(figsize=(10, 12), dpi=100, facecolor='#f0f0f0')
     fig.subplots_adjust(hspace=0.4, left=0.1, right=0.95, top=0.97, bottom=0.08)
@@ -1830,12 +1982,17 @@ def create_dashboard_tab(parent_frame, console_instance):
     line_water, = ax_water.plot([], [], 'cyan', label='Water Level (mm)', linewidth=2, marker='o', markersize=3)
     ax_water.legend(loc='upper left', fontsize=8)
     
-    def update_graphs():
-        """Update all graphs with data from database (last 24 hours by default)"""
+    def update_graphs(hours=24):
+        """
+        Update all graphs with data from database
+        
+        Args:
+            hours: Number of hours of historical data to display (default: 24)
+        """
         try:
-            # Query last 24 hours from database
+            # Query specified time range from database
             current_time = int(time.time())
-            start_time = current_time - (24 * 60 * 60)  # 24 hours ago
+            start_time = current_time - (hours * 60 * 60)  # hours ago
             
             readings = database.get_readings(start_timestamp=start_time, end_timestamp=current_time)
             
@@ -1930,7 +2087,17 @@ def create_dashboard_tab(parent_frame, console_instance):
                     time_min = time_min - timedelta(seconds=30)
                     time_max = time_max + timedelta(seconds=30)
                 ax_water.set_xlim(time_min, time_max)
-                ax_water.set_ylim(0, max(water_values) * 1.2 if water_values else 100)
+                
+                # Fix for identical water level values (prevent matplotlib warning)
+                if water_values:
+                    val_min, val_max = min(water_values), max(water_values)
+                    if val_min == val_max:
+                        # All values identical, add padding
+                        ax_water.set_ylim(max(0, val_min - 1), val_max + 1)
+                    else:
+                        ax_water.set_ylim(0, val_max * 1.2)
+                else:
+                    ax_water.set_ylim(0, 100)
             
             # Redraw the canvas
             canvas_graph.draw()
@@ -1979,11 +2146,13 @@ def create_dashboard_tab(parent_frame, console_instance):
     parent_frame.start_auto_refresh = start_auto_refresh
     
     # Periodic database sync (every 5 minutes to catch new historical data)
+    # NOTE: This runs CONTINUOUSLY in the background regardless of which tab is active.
+    # It only stops when the window is closed.
     sync_timer_id = None
     sync_enabled = True
     
     def periodic_sync():
-        """Sync database with device every 5 minutes"""
+        """Sync database with device every 5 minutes (runs continuously in background)"""
         nonlocal sync_timer_id, sync_enabled
         if sync_enabled:
             try:
@@ -1991,7 +2160,7 @@ def create_dashboard_tab(parent_frame, console_instance):
                 success, new_entries, sync_message = sync_historical_data(console_instance, database)
                 if success and new_entries > 0:
                     logging.info(f"[OK] Periodic sync: {new_entries} new entries added")
-                    # Refresh graphs to show new data
+                    # Refresh graphs to show new data (only if Dashboard tab is active)
                     update_graphs()
                 # Schedule next sync in 5 minutes (300,000 ms)
                 sync_timer_id = scrollable_frame.after(300000, periodic_sync)
@@ -2015,6 +2184,896 @@ def create_dashboard_tab(parent_frame, console_instance):
     sync_timer_id = scrollable_frame.after(300000, periodic_sync)
     
     # Initial load and start auto-refresh
+    start_auto_refresh()
+
+
+def create_manual_control_tab(parent_frame, console_instance):
+    """
+    Create the Manual Control tab.
+    Shows device metadata and current sensor readings on the left (same as Dashboard).
+    Shows manual actuator controls on the right with visual representation.
+    """
+    # Initialize or get data logger for this device
+    device_name = console_instance.selected_device
+    if device_name not in sensor_data_loggers:
+        sensor_data_loggers[device_name] = SensorDataLogger(device_name)
+    data_logger = sensor_data_loggers[device_name]
+    
+    # Split the frame into left (info) and right (controls)
+    left_frame = tk.Frame(parent_frame)
+    left_frame.pack(side="left", fill="both", expand=False, padx=(0, 10))
+    
+    right_frame = tk.Frame(parent_frame, bg="#ecf0f1")
+    right_frame.pack(side="right", fill="both", expand=True)
+    
+    # ========== LEFT PANEL: Sensor Info (reuse from Dashboard) ==========
+    canvas = tk.Canvas(left_frame, width=600)
+    scrollbar = tk.Scrollbar(left_frame, orient="vertical", command=canvas.yview)
+    scrollable_frame = tk.Frame(canvas)
+    
+    scrollable_frame.bind(
+        "<Configure>",
+        lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+    )
+    
+    canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+    canvas.configure(yscrollcommand=scrollbar.set)
+    
+    canvas.pack(side="left", fill="both", expand=True)
+    scrollbar.pack(side="right", fill="y")
+    
+    # Title
+    title_label = tk.Label(
+        scrollable_frame,
+        text="🎮 Manual Control",
+        font=("Arial", 16, "bold")
+    )
+    title_label.pack(pady=15)
+    
+    # Device Information Section
+    device_frame = tk.LabelFrame(scrollable_frame, text="Device Information", padx=20, pady=15, font=("Arial", 11, "bold"))
+    device_frame.pack(fill="x", padx=20, pady=10)
+    
+    device_info = devices[console_instance.selected_device]
+    
+    info_items = [
+        ("Device Name:", console_instance.selected_device, "🌱"),
+        ("IP Address:", device_info.get('address', 'Unknown'), "🔗"),
+        ("Port:", str(device_info.get('port', 'Unknown')), "🔌"),
+        ("Connection Status:", "Connected", "✅")
+    ]
+    
+    for i, (label, value, icon) in enumerate(info_items):
+        row_frame = tk.Frame(device_frame)
+        row_frame.pack(fill="x", pady=5)
+        
+        tk.Label(row_frame, text=f"{icon} {label}", font=("Arial", 10, "bold"), anchor="w", width=20).pack(side="left")
+        tk.Label(row_frame, text=value, font=("Arial", 10), fg="#2c3e50", anchor="w").pack(side="left", padx=10)
+    
+    # Current Sensor Readings Section
+    sensor_frame = tk.LabelFrame(scrollable_frame, text="Current Sensor Readings", padx=20, pady=15, font=("Arial", 11, "bold"))
+    sensor_frame.pack(fill="x", padx=20, pady=10)
+    
+    sensor_labels = {}
+    
+    def refresh_sensors():
+        try:
+            device = devices[console_instance.selected_device]
+            url = f"https://{device['address']}:{device['port']}/api/unit-metrics"
+            response = console_instance.session.get(url, timeout=5)
+            
+            if response.status_code == 200:
+                data = response.json()
+                
+                # Log data for historical storage
+                data_logger.log_data(data)
+                
+                # Overall device metrics
+                sensor_labels['total_current'].config(text=f"{data.get('current_mA', 0):.2f} mA")
+                sensor_labels['total_voltage'].config(text=f"{data.get('voltage_mV', 0):.2f} mV")
+                sensor_labels['total_power'].config(text=f"{data.get('power_consumption_mW', 0):.2f} mW")
+                sensor_labels['water_level'].config(text=f"{data.get('water_level_mm', -1)} mm")
+                
+                # Environment sensors
+                temp_c = data.get('temperature_c', -999)
+                humidity = data.get('humidity_rh', -999)
+                if temp_c != -999:
+                    temp_f = (temp_c * 9/5) + 32
+                    sensor_labels['temperature'].config(text=f"{temp_c:.1f}°C ({temp_f:.1f}°F)")
+                else:
+                    sensor_labels['temperature'].config(text="N/A")
+                
+                if humidity != -999:
+                    sensor_labels['humidity'].config(text=f"{humidity:.1f}%")
+                else:
+                    sensor_labels['humidity'].config(text="N/A")
+                
+                # Light sensor
+                lux = data.get('light_lux', -999)
+                visible = data.get('light_visible', 0)
+                infrared = data.get('light_infrared', 0)
+                if lux != -999:
+                    sensor_labels['light_lux'].config(text=f"{lux:.1f} lux")
+                    sensor_labels['light_visible'].config(text=f"{visible}")
+                    sensor_labels['light_infrared'].config(text=f"{infrared}")
+                else:
+                    sensor_labels['light_lux'].config(text="N/A")
+                    sensor_labels['light_visible'].config(text="N/A")
+                    sensor_labels['light_infrared'].config(text="N/A")
+                
+                status_label.config(text="✅ Sensor data updated", fg="#27ae60")
+            else:
+                status_label.config(text="⚠️ Failed to fetch sensor data", fg="#e67e22")
+        except Exception as e:
+            status_label.config(text=f"❌ Error: {str(e)}", fg="#e74c3c")
+    
+    # Device metrics display
+    metrics_subframe = tk.LabelFrame(sensor_frame, text="Current Device Metrics", padx=15, pady=10)
+    metrics_subframe.pack(fill="x", pady=5)
+    
+    metrics_items = [
+        ("Total Current:", "total_current", "⚡", "mA"),
+        ("Voltage:", "total_voltage", "🔋", "mV"),
+        ("Power Consumption:", "total_power", "💡", "mW"),
+        ("Water Level:", "water_level", "💧", "mm")
+    ]
+    
+    for i, (label, key, icon, unit) in enumerate(metrics_items):
+        row_frame = tk.Frame(metrics_subframe)
+        row_frame.pack(fill="x", pady=5)
+        
+        tk.Label(row_frame, text=f"{icon} {label}", font=("Arial", 10, "bold"), anchor="w", width=25).pack(side="left")
+        sensor_labels[key] = tk.Label(row_frame, text=f"0.00 {unit}", font=("Arial", 10), fg="#2c3e50", anchor="w")
+        sensor_labels[key].pack(side="left", padx=10)
+    
+    # Environment sensors display
+    env_subframe = tk.LabelFrame(sensor_frame, text="Environment Sensors", padx=15, pady=10)
+    env_subframe.pack(fill="x", pady=5)
+    
+    env_items = [
+        ("Temperature:", "temperature", "🌡️", "°C"),
+        ("Humidity:", "humidity", "💧", "%RH")
+    ]
+    
+    for i, (label, key, icon, unit) in enumerate(env_items):
+        row_frame = tk.Frame(env_subframe)
+        row_frame.pack(fill="x", pady=5)
+        
+        tk.Label(row_frame, text=icon, font=("Arial", 10, "bold"), anchor="w", width=3).grid(row=0, column=0, sticky="w", padx=(0, 5))
+        tk.Label(row_frame, text=label, font=("Arial", 10, "bold"), anchor="w", width=15).grid(row=0, column=1, sticky="w")
+        sensor_labels[key] = tk.Label(row_frame, text=f"N/A", font=("Arial", 10), fg="#2c3e50", anchor="w")
+        sensor_labels[key].grid(row=0, column=2, sticky="w", padx=(10, 0))
+    
+    # Light sensor display
+    light_subframe = tk.LabelFrame(sensor_frame, text="Light Sensor (TSL2591)", padx=15, pady=10)
+    light_subframe.pack(fill="x", pady=5)
+    
+    light_items = [
+        ("Illuminance:", "light_lux", "☀️", "lux"),
+        ("Visible Light:", "light_visible", "👁️", "counts"),
+        ("Infrared:", "light_infrared", "🔴", "counts")
+    ]
+    
+    for i, (label, key, icon, unit) in enumerate(light_items):
+        row_frame = tk.Frame(light_subframe)
+        row_frame.pack(fill="x", pady=5)
+        
+        tk.Label(row_frame, text=icon, font=("Arial", 10, "bold"), anchor="w", width=3).grid(row=0, column=0, sticky="w", padx=(0, 5))
+        tk.Label(row_frame, text=label, font=("Arial", 10, "bold"), anchor="w", width=15).grid(row=0, column=1, sticky="w")
+        sensor_labels[key] = tk.Label(row_frame, text=f"N/A", font=("Arial", 10), fg="#2c3e50", anchor="w")
+        sensor_labels[key].grid(row=0, column=2, sticky="w", padx=(10, 0))
+    
+    # Command Results Log (scrollable)
+    log_frame = tk.LabelFrame(scrollable_frame, text="📋 Command Log", padx=10, pady=10, font=("Arial", 11, "bold"))
+    log_frame.pack(fill="both", expand=True, padx=20, pady=10)
+    
+    # Create text widget with scrollbar for log
+    log_text_frame = tk.Frame(log_frame)
+    log_text_frame.pack(fill="both", expand=True)
+    
+    log_scrollbar = tk.Scrollbar(log_text_frame)
+    log_scrollbar.pack(side="right", fill="y")
+    
+    log_text = tk.Text(
+        log_text_frame,
+        height=10,
+        width=50,
+        wrap="word",
+        yscrollcommand=log_scrollbar.set,
+        font=("Consolas", 9),
+        bg="#f8f9fa",
+        relief=tk.FLAT,
+        state='disabled'  # Read-only
+    )
+    log_text.pack(side="left", fill="both", expand=True)
+    log_scrollbar.config(command=log_text.yview)
+    
+    # Configure text tags for colored output
+    log_text.tag_config("success", foreground="#27ae60", font=("Consolas", 9, "bold"))
+    log_text.tag_config("error", foreground="#e74c3c", font=("Consolas", 9, "bold"))
+    log_text.tag_config("warning", foreground="#e67e22", font=("Consolas", 9, "bold"))
+    log_text.tag_config("info", foreground="#3498db", font=("Consolas", 9, "bold"))
+    log_text.tag_config("emergency", foreground="#e74c3c", font=("Consolas", 9, "bold"))
+    log_text.tag_config("timestamp", foreground="#7f8c8d", font=("Consolas", 8))
+    
+    def log_message(message, tag="info"):
+        """Add a message to the command log with timestamp"""
+        log_text.config(state='normal')
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        log_text.insert('end', f"[{timestamp}] ", "timestamp")
+        log_text.insert('end', f"{message}\n", tag)
+        log_text.see('end')  # Auto-scroll to bottom
+        log_text.config(state='disabled')
+    
+    # Store log function for use by command buttons
+    scrollable_frame.log_message = log_message
+    
+    # Initial log message
+    log_message("Manual control ready. Configure actuators and click 'Send All Commands'.", "info")
+    
+    # Status bar
+    status_label = tk.Label(
+        scrollable_frame,
+        text="Ready",
+        font=("Arial", 10),
+        fg="#7f8c8d",
+        pady=10
+    )
+    status_label.pack()
+    
+    # Refresh button
+    tk.Button(
+        scrollable_frame,
+        text="🔄 Refresh Sensors",
+        command=refresh_sensors,
+        font=("Arial", 12, "bold"),
+        bg="#3498db",
+        fg="white",
+        padx=20,
+        pady=10
+    ).pack(pady=10)
+    
+    # ========== RIGHT PANEL: Actuator Controls ==========
+    
+    # Add scrollbar for right panel
+    right_canvas = tk.Canvas(right_frame, bg="#ecf0f1")
+    right_scrollbar = tk.Scrollbar(right_frame, orient="vertical", command=right_canvas.yview)
+    right_scrollable = tk.Frame(right_canvas, bg="#ecf0f1")
+    
+    right_scrollable.bind(
+        "<Configure>",
+        lambda e: right_canvas.configure(scrollregion=right_canvas.bbox("all"))
+    )
+    
+    right_canvas.create_window((0, 0), window=right_scrollable, anchor="nw")
+    right_canvas.configure(yscrollcommand=right_scrollbar.set)
+    
+    right_canvas.pack(side="left", fill="both", expand=True)
+    right_scrollbar.pack(side="right", fill="y")
+    
+    # Title for control panel
+    control_title = tk.Label(
+        right_scrollable,
+        text="🎮 GrowPod Actuator Control Panel",
+        font=("Arial", 18, "bold"),
+        bg="#2c3e50",
+        fg="white",
+        pady=15
+    )
+    control_title.pack(fill="x")
+    
+    # Info label
+    info_label = tk.Label(
+        right_scrollable,
+        text="Set PWM values (0-100%) for each actuator. Click 'Send All Commands' to apply.\nEnabled actuators use set value, disabled actuators are turned OFF (0%).",
+        font=("Arial", 10),
+        bg="#ecf0f1",
+        fg="#666",
+        wraplength=800,
+        pady=10
+    )
+    info_label.pack()
+    
+    # Dictionary to store actuator states
+    actuator_states = {}
+    
+    # Define actuators with their properties
+    # NOTE: Air Pump removed - it's been replaced by LED control on the firmware side
+    actuators = [
+        {
+            'name': 'LED Array',
+            'key': 'led',
+            'icon': '💡',
+            'color': '#f39c12',
+            'description': 'Main grow lights for photosynthesis (4 channels)'
+        },
+        {
+            'name': 'Source Pump',
+            'key': 'sourcepump',
+            'icon': '⬆️',
+            'color': '#1abc9c',
+            'description': 'Pumps water from reservoir to system'
+        },
+        {
+            'name': 'Planter Pump',
+            'key': 'planterpump',
+            'icon': '🌱',
+            'color': '#27ae60',
+            'description': 'Circulates solution through plant roots'
+        },
+        {
+            'name': 'Drain Pump',
+            'key': 'drainpump',
+            'icon': '⬇️',
+            'color': '#e74c3c',
+            'description': 'Drains water from system to reservoir'
+        },
+        {
+            'name': 'Food Pump',
+            'key': 'foodpump',
+            'icon': '🍽️',
+            'color': '#9b59b6',
+            'description': 'Doses liquid nutrients into system'
+        }
+    ]
+    
+    # Create control card for each actuator
+    for actuator in actuators:
+        # Actuator card frame
+        card_frame = tk.Frame(right_scrollable, bg="white", relief=tk.RAISED, borderwidth=2)
+        card_frame.pack(fill="x", padx=20, pady=10)
+        
+        # Header with icon and name
+        header_frame = tk.Frame(card_frame, bg=actuator['color'], height=50)
+        header_frame.pack(fill="x")
+        header_frame.pack_propagate(False)
+        
+        header_label = tk.Label(
+            header_frame,
+            text=f"{actuator['icon']} {actuator['name']}",
+            font=("Arial", 14, "bold"),
+            bg=actuator['color'],
+            fg="white"
+        )
+        header_label.pack(side="left", padx=15, pady=10)
+        
+        # For LED, add expand/collapse button
+        if actuator['key'] == 'led':
+            led_expand_var = tk.BooleanVar(value=False)
+            expand_btn = tk.Label(
+                header_frame,
+                text="▶ Individual Channels",
+                font=("Arial", 10),
+                bg=actuator['color'],
+                fg="white",
+                cursor="hand2"
+            )
+            expand_btn.pack(side="right", padx=15)
+        
+        # Description
+        desc_label = tk.Label(
+            card_frame,
+            text=actuator['description'],
+            font=("Arial", 9),
+            fg="#666",
+            bg="white",
+            anchor="w"
+        )
+        desc_label.pack(fill="x", padx=15, pady=(10, 5))
+        
+        # Control section
+        control_frame = tk.Frame(card_frame, bg="white")
+        control_frame.pack(fill="x", padx=15, pady=10)
+        
+        # Enable checkbox
+        enabled_var = tk.BooleanVar(value=False)
+        enable_cb = tk.Checkbutton(
+            control_frame,
+            text="Enable",
+            variable=enabled_var,
+            font=("Arial", 10, "bold"),
+            bg="white",
+            activebackground="white"
+        )
+        enable_cb.grid(row=0, column=0, sticky="w", padx=(0, 20))
+        
+        # PWM value label
+        tk.Label(
+            control_frame,
+            text="PWM Value:",
+            font=("Arial", 10, "bold"),
+            bg="white"
+        ).grid(row=0, column=1, sticky="w", padx=(0, 10))
+        
+        # Current value display
+        value_var = tk.StringVar(value="0%")
+        value_display = tk.Label(
+            control_frame,
+            textvariable=value_var,
+            font=("Arial", 12, "bold"),
+            fg=actuator['color'],
+            bg="white",
+            width=6
+        )
+        value_display.grid(row=0, column=2, padx=(0, 20))
+        
+        # PWM slider
+        pwm_scale = tk.Scale(
+            control_frame,
+            from_=0,
+            to=100,
+            orient="horizontal",
+            length=400,
+            showvalue=0,
+            bg="white",
+            highlightthickness=0,
+            state='disabled'
+        )
+        pwm_scale.set(0)
+        pwm_scale.grid(row=0, column=3, sticky="ew", padx=(0, 10))
+        
+        # Update value label when slider changes
+        def make_update_func(var, scale):
+            def update_label(val):
+                var.set(f"{int(float(val))}%")
+            scale.config(command=update_label)
+            return update_label
+        
+        # Store the update function to potentially override later for LED
+        update_label_func = make_update_func(value_var, pwm_scale)
+        
+        # Enable/disable slider based on checkbox
+        def make_toggle_func(scale, checkbox_var):
+            def toggle():
+                scale.config(state='normal' if checkbox_var.get() else 'disabled')
+            return toggle
+        
+        enable_cb.config(command=make_toggle_func(pwm_scale, enabled_var))
+        
+        # Quick preset buttons
+        preset_frame = tk.Frame(control_frame, bg="white")
+        preset_frame.grid(row=0, column=4, padx=(10, 0))
+        
+        def make_preset_func(scale, value, enable_var):
+            def set_preset():
+                enable_var.set(True)
+                scale.config(state='normal')
+                scale.set(value)
+            return set_preset
+        
+        preset_btn_off = tk.Button(
+            preset_frame,
+            text="OFF",
+            command=make_preset_func(pwm_scale, 0, enabled_var),
+            width=5,
+            bg="#ecf0f1"
+        )
+        preset_btn_off.pack(side="left", padx=2)
+        
+        preset_btn_50 = tk.Button(
+            preset_frame,
+            text="50%",
+            command=make_preset_func(pwm_scale, 50, enabled_var),
+            width=5,
+            bg="#ecf0f1"
+        )
+        preset_btn_50.pack(side="left", padx=2)
+        
+        preset_btn_100 = tk.Button(
+            preset_frame,
+            text="100%",
+            command=make_preset_func(pwm_scale, 100, enabled_var),
+            width=5,
+            bg="#ecf0f1"
+        )
+        preset_btn_100.pack(side="left", padx=2)
+        
+        control_frame.columnconfigure(3, weight=1)
+        
+        # Special handling for LED - add individual channel controls
+        if actuator['key'] == 'led':
+            # Create expandable frame for individual channels (initially hidden)
+            led_channels_frame = tk.Frame(card_frame, bg="#f8f9fa")
+            
+            # Store channel controls
+            led_channel_controls = {}
+            
+            # Create 4 individual LED channel controls
+            for channel in range(1, 5):
+                channel_frame = tk.Frame(led_channels_frame, bg="#f8f9fa")
+                channel_frame.pack(fill="x", padx=15, pady=5)
+                
+                # Channel label
+                tk.Label(
+                    channel_frame,
+                    text=f"Channel {channel}:",
+                    font=("Arial", 9, "bold"),
+                    bg="#f8f9fa",
+                    width=12,
+                    anchor="w"
+                ).grid(row=0, column=0, sticky="w")
+                
+                # Channel value display
+                ch_value_var = tk.StringVar(value="0%")
+                tk.Label(
+                    channel_frame,
+                    textvariable=ch_value_var,
+                    font=("Arial", 10, "bold"),
+                    fg=actuator['color'],
+                    bg="#f8f9fa",
+                    width=6
+                ).grid(row=0, column=1)
+                
+                # Channel slider
+                ch_scale = tk.Scale(
+                    channel_frame,
+                    from_=0,
+                    to=100,
+                    orient="horizontal",
+                    length=350,
+                    showvalue=0,
+                    bg="#f8f9fa",
+                    highlightthickness=0,
+                    state='disabled'
+                )
+                ch_scale.set(0)
+                ch_scale.grid(row=0, column=2, sticky="ew", padx=5)
+                
+                # Update channel value label
+                def make_ch_update_func(var, scale):
+                    def update_label(val):
+                        var.set(f"{int(float(val))}%")
+                    scale.config(command=update_label)
+                    return update_label
+                
+                ch_update_func = make_ch_update_func(ch_value_var, ch_scale)
+                
+                # Channel preset buttons
+                ch_preset_frame = tk.Frame(channel_frame, bg="#f8f9fa")
+                ch_preset_frame.grid(row=0, column=3, padx=5)
+                
+                def make_ch_preset_func(scale, value):
+                    def set_preset():
+                        scale.config(state='normal')
+                        scale.set(value)
+                    return set_preset
+                
+                for preset_val, preset_text in [(0, "OFF"), (50, "50%"), (100, "100%")]:
+                    tk.Button(
+                        ch_preset_frame,
+                        text=preset_text,
+                        command=make_ch_preset_func(ch_scale, preset_val),
+                        width=4,
+                        bg="#ecf0f1",
+                        font=("Arial", 8)
+                    ).pack(side="left", padx=1)
+                
+                channel_frame.columnconfigure(2, weight=1)
+                
+                # Store channel control
+                led_channel_controls[channel] = {
+                    'scale': ch_scale,
+                    'value_var': ch_value_var
+                }
+            
+            # Toggle function for expand/collapse
+            def toggle_led_channels():
+                if led_expand_var.get():
+                    # Collapse
+                    led_channels_frame.pack_forget()
+                    expand_btn.config(text="▶ Individual Channels")
+                    led_expand_var.set(False)
+                    # Re-enable main slider
+                    if enabled_var.get():
+                        pwm_scale.config(state='normal')
+                else:
+                    # Expand
+                    led_channels_frame.pack(fill="x", padx=5, pady=(0, 10))
+                    expand_btn.config(text="▼ Individual Channels")
+                    led_expand_var.set(True)
+                    # Disable main slider when using individual channels
+                    pwm_scale.config(state='disabled')
+                    # Enable individual channel sliders if LED is enabled
+                    for ch_controls in led_channel_controls.values():
+                        ch_controls['scale'].config(state='normal' if enabled_var.get() else 'disabled')
+            
+            # Bind click event to expand button
+            expand_btn.bind("<Button-1>", lambda e: toggle_led_channels())
+            
+            # Override main slider's update function to sync individual channels
+            def make_led_main_slider_update(main_val_var, expand_var, channel_controls):
+                def led_main_slider_update(val):
+                    # Update the value label
+                    main_val_var.set(f"{int(float(val))}%")
+                    # If individual channels are expanded, sync them to match main slider
+                    if expand_var.get():
+                        for ch_controls in channel_controls.values():
+                            ch_controls['scale'].set(int(float(val)))
+                            ch_controls['value_var'].set(f"{int(float(val))}%")
+                return led_main_slider_update
+            
+            # Replace the slider's command with our custom function
+            pwm_scale.config(command=make_led_main_slider_update(value_var, led_expand_var, led_channel_controls))
+            
+            # Override individual channel sliders to update main slider value
+            # This creates bidirectional sync between main and channels
+            for channel, ch_controls in led_channel_controls.items():
+                def make_channel_update_func(ch_num, ch_var, ch_scale, main_scale, main_val_var, expand_var):
+                    def update_channel(val):
+                        # Update this channel's value label
+                        ch_var.set(f"{int(float(val))}%")
+                        # Update main slider value to match (for display sync)
+                        # Use the average of all channels, or just use this channel's value
+                        if expand_var.get():
+                            # Update main slider to show current value (even though disabled)
+                            main_scale.set(int(float(val)))
+                            main_val_var.set(f"{int(float(val))}%")
+                    return update_channel
+                
+                ch_scale = ch_controls['scale']
+                ch_var = ch_controls['value_var']
+                ch_scale.config(command=make_channel_update_func(channel, ch_var, ch_scale, pwm_scale, value_var, led_expand_var))
+            
+            # Override preset buttons for LED to sync all channels when expanded
+            def make_led_preset_func(value, en_var, main_scale, main_val_var, expand_var, channel_controls):
+                def set_led_preset():
+                    en_var.set(True)
+                    main_scale.set(value)
+                    main_val_var.set(f"{value}%")
+                    # If individual channels are expanded, sync all channels
+                    if expand_var.get():
+                        for ch_controls in channel_controls.values():
+                            ch_controls['scale'].set(value)
+                            ch_controls['value_var'].set(f"{value}%")
+                            # Enable sliders if they were disabled
+                            ch_controls['scale'].config(state='normal')
+                    else:
+                        main_scale.config(state='normal')
+                return set_led_preset
+            
+            # Replace preset button commands with LED-aware versions
+            preset_btn_off.config(command=make_led_preset_func(0, enabled_var, pwm_scale, value_var, led_expand_var, led_channel_controls))
+            preset_btn_50.config(command=make_led_preset_func(50, enabled_var, pwm_scale, value_var, led_expand_var, led_channel_controls))
+            preset_btn_100.config(command=make_led_preset_func(100, enabled_var, pwm_scale, value_var, led_expand_var, led_channel_controls))
+            
+            # Override enable checkbox behavior for LED
+            original_toggle = make_toggle_func(pwm_scale, enabled_var)
+            def led_enable_toggle():
+                is_enabled = enabled_var.get()
+                if led_expand_var.get():
+                    # Individual channels mode - enable/disable all channel sliders
+                    for ch_controls in led_channel_controls.values():
+                        ch_controls['scale'].config(state='normal' if is_enabled else 'disabled')
+                else:
+                    # Normal mode - enable/disable main slider
+                    original_toggle()
+            
+            enable_cb.config(command=led_enable_toggle)
+            
+            # Store LED channel controls in actuator state
+            actuator_states[actuator['key']] = {
+                'enabled': enabled_var,
+                'scale': pwm_scale,
+                'value_var': value_var,
+                'led_expand': led_expand_var,
+                'led_channels': led_channel_controls
+            }
+        else:
+            # Store state for non-LED actuators
+            actuator_states[actuator['key']] = {
+                'enabled': enabled_var,
+                'scale': pwm_scale,
+                'value_var': value_var
+            }
+    
+    # Send all commands button
+    def send_all_commands():
+        """Send commands for all actuators (enabled = set value, disabled = 0)"""
+        commands_to_send = []
+        
+        # Build list of commands: enabled actuators get their value, disabled get 0
+        for key, state in actuator_states.items():
+            # Special handling for LED with individual channels
+            if key == 'led' and 'led_expand' in state and state['led_expand'].get():
+                # Individual channel mode - send each channel separately
+                if state['enabled'].get():
+                    for channel, ch_controls in state['led_channels'].items():
+                        value = ch_controls['scale'].get()
+                        commands_to_send.append((key, value, 'led_channel', channel))
+                else:
+                    # Disabled - turn off all channels
+                    for channel in range(1, 5):
+                        commands_to_send.append((key, 0, 'led_channel_off', channel))
+            else:
+                # Normal mode (all channels together or other actuators)
+                if state['enabled'].get():
+                    value = state['scale'].get()
+                    commands_to_send.append((key, value, 'set', None))
+                else:
+                    # Disabled actuators should be explicitly set to 0
+                    commands_to_send.append((key, 0, 'off', None))
+        
+        # Send commands
+        results = []
+        device = devices[console_instance.selected_device]
+        base_url = f"https://{device['address']}:{device['port']}"
+        
+        for command_info in commands_to_send:
+            actuator_key = command_info[0]
+            value = command_info[1]
+            action = command_info[2]
+            channel = command_info[3] if len(command_info) > 3 else None
+            
+            try:
+                url = f"{base_url}/api/actuators/{actuator_key}"
+                
+                # Build payload based on action type
+                if action in ['led_channel', 'led_channel_off']:
+                    # Individual LED channel control
+                    payload = {'channel': channel, 'value': value}
+                else:
+                    # Normal actuator control
+                    payload = {'value': value}
+                
+                response = console_instance.session.post(url, json=payload, timeout=5, verify=False)
+                
+                if response.status_code == 200:
+                    if action == 'off':
+                        results.append(f"✅ {actuator_key}: OFF (0%) - Success")
+                    elif action == 'led_channel_off':
+                        results.append(f"✅ {actuator_key} CH{channel}: OFF (0%) - Success")
+                    elif action == 'led_channel':
+                        results.append(f"✅ {actuator_key} CH{channel}: {value}% - Success")
+                    else:
+                        results.append(f"✅ {actuator_key}: {value}% - Success")
+                else:
+                    results.append(f"❌ {actuator_key}: {value}% - Failed (HTTP {response.status_code})")
+            except Exception as e:
+                results.append(f"❌ {actuator_key}: Error: {str(e)}")
+        
+        # Log results to command log
+        scrollable_frame.log_message("📤 Sending commands to all actuators...", "info")
+        for result in results:
+            if result.startswith("✅"):
+                scrollable_frame.log_message(result, "success")
+            else:
+                scrollable_frame.log_message(result, "error")
+        
+        # Refresh sensors after sending commands
+        scrollable_frame.after(1000, refresh_sensors)
+    
+    # Emergency stop button
+    def emergency_stop():
+        """Set all actuators to 0% (including all LED channels)"""
+        device = devices[console_instance.selected_device]
+        base_url = f"https://{device['address']}:{device['port']}"
+        
+        results = []
+        for key, state in actuator_states.items():
+            try:
+                url = f"{base_url}/api/actuators/{key}"
+                
+                # For LED, turn off all channels
+                if key == 'led':
+                    # Turn off all 4 LED channels
+                    for channel in range(1, 5):
+                        try:
+                            payload = {'channel': channel, 'value': 0}
+                            response = console_instance.session.post(url, json=payload, timeout=5, verify=False)
+                            if response.status_code == 200:
+                                results.append(f"✅ LED CH{channel}: Stopped")
+                        except:
+                            results.append(f"❌ LED CH{channel}: Error")
+                    
+                    # Also send all-channels-off command
+                    payload = {'value': 0}
+                    response = console_instance.session.post(url, json=payload, timeout=5, verify=False)
+                    
+                    # Update UI - main slider and all channel sliders
+                    state['scale'].set(0)
+                    if 'led_channels' in state:
+                        for ch_controls in state['led_channels'].values():
+                            ch_controls['scale'].set(0)
+                else:
+                    # Normal actuator - just turn off
+                    payload = {'value': 0}
+                    response = console_instance.session.post(url, json=payload, timeout=5, verify=False)
+                    
+                    if response.status_code == 200:
+                        results.append(f"✅ {key}: Stopped")
+                    else:
+                        results.append(f"❌ {key}: Failed")
+                    
+                    # Update UI
+                    state['scale'].set(0)
+                
+                # Disable all actuators in UI
+                state['enabled'].set(False)
+                
+            except Exception as e:
+                results.append(f"❌ {key}: Error")
+        
+        # Log results to command log
+        scrollable_frame.log_message("🛑 EMERGENCY STOP EXECUTED", "emergency")
+        for result in results:
+            if result.startswith("✅"):
+                scrollable_frame.log_message(result, "success")
+            else:
+                scrollable_frame.log_message(result, "error")
+        
+        # Refresh sensors
+        scrollable_frame.after(1000, refresh_sensors)
+    
+    # Button frame
+    button_frame = tk.Frame(right_scrollable, bg="#ecf0f1")
+    button_frame.pack(pady=20)
+    
+    tk.Button(
+        button_frame,
+        text="🚀 Send All Commands",
+        command=send_all_commands,
+        font=("Arial", 14, "bold"),
+        bg="#27ae60",
+        fg="white",
+        padx=30,
+        pady=15,
+        width=20
+    ).pack(side="left", padx=10)
+    
+    tk.Button(
+        button_frame,
+        text="🛑 EMERGENCY STOP",
+        command=emergency_stop,
+        font=("Arial", 14, "bold"),
+        bg="#e74c3c",
+        fg="white",
+        padx=30,
+        pady=15,
+        width=20
+    ).pack(side="left", padx=10)
+    
+    # Auto-refresh mechanism (every 5 seconds)
+    auto_refresh_id = None
+    auto_refresh_enabled = True  # Flag to track if auto-refresh should run
+    
+    def auto_refresh():
+        """Automatically refresh sensor data every 5 seconds"""
+        nonlocal auto_refresh_id, auto_refresh_enabled
+        if auto_refresh_enabled:
+            try:
+                refresh_sensors()
+                # Schedule next refresh in 5000ms (5 seconds)
+                auto_refresh_id = scrollable_frame.after(5000, auto_refresh)
+            except tk.TclError:
+                # Widget was destroyed, stop the refresh
+                auto_refresh_enabled = False
+                auto_refresh_id = None
+    
+    def stop_auto_refresh():
+        """Stop the auto-refresh timer"""
+        nonlocal auto_refresh_id, auto_refresh_enabled
+        auto_refresh_enabled = False
+        if auto_refresh_id is not None:
+            scrollable_frame.after_cancel(auto_refresh_id)
+            auto_refresh_id = None
+    
+    def start_auto_refresh():
+        """Start or restart the auto-refresh timer"""
+        nonlocal auto_refresh_id, auto_refresh_enabled
+        auto_refresh_enabled = True
+        # Cancel any existing timer first
+        if auto_refresh_id is not None:
+            scrollable_frame.after_cancel(auto_refresh_id)
+        # Refresh immediately and schedule next
+        refresh_sensors()
+        auto_refresh_id = scrollable_frame.after(5000, auto_refresh)
+    
+    # Store functions for tab switching
+    parent_frame.stop_auto_refresh = stop_auto_refresh
+    parent_frame.start_auto_refresh = start_auto_refresh
+    
+    # Initial load and start auto-refresh
+    refresh_sensors()
     start_auto_refresh()
 
 
