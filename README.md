@@ -15,13 +15,21 @@ An intelligent, energy-efficient deep water culture (DWC) hydroponic system desi
    - Preset buttons (OFF/50%/100%) work in both modes
    - Real-time PWM value display for each channel
 
-2. **Fixed Command Log UI** - Relocated scrollable command log to left sensor panel
+2. **24-Hour Sensor Data Cache & Sync** - Persistent historical data storage and retrieval
+   - Firmware now stores up to 24 hours of sensor readings in a circular buffer
+   - SQLite-backed database on Python console for long-term storage
+   - Automatic gap-filling: console syncs only new data since last update
+   - `/api/sensors/history` endpoint for batch retrieval with timestamp filtering
+   - Efficient 5-minute periodic sync runs continuously in background
+   - CSV export support for data analysis and sharing
+
+3. **Fixed Command Log UI** - Relocated scrollable command log to left sensor panel
    - Commands no longer push buttons around when results appear
    - Color-coded log entries (green for success, red for errors, blue for info)
    - Timestamps for each command execution
    - Fixed position ensures stable, professional UI layout
 
-3. **Auto-Refresh Implementation** - Automatic sensor data updates in Manual Control tab
+4. **Auto-Refresh Implementation** - Automatic sensor data updates in Manual Control tab
    - Consistent 5-second refresh rate matching Dashboard behavior
    - Properly scoped closure functions prevent variable capture bugs
    - Tab-aware: auto-refresh pauses when switching away from active tabs
