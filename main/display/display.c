@@ -84,42 +84,50 @@ static void update_plant_info_scroll(void);
 // Timer callback to update the display with sensor readings
 static void lvgl_sensor_update_cb(lv_timer_t *timer)
 {
-    esp_err_t ret;
-    float current_ma, voltage_mv, power_mw;
-    float temperature_c, humidity_rh;
+    float current_ma = 0.0f, voltage_mv = 0.0f, power_mw = 0.0f;
+    float temperature_c = 0.0f, humidity_rh = 0.0f;
     int water_level_mm;
     char power_str[48], temp_humidity_str[40], light_str[32],
          water_level_str[32], plant_info_str[128],
          planter_pwm_str[24], led_pwm_str[24];
     
-    // Read power monitor data through sensor manager API
-    ret = sensor_api_read_power_all(&current_ma, &voltage_mv, &power_mw);
+    // CRITICAL: Use ONLY cached reads (non-blocking) in LVGL task
+    // The LVGL task must never block or it will trigger the watchdog
+    // All sensor reads use sensor_manager_get_data_cached() which returns immediately
     
-    if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "Error reading power monitor data: %s", esp_err_to_name(ret));
-        // Use default values if read fails
-        current_ma = 0.0f;
-        voltage_mv = 0.0f;
-        power_mw = 0.0f;
+    // Read power monitor data from cache (non-blocking)
+    sensor_data_t power_data;
+    esp_err_t ret = sensor_manager_get_data_cached(SENSOR_TYPE_POWER_CURRENT, &power_data, NULL);
+    if (ret == ESP_OK) {
+        current_ma = power_data.power.value;
     }
     
-    // Read temperature and humidity
-    ret = sensor_api_read_environment_all(&temperature_c, &humidity_rh);
-    if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "Error reading environment data: %s", esp_err_to_name(ret));
-        temperature_c = 0.0f;
-        humidity_rh = 0.0f;
+    ret = sensor_manager_get_data_cached(SENSOR_TYPE_POWER_VOLTAGE, &power_data, NULL);
+    if (ret == ESP_OK) {
+        voltage_mv = power_data.power.value;
     }
     
-    // Read light sensor
+    ret = sensor_manager_get_data_cached(SENSOR_TYPE_POWER_POWER, &power_data, NULL);
+    if (ret == ESP_OK) {
+        power_mw = power_data.power.value;
+    }
+    
+    // Read temperature and humidity from cache (non-blocking)
+    sensor_data_t env_data;
+    ret = sensor_manager_get_data_cached(SENSOR_TYPE_TEMPERATURE_AND_HUMIDITY, &env_data, NULL);
+    if (ret == ESP_OK) {
+        temperature_c = env_data.environment.temperature_c;
+        humidity_rh = env_data.environment.humidity_rh;
+    }
+    
+    // Read light sensor from cache (non-blocking)
     sensor_data_t light_data;
     ret = sensor_manager_get_data_cached(SENSOR_TYPE_LIGHT, &light_data, NULL);
     if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "Error reading light sensor: %s", esp_err_to_name(ret));
         light_data.light.lux = 0.0f;
     }
     
-    // Read water level sensor (use non-blocking function)
+    // Read water level sensor (already non-blocking)
     water_level_mm = distance_sensor_read_mm();
     
     // Format power in SI units (A, V, W)
@@ -394,15 +402,38 @@ void display_lvgl_init(void)
 }
 
 // Helper: fill entire screen with a solid color
+// Clear in chunks to avoid large DMA allocation (saves ~65KB)
 static esp_err_t panel_clear_color(esp_lcd_panel_handle_t panel, uint16_t color)
 {
-    size_t px_count = LCD_WIDTH * LCD_HEIGHT;
-    uint16_t *buf = heap_caps_malloc(px_count * sizeof(uint16_t), MALLOC_CAP_DMA);
-    if (!buf) return ESP_ERR_NO_MEM;
-    for (size_t i = 0; i < px_count; i++) {
+    // Use smaller chunk size to reduce memory pressure
+    // Clear screen in horizontal strips of 10 lines at a time
+    const int CHUNK_LINES = 10;
+    const size_t chunk_pixels = LCD_WIDTH * CHUNK_LINES;
+    const size_t chunk_bytes = chunk_pixels * sizeof(uint16_t);
+    
+    // Allocate one reusable buffer for chunks
+    uint16_t *buf = heap_caps_malloc(chunk_bytes, MALLOC_CAP_DMA);
+    if (!buf) {
+        ESP_LOGE(TAG, "Failed to allocate %zu bytes for display clear buffer", chunk_bytes);
+        return ESP_ERR_NO_MEM;
+    }
+    
+    // Fill buffer with color
+    for (size_t i = 0; i < chunk_pixels; i++) {
         buf[i] = color;
     }
-    esp_err_t ret = esp_lcd_panel_draw_bitmap(panel, 0, 0, LCD_WIDTH, LCD_HEIGHT, buf);
+    
+    // Clear screen in horizontal strips
+    esp_err_t ret = ESP_OK;
+    for (int y = 0; y < LCD_HEIGHT; y += CHUNK_LINES) {
+        int lines_to_draw = (y + CHUNK_LINES <= LCD_HEIGHT) ? CHUNK_LINES : (LCD_HEIGHT - y);
+        ret = esp_lcd_panel_draw_bitmap(panel, 0, y, LCD_WIDTH, y + lines_to_draw, buf);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to draw chunk at y=%d: %s", y, esp_err_to_name(ret));
+            break;
+        }
+    }
+    
     heap_caps_free(buf);
     return ret;
 }

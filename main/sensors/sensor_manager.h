@@ -112,6 +112,7 @@ typedef struct {
     float *value_out;               // Pointer to store result
     esp_err_t *error_out;           // Pointer to store error code (optional)
     SemaphoreHandle_t done_sem;     // Semaphore to signal completion
+    volatile bool *abandoned;       // Flag indicating request was abandoned (timeout)
 } sensor_request_t;
 
 /**

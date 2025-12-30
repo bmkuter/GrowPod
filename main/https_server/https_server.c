@@ -945,8 +945,12 @@ static void routine_empty_pod_task(void *pvParam)
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(250));              // poll every 250 ms
 
+        // Use cached power readings for fast polling (non-blocking)
         float cur_mA=0, volt_mV=0, pwr_mW=0;
-        sensor_api_read_power_all(&cur_mA, &volt_mV, &pwr_mW);
+        sensor_data_t power_data = {0};
+        if (sensor_manager_get_data_cached(SENSOR_TYPE_POWER_POWER, &power_data, NULL) == ESP_OK) {
+            pwr_mW = power_data.power.value;
+        }
         total_power += (pwr_mW * 0.25f);             // integrate 0.25 s slices
 
         dist_mm = distance_sensor_read_mm();
@@ -1074,8 +1078,12 @@ static void routine_fill_pod_task(void *pvParam)
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(250));
 
+        // Use cached power readings for fast polling (non-blocking)
         float cur_mA=0, volt_mV=0, pwr_mW=0;
-        sensor_api_read_power_all(&cur_mA, &volt_mV, &pwr_mW);
+        sensor_data_t power_data = {0};
+        if (sensor_manager_get_data_cached(SENSOR_TYPE_POWER_POWER, &power_data, NULL) == ESP_OK) {
+            pwr_mW = power_data.power.value;
+        }
         total_power += (pwr_mW * 0.25f);
 
         dist_mm = distance_sensor_read_mm();
@@ -1711,18 +1719,29 @@ static esp_err_t led_post_handler(httpd_req_t *req)
 static esp_err_t unit_metrics_get_handler(httpd_req_t *req) {
     cJSON *root = cJSON_CreateObject();
 
-    // Power sensor readings
+    // Power sensor readings (use cached values for fast response)
     float cur_mA = 0.0f, volt_mV = 0.0f, pwr_mW = 0.0f;
-    sensor_api_read_power_all(&cur_mA, &volt_mV, &pwr_mW);
+    sensor_data_t power_data = {0};
+    sensor_manager_get_data_cached(SENSOR_TYPE_POWER_CURRENT, &power_data, NULL);
+    cur_mA = power_data.power.value;
+    sensor_manager_get_data_cached(SENSOR_TYPE_POWER_VOLTAGE, &power_data, NULL);
+    volt_mV = power_data.power.value;
+    sensor_manager_get_data_cached(SENSOR_TYPE_POWER_POWER, &power_data, NULL);
+    pwr_mW = power_data.power.value;
 
     // Water level
     int dist_mm = distance_sensor_read_mm();
     
-    // Temperature and humidity
+    // Temperature and humidity (use cached values for fast response)
     float temperature_c = 0.0f, humidity_rh = 0.0f;
-    esp_err_t env_ret = sensor_api_read_environment_all(&temperature_c, &humidity_rh);
+    sensor_data_t env_data = {0};
+    esp_err_t env_ret = sensor_manager_get_data_cached(SENSOR_TYPE_TEMPERATURE_AND_HUMIDITY, &env_data, NULL);
+    if (env_ret == ESP_OK) {
+        temperature_c = env_data.environment.temperature_c;
+        humidity_rh = env_data.environment.humidity_rh;
+    }
     
-    // Light sensor readings
+    // Light sensor readings (already using cached)
     sensor_data_t light_data = {0};
     esp_err_t light_ret = sensor_manager_get_data_cached(SENSOR_TYPE_LIGHT, &light_data, NULL);
     

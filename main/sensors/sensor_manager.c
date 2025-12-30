@@ -529,6 +529,12 @@ static void sensor_manager_task(void *arg) {
         while (xQueueReceive(g_sensor_mgr.request_queue, &request, 0) == pdTRUE) {
             ESP_LOGD(TAG, "Processing request for %s", sensor_type_to_string(request.sensor_type));
             
+            // Check if request was abandoned (timeout)
+            if (request.abandoned != NULL && *request.abandoned) {
+                ESP_LOGD(TAG, "Skipping abandoned request for %s", sensor_type_to_string(request.sensor_type));
+                continue;
+            }
+            
             // Get cached value
             esp_err_t ret = sensor_manager_get_cached(
                 request.sensor_type,
@@ -540,8 +546,9 @@ static void sensor_manager_task(void *arg) {
                 *request.error_out = ret;
             }
             
-            // Signal completion
-            if (request.done_sem != NULL) {
+            // Signal completion only if not abandoned
+            if (request.done_sem != NULL && 
+                (request.abandoned == NULL || !*request.abandoned)) {
                 xSemaphoreGive(request.done_sem);
             }
         }
@@ -605,7 +612,8 @@ esp_err_t sensor_manager_read(sensor_type_t sensor_type, float *value, uint32_t 
     ESP_LOGD(TAG, "Queuing request for fresh data from %s (total misses: %lu)", 
              sensor_type_to_string(sensor_type), g_sensor_mgr.cache_misses);
     
-    // Create request
+    // Create request with abandoned flag
+    volatile bool abandoned = false;  // Stack variable, valid during our wait
     SemaphoreHandle_t done_sem = xSemaphoreCreateBinary();
     if (done_sem == NULL) {
         return ESP_ERR_NO_MEM;
@@ -615,7 +623,8 @@ esp_err_t sensor_manager_read(sensor_type_t sensor_type, float *value, uint32_t 
         .sensor_type = sensor_type,
         .value_out = value,
         .error_out = &ret,
-        .done_sem = done_sem
+        .done_sem = done_sem,
+        .abandoned = &abandoned
     };
     
     // Send request to sensor task
@@ -627,6 +636,10 @@ esp_err_t sensor_manager_read(sensor_type_t sensor_type, float *value, uint32_t 
     
     // Wait for completion
     if (xSemaphoreTake(done_sem, pdMS_TO_TICKS(timeout_ms)) != pdTRUE) {
+        // Mark request as abandoned so sensor task won't try to signal the semaphore
+        abandoned = true;
+        // Small delay to ensure sensor task sees the flag if it's processing now
+        vTaskDelay(pdMS_TO_TICKS(10));
         vSemaphoreDelete(done_sem);
         ESP_LOGW(TAG, "Request timeout for %s", sensor_type_to_string(sensor_type));
         return ESP_ERR_TIMEOUT;
