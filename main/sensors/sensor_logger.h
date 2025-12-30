@@ -3,7 +3,7 @@
  * @brief Sensor data logging to persistent storage
  * 
  * This module logs sensor readings to LittleFS at 1-minute intervals,
- * maintaining a rolling 24-hour circular buffer (1,440 entries max).
+ * maintaining a rolling 2-hour circular buffer (120 entries max).
  * 
  * Features:
  * - Circular buffer: oldest entries automatically overwritten

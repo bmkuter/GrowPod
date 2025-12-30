@@ -10,6 +10,7 @@ import json
 from apscheduler.schedulers.background import BackgroundScheduler
 from datetime import datetime, timedelta
 import time
+import math
 import tkinter as tk
 from tkinter import messagebox, ttk, filedialog
 import csv
@@ -309,96 +310,7 @@ class SensorDatabase:
             self.conn.close()
             self.conn = None
 
-class SensorDataLogger:
-    """Handles sensor data logging to CSV and in-memory storage for graphing"""
-    
-    def __init__(self, device_name):
-        self.device_name = device_name
-        self.csv_file = os.path.join(data_dir, f"{device_name}_sensor_data.csv")
-        
-        # In-memory storage using deque for efficient append/pop
-        self.timestamps = deque(maxlen=MAX_GRAPH_POINTS)
-        self.temperature = deque(maxlen=MAX_GRAPH_POINTS)
-        self.humidity = deque(maxlen=MAX_GRAPH_POINTS)
-        self.light_lux = deque(maxlen=MAX_GRAPH_POINTS)
-        self.light_visible = deque(maxlen=MAX_GRAPH_POINTS)
-        self.light_infrared = deque(maxlen=MAX_GRAPH_POINTS)
-        self.power_mw = deque(maxlen=MAX_GRAPH_POINTS)
-        self.current_ma = deque(maxlen=MAX_GRAPH_POINTS)
-        self.voltage_mv = deque(maxlen=MAX_GRAPH_POINTS)
-        self.water_level_mm = deque(maxlen=MAX_GRAPH_POINTS)
-        
-        # Create CSV file with headers if it doesn't exist
-        if not os.path.exists(self.csv_file):
-            with open(self.csv_file, 'w', newline='') as f:
-                writer = csv.writer(f)
-                writer.writerow([
-                    'timestamp', 'temperature_c', 'humidity_rh', 'light_lux', 
-                    'light_visible', 'light_infrared', 'power_mw', 'current_ma', 
-                    'voltage_mv', 'water_level_mm'
-                ])
-    
-    def log_data(self, sensor_data):
-        """
-        Log sensor data to CSV and in-memory storage
-        
-        Args:
-            sensor_data: Dictionary from /api/unit-metrics JSON response
-        """
-        timestamp = datetime.now()
-        
-        # Extract data with defaults for unavailable sensors
-        temp_c = sensor_data.get('temperature_c', -999)
-        humidity = sensor_data.get('humidity_rh', -999)
-        lux = sensor_data.get('light_lux', -999)
-        visible = sensor_data.get('light_visible', 0)
-        infrared = sensor_data.get('light_infrared', 0)
-        power = sensor_data.get('power_consumption_mW', 0)
-        current = sensor_data.get('current_mA', 0)
-        voltage = sensor_data.get('voltage_mV', 0)
-        water = sensor_data.get('water_level_mm', -1)
-        
-        # Store in memory (only valid data for graphing)
-        self.timestamps.append(timestamp)
-        self.temperature.append(temp_c if temp_c != -999 else None)
-        self.humidity.append(humidity if humidity != -999 else None)
-        self.light_lux.append(lux if lux != -999 else None)
-        self.light_visible.append(visible if visible > 0 else None)
-        self.light_infrared.append(infrared if infrared > 0 else None)
-        self.power_mw.append(power)
-        self.current_ma.append(current)
-        self.voltage_mv.append(voltage)
-        self.water_level_mm.append(water if water >= 0 else None)
-        
-        # Append to CSV file
-        try:
-            with open(self.csv_file, 'a', newline='') as f:
-                writer = csv.writer(f)
-                writer.writerow([
-                    timestamp.strftime('%Y-%m-%d %H:%M:%S'),
-                    temp_c, humidity, lux, visible, infrared,
-                    power, current, voltage, water
-                ])
-        except Exception as e:
-            logger.error(f"Failed to write sensor data to CSV: {e}")
-    
-    def get_graph_data(self):
-        """Return current in-memory data for graphing"""
-        return {
-            'timestamps': list(self.timestamps),
-            'temperature': list(self.temperature),
-            'humidity': list(self.humidity),
-            'light_lux': list(self.light_lux),
-            'light_visible': list(self.light_visible),
-            'light_infrared': list(self.light_infrared),
-            'power_mw': list(self.power_mw),
-            'current_ma': list(self.current_ma),
-            'voltage_mv': list(self.voltage_mv),
-            'water_level_mm': list(self.water_level_mm)
-        }
-
-# Global dictionary to store data loggers per device
-sensor_data_loggers = {}
+# Legacy CSV logging removed - all data now stored in SQLite database
 
 def prompt_schedule_24(initial_schedule=None):
     """
@@ -1533,11 +1445,8 @@ def create_dashboard_tab(parent_frame, console_instance):
     Shows device metadata, current sensor readings, and system status on the left.
     Shows real-time graphs on the right.
     """
-    # Initialize or get data logger for this device
+    # Get device name
     device_name = console_instance.selected_device
-    if device_name not in sensor_data_loggers:
-        sensor_data_loggers[device_name] = SensorDataLogger(device_name)
-    data_logger = sensor_data_loggers[device_name]
     
     # Initialize database for persistent historical storage
     database = SensorDatabase(device_name)
@@ -1612,16 +1521,22 @@ def create_dashboard_tab(parent_frame, console_instance):
     plant_info_labels = {}
     
     def refresh_plant_info():
-        result = console_instance._get_plant_info()
-        
-        if result and result.get('exists'):
-            plant_info_labels['name'].config(text=result.get('plant_name', 'Unknown'))
-            plant_info_labels['date'].config(text=result.get('start_date', 'Unknown'))
-            plant_info_labels['days'].config(text=f"{result.get('days_growing', 0)} days")
-        else:
-            plant_info_labels['name'].config(text="(not set)")
-            plant_info_labels['date'].config(text="(not set)")
-            plant_info_labels['days'].config(text="(not set)")
+        try:
+            scrollable_frame.log_message("Refreshing plant information...", "info")
+            result = console_instance._get_plant_info()
+            
+            if result and result.get('exists'):
+                plant_info_labels['name'].config(text=result.get('plant_name', 'Unknown'))
+                plant_info_labels['date'].config(text=result.get('start_date', 'Unknown'))
+                plant_info_labels['days'].config(text=f"{result.get('days_growing', 0)} days")
+                scrollable_frame.log_message(f"Plant info updated: {result.get('plant_name', 'Unknown')}", "success")
+            else:
+                plant_info_labels['name'].config(text="(not set)")
+                plant_info_labels['date'].config(text="(not set)")
+                plant_info_labels['days'].config(text="(not set)")
+                scrollable_frame.log_message("No plant information set", "warning")
+        except Exception as e:
+            scrollable_frame.log_message(f"Error refreshing plant info: {str(e)}", "error")
     
     plant_items = [
         ("Plant Name:", "name", "🌿"),
@@ -1645,15 +1560,13 @@ def create_dashboard_tab(parent_frame, console_instance):
     
     def refresh_sensors():
         try:
+            scrollable_frame.log_message("Refreshing sensor data...", "info")
             device = devices[console_instance.selected_device]
             url = f"https://{device['address']}:{device['port']}/api/unit-metrics"
             response = console_instance.session.get(url, timeout=5)
             
             if response.status_code == 200:
                 data = response.json()
-                
-                # Log data for historical storage and graphing
-                data_logger.log_data(data)
                 
                 # Update MAC address if available
                 if 'mac_address' in data:
@@ -1692,14 +1605,17 @@ def create_dashboard_tab(parent_frame, console_instance):
                     sensor_labels['light_visible'].config(text="N/A")
                     sensor_labels['light_infrared'].config(text="N/A")
                 
-                # Update graphs
-                update_graphs()
+                # Update graphs with current time range selection
+                update_graphs(current_hours_selection[0])
                 
                 status_label.config(text="✅ Sensor data updated", fg="#27ae60")
+                scrollable_frame.log_message("Sensor data updated successfully", "success")
             else:
                 status_label.config(text="⚠️ Failed to fetch sensor data", fg="#e67e22")
+                scrollable_frame.log_message(f"Failed to fetch sensor data (HTTP {response.status_code})", "error")
         except Exception as e:
             status_label.config(text=f"❌ Error: {str(e)}", fg="#e74c3c")
+            scrollable_frame.log_message(f"Error refreshing sensors: {str(e)}", "error")
     
     # Device metrics display
     metrics_subframe = tk.LabelFrame(sensor_frame, text="Current Device Metrics", padx=15, pady=10)
@@ -1759,16 +1675,51 @@ def create_dashboard_tab(parent_frame, console_instance):
         sensor_labels[key] = tk.Label(row_frame, text=f"N/A", font=("Arial", 10), fg="#2c3e50", anchor="w")
         sensor_labels[key].grid(row=0, column=2, sticky="w", padx=(10, 0))
     
-    # Additional sensors placeholder (for future expansion)
-    additional_subframe = tk.LabelFrame(sensor_frame, text="Additional Sensors (Future Expansion)", padx=15, pady=10)
-    additional_subframe.pack(fill="x", pady=5)
+    # Console Log Section
+    log_frame = tk.LabelFrame(sensor_frame, text="📋 Console Log", padx=10, pady=10, font=("Arial", 11, "bold"))
+    log_frame.pack(fill="both", expand=True, pady=10)
     
-    tk.Label(
-        additional_subframe,
-        text="Per-actuator power metrics, pH, EC, and other sensors will appear here",
-        font=("Arial", 9),
-        fg="#999"
-    ).pack(pady=10)
+    # Create text widget with scrollbar for log
+    log_text_frame = tk.Frame(log_frame)
+    log_text_frame.pack(fill="both", expand=True)
+    
+    log_scrollbar = tk.Scrollbar(log_text_frame)
+    log_scrollbar.pack(side="right", fill="y")
+    
+    log_text = tk.Text(
+        log_text_frame,
+        height=8,
+        wrap="word",
+        yscrollcommand=log_scrollbar.set,
+        font=("Consolas", 9),
+        bg="#f8f9fa",
+        relief=tk.FLAT,
+        state='disabled'  # Read-only
+    )
+    log_text.pack(side="left", fill="both", expand=True)
+    log_scrollbar.config(command=log_text.yview)
+    
+    # Configure text tags for colored output
+    log_text.tag_config("success", foreground="#27ae60", font=("Consolas", 9, "bold"))
+    log_text.tag_config("error", foreground="#e74c3c", font=("Consolas", 9, "bold"))
+    log_text.tag_config("warning", foreground="#e67e22", font=("Consolas", 9, "bold"))
+    log_text.tag_config("info", foreground="#3498db", font=("Consolas", 9, "bold"))
+    log_text.tag_config("timestamp", foreground="#7f8c8d", font=("Consolas", 8))
+    
+    def log_message(message, tag="info"):
+        """Add a message to the console log with timestamp"""
+        log_text.config(state='normal')
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        log_text.insert('end', f"[{timestamp}] ", "timestamp")
+        log_text.insert('end', f"{message}\n", tag)
+        log_text.see('end')  # Auto-scroll to bottom
+        log_text.config(state='disabled')
+    
+    # Store log function for use by refresh operations
+    scrollable_frame.log_message = log_message
+    
+    # Initial log message
+    log_message("Dashboard initialized. Use 'Refresh All Data' to update sensor readings.", "info")
     
     # Action buttons
     action_frame = tk.Frame(scrollable_frame)
@@ -1808,6 +1759,7 @@ def create_dashboard_tab(parent_frame, console_instance):
     
     # Time range variable and buttons
     selected_time_range = tk.StringVar(value="24h")
+    current_hours_selection = [24]  # Use list to allow modification in nested functions
     
     time_ranges = [
         ("1h", "1 Hour", 1),
@@ -1819,11 +1771,12 @@ def create_dashboard_tab(parent_frame, console_instance):
     
     def set_time_range(hours):
         """Update graphs to show selected time range"""
+        current_hours_selection[0] = hours  # Track current selection
         update_graphs(hours)
     
-    # Create time range buttons
+    # Create time range buttons in their own row
     button_frame = tk.Frame(control_frame, bg="#ecf0f1")
-    button_frame.pack(side="left", padx=(0, 20))
+    button_frame.pack(side="top", fill="x", pady=(0, 10))
     
     for value, label, hours in time_ranges:
         btn = tk.Radiobutton(
@@ -1842,6 +1795,10 @@ def create_dashboard_tab(parent_frame, console_instance):
             pady=3
         )
         btn.pack(side="left", padx=2)
+    
+    # Second row: Export button, clear button, and instructions
+    actions_frame = tk.Frame(control_frame, bg="#ecf0f1")
+    actions_frame.pack(side="top", fill="x")
     
     # Export button
     def export_to_csv():
@@ -1911,7 +1868,7 @@ def create_dashboard_tab(parent_frame, console_instance):
             logging.error(f"Export failed: {e}", exc_info=True)
     
     export_btn = tk.Button(
-        control_frame,
+        actions_frame,
         text="📥 Export to CSV",
         command=export_to_csv,
         font=("Arial", 10, "bold"),
@@ -1922,7 +1879,31 @@ def create_dashboard_tab(parent_frame, console_instance):
         relief="raised",
         cursor="hand2"
     )
-    export_btn.pack(side="left")
+    export_btn.pack(side="left", padx=(0, 10))
+    
+    # Clear annotations button (will be configured after annotations are set up)
+    clear_annotations_btn = tk.Button(
+        actions_frame,
+        text="🗑️ Clear Annotations",
+        font=("Arial", 10, "bold"),
+        bg="#e74c3c",
+        fg="white",
+        padx=15,
+        pady=5,
+        relief="raised",
+        cursor="hand2"
+    )
+    clear_annotations_btn.pack(side="left", padx=(0, 20))
+    
+    # Instructions label
+    instructions_label = tk.Label(
+        actions_frame,
+        text="💡 Click graph to show data point \r\n Right-click to clear | Left-click + drag to scroll",
+        font=("Arial", 9, "italic"),
+        bg="#ecf0f1",
+        fg="#555"
+    )
+    instructions_label.pack(side="left", padx=10)
     
     # Create matplotlib figure with subplots
     fig = Figure(figsize=(10, 12), dpi=100, facecolor='#f0f0f0')
@@ -2020,81 +2001,108 @@ def create_dashboard_tab(parent_frame, console_instance):
                 current_ma.append(reading['current_ma'] if reading['current_ma'] is not None else None)
                 water_level_mm.append(reading['water_level_mm'] if reading['water_level_mm'] not in [None, -1] else None)
             
-            # Filter out None values for plotting
-            def filter_data(times, values):
+            # Filter out None values for plotting and detect gaps
+            def filter_data_with_gaps(times, values, max_gap_seconds=180):
+                """
+                Filter data and insert NaN for gaps to prevent false line connections.
+                
+                Args:
+                    times: List of timestamps
+                    values: List of sensor values
+                    max_gap_seconds: Maximum time gap before inserting NaN (default: 3 minutes)
+                
+                Returns:
+                    Tuple of (filtered_times, filtered_values) with NaN gaps inserted
+                """
                 filtered_times = []
                 filtered_values = []
-                for t, v in zip(times, values):
+                
+                for i, (t, v) in enumerate(zip(times, values)):
                     if v is not None:
+                        # Check for gap since last valid data point
+                        if filtered_times and (t - filtered_times[-1]).total_seconds() > max_gap_seconds:
+                            # Insert NaN to break the line
+                            filtered_times.append(filtered_times[-1] + timedelta(seconds=1))
+                            filtered_values.append(float('nan'))
+                            filtered_times.append(t - timedelta(seconds=1))
+                            filtered_values.append(float('nan'))
+                        
                         filtered_times.append(t)
                         filtered_values.append(v)
+                
                 return filtered_times, filtered_values
             
             # Update temperature & humidity
-            temp_times, temp_values = filter_data(timestamps, temperature)
-            humid_times, humid_values = filter_data(timestamps, humidity)
+            temp_times, temp_values = filter_data_with_gaps(timestamps, temperature)
+            humid_times, humid_values = filter_data_with_gaps(timestamps, humidity)
             
             line_temp.set_data(temp_times, temp_values)
             line_humid.set_data(humid_times, humid_values)
             
             if temp_times or humid_times:
                 all_times = temp_times + humid_times
-                all_values = temp_values + humid_values
+                all_values = [v for v in (temp_values + humid_values) if not math.isnan(v)]
                 # Add small padding if min==max to avoid singular transformation
-                time_min, time_max = min(all_times), max(all_times)
-                if time_min == time_max:
-                    time_min = time_min - timedelta(seconds=30)
-                    time_max = time_max + timedelta(seconds=30)
-                ax_temp_humid.set_xlim(time_min, time_max)
-                ax_temp_humid.set_ylim(min(all_values) - 5, max(all_values) + 5)
+                if all_values:
+                    time_min, time_max = min(all_times), max(all_times)
+                    if time_min == time_max:
+                        time_min = time_min - timedelta(seconds=30)
+                        time_max = time_max + timedelta(seconds=30)
+                    ax_temp_humid.set_xlim(time_min, time_max)
+                    ax_temp_humid.set_ylim(min(all_values) - 5, max(all_values) + 5)
             
             # Update light
-            lux_times, lux_values = filter_data(timestamps, light_lux)
+            lux_times, lux_values = filter_data_with_gaps(timestamps, light_lux)
             line_lux.set_data(lux_times, lux_values)
             
             if lux_times:
-                time_min, time_max = min(lux_times), max(lux_times)
-                if time_min == time_max:
-                    time_min = time_min - timedelta(seconds=30)
-                    time_max = time_max + timedelta(seconds=30)
-                ax_light.set_xlim(time_min, time_max)
-                ax_light.set_ylim(0, max(lux_values) * 1.1 if lux_values else 100)
+                lux_values_no_nan = [v for v in lux_values if not math.isnan(v)]
+                if lux_values_no_nan:
+                    time_min, time_max = min(lux_times), max(lux_times)
+                    if time_min == time_max:
+                        time_min = time_min - timedelta(seconds=30)
+                        time_max = time_max + timedelta(seconds=30)
+                    ax_light.set_xlim(time_min, time_max)
+                    ax_light.set_ylim(0, max(lux_values_no_nan) * 1.1)
             
             # Update power & current
-            power_times, power_values = filter_data(timestamps, power_mw)
-            current_times, current_values = filter_data(timestamps, current_ma)
+            power_times, power_values = filter_data_with_gaps(timestamps, power_mw)
+            current_times, current_values = filter_data_with_gaps(timestamps, current_ma)
             
             line_power.set_data(power_times, power_values)
             line_current.set_data(current_times, current_values)
             
             if power_times or current_times:
                 all_times = power_times + current_times
-                all_values = power_values + current_values
-                time_min, time_max = min(all_times), max(all_times)
-                if time_min == time_max:
-                    time_min = time_min - timedelta(seconds=30)
-                    time_max = time_max + timedelta(seconds=30)
-                ax_power.set_xlim(time_min, time_max)
-                ax_power.set_ylim(0, max(all_values) * 1.1 if all_values else 100)
+                all_values = [v for v in (power_values + current_values) if not math.isnan(v)]
+                if all_values:
+                    time_min, time_max = min(all_times), max(all_times)
+                    if time_min == time_max:
+                        time_min = time_min - timedelta(seconds=30)
+                        time_max = time_max + timedelta(seconds=30)
+                    ax_power.set_xlim(time_min, time_max)
+                    ax_power.set_ylim(0, max(all_values) * 1.1)
             
             # Update water level
-            water_times, water_values = filter_data(timestamps, water_level_mm)
+            water_times, water_values = filter_data_with_gaps(timestamps, water_level_mm)
             line_water.set_data(water_times, water_values)
             
             if water_times:
-                time_min, time_max = min(water_times), max(water_times)
-                if time_min == time_max:
-                    time_min = time_min - timedelta(seconds=30)
-                    time_max = time_max + timedelta(seconds=30)
-                ax_water.set_xlim(time_min, time_max)
-                
-                # Fix for identical water level values (prevent matplotlib warning)
-                if water_values:
-                    val_min, val_max = min(water_values), max(water_values)
+                water_values_no_nan = [v for v in water_values if not math.isnan(v)]
+                if water_values_no_nan:
+                    time_min, time_max = min(water_times), max(water_times)
+                    if time_min == time_max:
+                        time_min = time_min - timedelta(seconds=30)
+                        time_max = time_max + timedelta(seconds=30)
+                    ax_water.set_xlim(time_min, time_max)
+                    
+                    # Fix for identical water level values (prevent matplotlib warning)
+                    val_min, val_max = min(water_values_no_nan), max(water_values_no_nan)
                     if val_min == val_max:
                         # All values identical, add padding
                         ax_water.set_ylim(max(0, val_min - 1), val_max + 1)
                     else:
+                        ax_water.set_ylim(0, val_max * 1.2)
                         ax_water.set_ylim(0, val_max * 1.2)
                 else:
                     ax_water.set_ylim(0, 100)
@@ -2104,6 +2112,217 @@ def create_dashboard_tab(parent_frame, console_instance):
             
         except Exception as e:
             logging.error(f"Failed to update graphs: {e}", exc_info=True)
+    
+    # Interactive data point display on click
+    annotation_boxes = {
+        'temp_humid': None,
+        'light': None,
+        'power': None,
+        'water': None
+    }
+    
+    # Track mouse state for drag detection
+    mouse_pressed = [False]
+    last_click_pos = [None]
+    
+    def on_graph_click(event):
+        """Handle click events on graphs to display data point values"""
+        # Right-click: clear annotation for clicked subplot
+        if event.button == 3:  # Right mouse button
+            if event.inaxes is None:
+                return
+            
+            # Determine which subplot was clicked
+            ax = event.inaxes
+            annotation_key = None
+            
+            if ax == ax_temp_humid:
+                annotation_key = 'temp_humid'
+            elif ax == ax_light:
+                annotation_key = 'light'
+            elif ax == ax_power:
+                annotation_key = 'power'
+            elif ax == ax_water:
+                annotation_key = 'water'
+            
+            if annotation_key and annotation_boxes[annotation_key] is not None:
+                annotation_boxes[annotation_key].remove()
+                annotation_boxes[annotation_key] = None
+                canvas_graph.draw_idle()
+            return
+        
+        # Left-click: show annotation
+        if event.button != 1:  # Only process left mouse button
+            return
+            
+        if event.inaxes is None:
+            return
+        
+        # Track mouse press
+        mouse_pressed[0] = True
+        last_click_pos[0] = (event.xdata, event.ydata)
+        
+        # Determine which subplot was clicked
+        ax = event.inaxes
+        click_x = mdates.num2date(event.xdata)
+        
+        # Make click_x timezone-naive to match our data
+        if click_x.tzinfo is not None:
+            click_x = click_x.replace(tzinfo=None)
+        
+        # Helper function to find nearest point
+        def find_nearest_point(line_obj):
+            xdata = line_obj.get_xdata()
+            ydata = line_obj.get_ydata()
+            
+            if len(xdata) == 0:
+                return None, None
+            
+            # Convert matplotlib dates to datetime
+            if isinstance(xdata[0], (int, float)):
+                xdata_dt = [mdates.num2date(x) for x in xdata]
+            else:
+                xdata_dt = xdata
+            
+            # Ensure all datetimes are timezone-naive
+            xdata_dt = [dt.replace(tzinfo=None) if dt.tzinfo is not None else dt for dt in xdata_dt]
+            
+            # Filter out NaN values
+            valid_indices = [i for i, y in enumerate(ydata) if not (isinstance(y, float) and math.isnan(y))]
+            if not valid_indices:
+                return None, None
+            
+            # Find closest point
+            distances = [(abs((xdata_dt[i] - click_x).total_seconds()), i) for i in valid_indices]
+            min_dist, idx = min(distances)
+            
+            return xdata_dt[idx], ydata[idx]
+        
+        # Clear previous annotation for this subplot
+        annotation_key = None
+        lines_to_check = []
+        
+        if ax == ax_temp_humid:
+            annotation_key = 'temp_humid'
+            lines_to_check = [(line_temp, 'Temp', 'r'), (line_humid, 'Humidity', 'b')]
+        elif ax == ax_light:
+            annotation_key = 'light'
+            lines_to_check = [(line_lux, 'Light', 'orange')]
+        elif ax == ax_power:
+            annotation_key = 'power'
+            lines_to_check = [(line_power, 'Power', 'g'), (line_current, 'Current', 'purple')]
+        elif ax == ax_water:
+            annotation_key = 'water'
+            lines_to_check = [(line_water, 'Water', 'cyan')]
+        
+        if annotation_key is None:
+            return
+        
+        # Remove old annotation
+        if annotation_boxes[annotation_key] is not None:
+            annotation_boxes[annotation_key].remove()
+            annotation_boxes[annotation_key] = None
+        
+        # Find and display nearest points
+        annotation_text = []
+        for line_obj, label, color in lines_to_check:
+            nearest_x, nearest_y = find_nearest_point(line_obj)
+            if nearest_x is not None:
+                time_str = nearest_x.strftime('%H:%M:%S')
+                if label in ['Temp', 'Temperature']:
+                    annotation_text.append(f"{label}: {nearest_y:.1f}°C")
+                elif label == 'Humidity':
+                    annotation_text.append(f"{label}: {nearest_y:.1f}%")
+                elif label == 'Light':
+                    annotation_text.append(f"{label}: {nearest_y:.1f} lux")
+                elif label == 'Power':
+                    annotation_text.append(f"{label}: {nearest_y:.1f} mW")
+                elif label == 'Current':
+                    annotation_text.append(f"{label}: {nearest_y:.1f} mA")
+                elif label == 'Water':
+                    annotation_text.append(f"{label}: {nearest_y:.1f} mm")
+        
+        if annotation_text:
+            # Get the first line's nearest point for positioning
+            first_line = lines_to_check[0][0]
+            pos_x, pos_y = find_nearest_point(first_line)
+            if pos_x is not None:
+                time_str = pos_x.strftime('%H:%M:%S')
+                full_text = f"Time: {time_str}\n" + "\n".join(annotation_text)
+                
+                # Smart positioning: adjust based on click location to avoid going off-screen
+                # Get the click position as a fraction of the axis width
+                xlim = ax.get_xlim()
+                click_x_num = mdates.date2num(pos_x)
+                x_fraction = (click_x_num - xlim[0]) / (xlim[1] - xlim[0])
+                
+                # Get Y position fraction
+                ylim = ax.get_ylim()
+                y_fraction = (pos_y - ylim[0]) / (ylim[1] - ylim[0])
+                
+                # Adjust horizontal position based on where we are on the axis
+                if x_fraction > 0.7:  # Right side of graph
+                    x_offset = -120  # Position box to the left
+                    ha = 'right'
+                else:  # Left or middle of graph
+                    x_offset = 10  # Position box to the right
+                    ha = 'left'
+                
+                # Adjust vertical position based on where we are on the axis
+                if y_fraction > 0.7:  # Top of graph
+                    y_offset = -10  # Position box below
+                else:  # Bottom or middle of graph
+                    y_offset = 10  # Position box above
+                
+                # Create annotation box with smart positioning
+                annotation_boxes[annotation_key] = ax.annotate(
+                    full_text,
+                    xy=(mdates.date2num(pos_x), pos_y),
+                    xytext=(x_offset, y_offset),
+                    textcoords='offset points',
+                    bbox=dict(boxstyle='round,pad=0.5', fc='yellow', alpha=0.8),
+                    arrowprops=dict(arrowstyle='->', connectionstyle='arc3,rad=0', color='black'),
+                    fontsize=9,
+                    zorder=1000,
+                    ha=ha
+                )
+                
+                canvas_graph.draw_idle()
+    
+    def on_mouse_release(event):
+        """Handle mouse release to end drag"""
+        mouse_pressed[0] = False
+        last_click_pos[0] = None
+    
+    def on_mouse_move(event):
+        """Handle mouse move for drag annotation updates"""
+        if not mouse_pressed[0] or event.inaxes is None:
+            return
+        
+        # Check if this is a drag (moved significantly from initial click)
+        if last_click_pos[0] is not None:
+            dx = abs(event.xdata - last_click_pos[0][0]) if event.xdata else 0
+            if dx < 0.01:  # Threshold to distinguish click from drag
+                return
+        
+        # Update annotation during drag (reuse click handler logic)
+        on_graph_click(event)
+    
+    def clear_all_annotations():
+        """Clear all annotations from all graphs"""
+        for key in annotation_boxes:
+            if annotation_boxes[key] is not None:
+                annotation_boxes[key].remove()
+                annotation_boxes[key] = None
+        canvas_graph.draw_idle()
+    
+    # Configure clear button
+    clear_annotations_btn.config(command=clear_all_annotations)
+    
+    # Connect events to canvas
+    canvas_graph.mpl_connect('button_press_event', on_graph_click)
+    canvas_graph.mpl_connect('button_release_event', on_mouse_release)
+    canvas_graph.mpl_connect('motion_notify_event', on_mouse_move)
     
     # Auto-refresh mechanism (every 5 seconds)
     auto_refresh_id = None
@@ -2157,16 +2376,25 @@ def create_dashboard_tab(parent_frame, console_instance):
         if sync_enabled:
             try:
                 logging.info("Performing periodic database sync...")
+                scrollable_frame.log_message("Starting periodic database sync...", "info")
                 success, new_entries, sync_message = sync_historical_data(console_instance, database)
                 if success and new_entries > 0:
                     logging.info(f"[OK] Periodic sync: {new_entries} new entries added")
-                    # Refresh graphs to show new data (only if Dashboard tab is active)
-                    update_graphs()
+                    scrollable_frame.log_message(f"Database sync complete: {new_entries} new entries", "success")
+                    # Refresh graphs to show new data (preserve current time range selection)
+                    update_graphs(current_hours_selection[0])
+                elif success:
+                    scrollable_frame.log_message("Database sync complete: No new entries", "info")
+                else:
+                    scrollable_frame.log_message(f"Database sync failed: {sync_message}", "warning")
                 # Schedule next sync in 5 minutes (300,000 ms)
                 sync_timer_id = scrollable_frame.after(300000, periodic_sync)
             except tk.TclError:
                 sync_enabled = False
                 sync_timer_id = None
+            except Exception as e:
+                scrollable_frame.log_message(f"Error during periodic sync: {str(e)}", "error")
+                sync_timer_id = scrollable_frame.after(300000, periodic_sync)  # Try again in 5 minutes
     
     def stop_periodic_sync():
         """Stop the periodic sync timer"""
@@ -2193,11 +2421,8 @@ def create_manual_control_tab(parent_frame, console_instance):
     Shows device metadata and current sensor readings on the left (same as Dashboard).
     Shows manual actuator controls on the right with visual representation.
     """
-    # Initialize or get data logger for this device
+    # Get device name
     device_name = console_instance.selected_device
-    if device_name not in sensor_data_loggers:
-        sensor_data_loggers[device_name] = SensorDataLogger(device_name)
-    data_logger = sensor_data_loggers[device_name]
     
     # Split the frame into left (info) and right (controls)
     left_frame = tk.Frame(parent_frame)
@@ -2264,9 +2489,6 @@ def create_manual_control_tab(parent_frame, console_instance):
             
             if response.status_code == 200:
                 data = response.json()
-                
-                # Log data for historical storage
-                data_logger.log_data(data)
                 
                 # Overall device metrics
                 sensor_labels['total_current'].config(text=f"{data.get('current_mA', 0):.2f} mA")

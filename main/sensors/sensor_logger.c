@@ -18,7 +18,7 @@ static const char *TAG = "SENSOR_LOG";
 
 // Configuration
 #define HISTORY_FILE_PATH "/lfs/data/sensor_history.json"
-#define MAX_HISTORY_ENTRIES 1440  // 24 hours * 60 minutes
+#define MAX_HISTORY_ENTRIES 120  // 2 hours * 60 minutes
 #define DATA_DIR "/lfs/data"
 
 // Logger state

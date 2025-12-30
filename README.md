@@ -4,7 +4,7 @@
 [![ESP-IDF](https://img.shields.io/badge/ESP--IDF-v5.4.2-red.svg)](https://github.com/espressif/esp-idf)
 [![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-An intelligent, energy-efficient deep water culture (DWC) hydroponic system designed for scalable at-home food production and scientific plant research. Built on ESP32-S3 with custom peristaltic pumps and Adafruit electronics for maximum efficiency and water recycling.
+An intelligent, energy-efficient deep water culture (DWC) hydroponic system designed for scalable at-home food production and scientific plant research. Built on ESP32-S3 with off-the-shelf peristaltic pumps in a custom enclosure and Adafruit electronics for maximum efficiency and water recycling.
 
 ## � Recent Updates (December 2024)
 
@@ -15,8 +15,8 @@ An intelligent, energy-efficient deep water culture (DWC) hydroponic system desi
    - Preset buttons (OFF/50%/100%) work in both modes
    - Real-time PWM value display for each channel
 
-2. **24-Hour Sensor Data Cache & Sync** - Persistent historical data storage and retrieval
-   - Firmware now stores up to 24 hours of sensor readings in a circular buffer
+2. **2-Hour Sensor Data Cache & Sync** - Persistent historical data storage and retrieval
+   - Firmware stores up to 2 hours of sensor readings in a circular buffer (120 entries at 1-minute intervals)
    - SQLite-backed database on Python console for long-term storage
    - Automatic gap-filling: console syncs only new data since last update
    - `/api/sensors/history` endpoint for batch retrieval with timestamp filtering
@@ -41,8 +41,8 @@ An intelligent, energy-efficient deep water culture (DWC) hydroponic system desi
 ## 🌱 Current System (Prototype)
 
 ### Core Components
-- **Source Pump**: Custom peristaltic pump for fresh water/nutrient intake
-- **Drain Pump**: Custom peristaltic pump for water recycling and disposal
+- **Source Pump**: Off-the-shelf peristaltic pump for fresh water/nutrient intake
+- **Drain Pump**: Off-the-shelf peristaltic pump for water recycling and disposal
 - **Circulation Pump**: Periodic water circulation to perlite-filled growing vessel
 - **Power Monitoring**: Real-time energy consumption tracking (INA219)
 - **Water Management**: Custom PCB level sensing and flow monitoring for complete water cycle control
@@ -53,7 +53,7 @@ An intelligent, energy-efficient deep water culture (DWC) hydroponic system desi
 - **Automated Circulation**: Timed water delivery to root zone
 
 ### Hardware Design
-- **Custom Peristaltic Pumps**: Self-designed for precision and reliability
+- **Off-the-Shelf Peristaltic Pumps in Custom Enclosure**: Commercial pumps integrated into custom housing for precision and reliability
 - **Custom Level Sensing PCB**: Exposed trace design with I2C GPIO expander for water level detection
 - **Adafruit Electronics**: ESP32-S3 Feather, INA219 current sensor, 5V buck converter, I2C motor controller
 - **ESP32-S3 Brain**: Low-power microcontroller with Wi-Fi connectivity
@@ -131,7 +131,7 @@ Direct actuator control with advanced LED channel management:
 - **[Adafruit INA219](https://www.adafruit.com/product/904)** - High-side DC current sensor for power monitoring
 - **[Adafruit 1.14" TFT Display](https://www.adafruit.com/product/4383)** - ST7789 240x135 local status display
 - **Custom Level Sensing PCB** - Exposed trace design for water level detection
-- **Custom Peristaltic Pumps** - Self-designed water movement control
+- **Off-the-Shelf Peristaltic Pumps** - Commercial pumps in custom enclosure for water movement control
 
 ### Adafruit Components Used
 - **[ESP32-S3 Feather](https://www.adafruit.com/product/5483)** - Main microcontroller board
@@ -143,7 +143,7 @@ Direct actuator control with advanced LED channel management:
 ### Power System
 - **12V DC Input**: Standard barrel jack connector for main power
 - **5V Buck Conversion**: Adafruit buck converter steps down 12V to 5V for system power
-- **Pump Control**: PCA9685 provides PWM signals for custom peristaltic pumps
+- **Pump Control**: PCA9685 provides PWM signals for off-the-shelf peristaltic pumps in custom enclosure
 
 ### Pump Configuration
 - **Source Pump**: Fresh water/nutrient intake via TB6612 PWM control
