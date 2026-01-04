@@ -402,36 +402,40 @@ void display_lvgl_init(void)
 }
 
 // Helper: fill entire screen with a solid color
-// Clear in chunks to avoid large DMA allocation (saves ~65KB)
+// Clear in chunks using single reusable buffer with delays to manage SPI queue
 static esp_err_t panel_clear_color(esp_lcd_panel_handle_t panel, uint16_t color)
 {
-    // Use smaller chunk size to reduce memory pressure
-    // Clear screen in horizontal strips of 10 lines at a time
-    const int CHUNK_LINES = 10;
+    const int CHUNK_LINES = 10;  // Process 10 lines at a time
     const size_t chunk_pixels = LCD_WIDTH * CHUNK_LINES;
     const size_t chunk_bytes = chunk_pixels * sizeof(uint16_t);
     
-    // Allocate one reusable buffer for chunks
+    // Allocate single reusable buffer
     uint16_t *buf = heap_caps_malloc(chunk_bytes, MALLOC_CAP_DMA);
     if (!buf) {
-        ESP_LOGE(TAG, "Failed to allocate %zu bytes for display clear buffer", chunk_bytes);
+        ESP_LOGE(TAG, "Failed to allocate %zu bytes for screen clear", chunk_bytes);
         return ESP_ERR_NO_MEM;
     }
     
-    // Fill buffer with color
+    // Fill buffer with color once
     for (size_t i = 0; i < chunk_pixels; i++) {
         buf[i] = color;
     }
     
-    // Clear screen in horizontal strips
+    ESP_LOGI(TAG, "Clearing display to color 0x%04X using %zu byte buffer", color, chunk_bytes);
+    
+    // Draw in chunks with delay to respect queue depth
     esp_err_t ret = ESP_OK;
     for (int y = 0; y < LCD_HEIGHT; y += CHUNK_LINES) {
         int lines_to_draw = (y + CHUNK_LINES <= LCD_HEIGHT) ? CHUNK_LINES : (LCD_HEIGHT - y);
+        
         ret = esp_lcd_panel_draw_bitmap(panel, 0, y, LCD_WIDTH, y + lines_to_draw, buf);
         if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to draw chunk at y=%d: %s", y, esp_err_to_name(ret));
+            ESP_LOGE(TAG, "Failed to draw at y=%d: %s", y, esp_err_to_name(ret));
             break;
         }
+
+        // Wait 25ms between chunks to allow SPI queue to drain
+        vTaskDelay(pdMS_TO_TICKS(25));
     }
     
     heap_caps_free(buf);
@@ -472,7 +476,7 @@ esp_lcd_panel_handle_t display_init(void)
         .lcd_cmd_bits = 8,
         .lcd_param_bits = 8,
         .spi_mode = 0,
-        .trans_queue_depth = 10,
+        .trans_queue_depth = 20,  // Increased from 10 to handle 14 strips + headroom for LVGL
         .on_color_trans_done = NULL,
         .user_ctx = NULL,
         .flags = {

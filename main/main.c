@@ -86,8 +86,8 @@ void init_screen_wrapper()
      */
     const lvgl_port_cfg_t lvgl_cfg = {
         .task_priority = 4,
-        .task_stack = 8192,              // Increased from 4096 - layout updates can be stack-intensive
-        .task_affinity = 1,              // Pin LVGL task to core 1
+        .task_stack = 1024 * 8,              // Increased from 4096 - layout updates can be stack-intensive
+        .task_affinity = 0,              // Pin LVGL task to core 1
         .task_max_sleep_ms = 500,
         .timer_period_ms = 20
     };
@@ -209,6 +209,9 @@ void app_main(void) {
         ESP_LOGE(TAG, "Failed to enable peripheral power");
     }
 
+// Init Screen
+    init_screen_wrapper();
+
 // Initialize sensor manager (centralized sensor reading system)
     // Note: I2C initialization is now handled by sensor_manager_init()
     ESP_LOGI(TAG, "Initializing sensor manager...");
@@ -254,9 +257,6 @@ void app_main(void) {
 
     xTaskCreatePinnedToCore(uart_console_task, "uart_console_task", UI_TASK_SIZE, NULL, 5, NULL, 0);
 
-// Init Screen
-    init_screen_wrapper();
-
     actuator_control_init();
 
     init_schedule_manager();
@@ -285,9 +285,7 @@ void app_main(void) {
 
     vTaskDelay(1000/portTICK_PERIOD_MS);
 
-
     // Initialize actuators
     xTaskCreatePinnedToCore(actuator_control_task, "actuator_control_task", 4096, NULL, 5, NULL, 0);
-
     log_memory_stats();
 }

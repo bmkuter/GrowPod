@@ -1,0 +1,256 @@
+{
+  "profile_version": "1.0",
+  "plant_info": {
+    "name": "Micro Tom Tomato",
+    "variety": "Micro Tom",
+    "botanical_name": "Solanum lycopersicum 'Micro-Tom'",
+    "seed_source": "https://seedsnsuch.com/products/micro-tom-tomato-seeds",
+    "description": "Compact determinate tomato, ideal for small spaces and hydroponic systems. Produces small cherry tomatoes.",
+    "growth_habit": "Determinate dwarf, grows 6-8 inches tall",
+    "fruit_size": "Small cherry tomatoes, 0.5-1 inch diameter"
+  },
+  "growth_parameters": {
+    "germination_days": 7,
+    "seedling_days": 14,
+    "vegetative_days": 21,
+    "flowering_days": 14,
+    "fruiting_days": 29,
+    "harvest_days": 85,
+    "growth_stages": [
+      {
+        "stage": "germination",
+        "day_start": 0,
+        "day_end": 7,
+        "description": "Seed germination period"
+      },
+      {
+        "stage": "seedling",
+        "day_start": 7,
+        "day_end": 21,
+        "description": "Seedling establishment, first true leaves"
+      },
+      {
+        "stage": "vegetative",
+        "day_start": 21,
+        "day_end": 42,
+        "description": "Rapid vegetative growth, branching"
+      },
+      {
+        "stage": "flowering",
+        "day_start": 42,
+        "day_end": 56,
+        "description": "Flowering period, pollination"
+      },
+      {
+        "stage": "fruiting",
+        "day_start": 56,
+        "day_end": 85,
+        "description": "Fruit development and ripening"
+      }
+    ]
+  },
+  "environmental": {
+    "temperature_range_c": [18, 28],
+    "temperature_optimal_c": 23,
+    "humidity_range_percent": [50, 70],
+    "humidity_optimal_percent": 60,
+    "light_hours_per_day": 16,
+    "light_intensity_notes": "Full spectrum LED, 200-400 µmol/m²/s recommended",
+    "notes": "Tolerates warmer temperatures during fruiting. Reduce humidity during flowering to improve pollination."
+  },
+  "nutrition": {
+    "nutrient_solution": "General Hydroponics FloraGro",
+    "nutrient_url": "https://generalhydroponics.com/products/floraseries/floragro/",
+    "stock_solution_notes": "Using stock solution as purchased",
+    "feeding_schedule": [
+      {
+        "stage": "seedling",
+        "day_start": 7,
+        "day_end": 21,
+        "concentration_ml_per_liter": 1.0,
+        "frequency_per_week": 2,
+        "notes": "Gentle feeding for young plants"
+      },
+      {
+        "stage": "vegetative",
+        "day_start": 21,
+        "day_end": 42,
+        "concentration_ml_per_liter": 2.5,
+        "frequency_per_week": 3,
+        "notes": "Increased nutrients for leaf growth"
+      },
+      {
+        "stage": "flowering",
+        "day_start": 42,
+        "day_end": 56,
+        "concentration_ml_per_liter": 2.0,
+        "frequency_per_week": 3,
+        "notes": "Maintain steady nutrients through flowering"
+      },
+      {
+        "stage": "fruiting",
+        "day_start": 56,
+        "day_end": 85,
+        "concentration_ml_per_liter": 2.5,
+        "frequency_per_week": 3,
+        "notes": "Support fruit development with consistent feeding"
+      }
+    ],
+    "ec_target_ms_cm": 1.8,
+    "ph_target": 6.0,
+    "ph_range": [5.5, 6.5]
+  },
+  "watering": {
+    "system_type": "Deep Water Culture (DWC) with constant aeration",
+    "container_specs": {
+      "type": "4 inch PVC tube",
+      "height_mm": 80,
+      "usable_height_mm": 75
+    },
+    "reservoir_capacity_ml": 400,
+    "target_water_level_mm": 57,
+    "empty_level_mm": 75,
+    "air_gap_mm": 18,
+    "refill_interval_hours": 168,
+    "aeration": {
+      "system": "Constant air supply via air pump",
+      "notes": "Continuous aeration provides oxygen to submerged roots, eliminating need for air gap. More aggressive growth than passive Kratky method."
+    },
+    "notes": "Water level sensor pending. Manual monitoring required until sensor installed. DWC with continuous aeration allows roots to be fully submerged while maintaining high dissolved oxygen levels."
+  },
+  "water_change_schedule": {
+    "description": "Complete reservoir drainage and refill schedule to maintain nutrient balance and prevent salt buildup",
+    "schedule": [
+      {
+        "stage": "seedling",
+        "day_start": 7,
+        "day_end": 20,
+        "interval_days": 7,
+        "notes": "Weekly water changes - gentle system for young plants, prevents nutrient imbalances"
+      },
+      {
+        "stage": "vegetative",
+        "day_start": 21,
+        "day_end": 41,
+        "interval_days": 7,
+        "notes": "Weekly water changes - rapid growth phase, consistent nutrient uptake"
+      },
+      {
+        "stage": "flowering",
+        "day_start": 42,
+        "day_end": 56,
+        "interval_days": 5,
+        "notes": "Every 5 days - higher nutrient demand during flowering, prevents nutrient lockout"
+      },
+      {
+        "stage": "fruiting",
+        "day_start": 55,
+        "day_end": 85,
+        "interval_days": 5,
+        "notes": "Every 5 days - peak nutrient uptake for fruit development, maintain optimal EC/pH"
+      }
+    ],
+    "procedure": {
+      "drain_target_mm": 75,
+      "refill_target_mm": 57,
+      "drain_duration_estimate_seconds": 30,
+      "refill_duration_estimate_seconds": 45,
+      "post_change_settling_minutes": 5,
+      "notes": "Drain to sensor max (75mm = empty), refill to target (57mm = ~400ml). Allow 5min for water temperature equilibration and bubble settling before taking measurements."
+    },
+    "emergency_triggers": {
+      "ph_drift_threshold": 0.5,
+      "ec_drift_percent": 20,
+      "water_clarity": "Perform immediate change if water becomes cloudy or discolored",
+      "notes": "Emergency water changes may be needed between scheduled changes if pH drifts >0.5 units from target 6.0, EC changes >20%, or visible contamination occurs."
+    },
+    "benefits": [
+      "Prevents nutrient salt buildup and imbalances",
+      "Removes plant metabolic waste products",
+      "Resets pH and EC to optimal levels",
+      "Reduces risk of root diseases and algae growth",
+      "Ensures fresh dissolved oxygen levels",
+      "Allows inspection of root health"
+    ],
+    "sensor_requirements": {
+      "water_level_sensor": "Required for automated drain/fill operations",
+      "implementation_status": "Pending - Manual water changes required until water level sensor fully operational",
+      "future_automation": "Calendar events will trigger automated drain/fill sequences when sensor validated"
+    }
+  },
+  "pump_configuration": {
+    "air_pump": {
+      "function": "Continuous aeration for Deep Water Culture",
+      "operation": "Runs 24/7 to oxygenate nutrient solution",
+      "notes": "Critical for DWC - maintains dissolved oxygen levels for submerged roots. Prevents root rot and enables faster growth than passive systems."
+    },
+    "food_pump": {
+      "model": "Gikfun Peristaltic Pump",
+      "url": "https://www.amazon.com/dp/B07GWJ78FN",
+      "calibration_status": "pending",
+      "estimated_ml_per_second": 0.5,
+      "notes": "Calibration required before automated dosing"
+    },
+    "drain_pump": {
+      "model": "Gikfun Peristaltic Pump",
+      "url": "https://www.amazon.com/dp/B07GWJ78FN",
+      "function": "Drain reservoir for water changes",
+      "notes": "Manual operation only until water level sensor installed"
+    },
+    "fill_pump": {
+      "model": "Gikfun Peristaltic Pump",
+      "url": "https://www.amazon.com/dp/B07GWJ78FN",
+      "function": "Refill reservoir with fresh water",
+      "notes": "Manual operation only until water level sensor installed"
+    }
+  },
+  "recommended_schedules": {
+    "light_schedule": {
+      "description": "16 hours on, 8 hours off",
+      "pattern": [0, 0, 0, 0, 0, 0, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 0, 0],
+      "notes": "Lights on from 6 AM to 10 PM"
+    },
+    "feeding_schedule_vegetative": {
+      "description": "Feed 2.5ml/L, 3 times per week",
+      "dose_ml": 1.0,
+      "doses_per_week": 3,
+      "pattern": [2, 0, 2, 0, 2, 0, 0],
+      "notes": "Monday/Wednesday/Friday feeding pattern. Adjust based on plant response."
+    },
+    "feeding_schedule_fruiting": {
+      "description": "Feed 2.5ml/L, 3 times per week",
+      "dose_ml": 1.0,
+      "doses_per_week": 3,
+      "pattern": [2, 0, 2, 0, 2, 0, 0],
+      "notes": "Maintain consistent feeding through fruit development"
+    }
+  },
+  "care_instructions": {
+    "pollination": "Self-pollinating but benefits from gentle shaking or air circulation during flowering",
+    "pruning": "Minimal pruning required. Remove yellow/dead leaves as needed.",
+    "support": "No staking required due to compact growth habit",
+    "pests": "Monitor for aphids and whiteflies. Good air circulation helps prevent issues.",
+    "disease": "Watch for powdery mildew if humidity too high. Ensure good air movement.",
+    "harvesting": "Pick fruits when fully colored and slightly soft. Regular harvesting encourages more fruit production."
+  },
+  "expected_yields": {
+    "fruits_per_plant": "20-40 small cherry tomatoes",
+    "total_weight_grams": "100-200g per plant",
+    "harvest_period_days": 14,
+    "notes": "Determinate variety produces most fruit within 2-3 weeks"
+  },
+  "troubleshooting": {
+    "slow_growth": "Check nutrient concentration and light intensity. Ensure temperature in optimal range.",
+    "yellowing_leaves": "May indicate nitrogen deficiency or overwatering. Check EC levels.",
+    "flower_drop": "Usually due to temperature stress or poor pollination. Ensure good air circulation.",
+    "blossom_end_rot": "Calcium deficiency or inconsistent watering. Maintain stable water levels.",
+    "leggy_growth": "Insufficient light. Increase light intensity or duration."
+  },
+  "metadata": {
+    "created_date": "2025-12-30",
+    "last_modified": "2025-12-30",
+    "author": "GrowPod Team",
+    "tested": false,
+    "testing_notes": "Profile created based on seed specifications and general tomato hydroponic guidelines. Requires field testing and calibration."
+  }
+}
