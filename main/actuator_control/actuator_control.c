@@ -208,6 +208,21 @@ void dose_food_pump_ms(uint32_t duration_ms, uint8_t speed)
     update_actuator_info(ACTUATOR_IDX_FOOD_PUMP, 0.0f);
 }
 
+void sweep_planter_pump_ms(uint32_t duration_ms, uint8_t min_speed, uint8_t max_speed, uint32_t sweep_period_ms)
+{
+    ESP_LOGI(TAG, "Sweeping planter pump: %lu ms, PWM %u-%u%%, period %lu ms", 
+             (unsigned long)duration_ms, min_speed, max_speed, (unsigned long)sweep_period_ms);
+    
+    // Use the I2C motor driver's sweep function
+    esp_err_t ret = i2c_planter_pump_sweep_ms(duration_ms, min_speed, max_speed, sweep_period_ms);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to sweep planter pump: %s", esp_err_to_name(ret));
+    }
+    
+    // After sweep is complete, the pump is automatically stopped
+    update_actuator_info(ACTUATOR_IDX_PLANTER_PUMP, 0.0f);
+}
+
 void set_led_array_pwm(uint32_t duty_percentage)
 {
     if (duty_percentage > 100) {

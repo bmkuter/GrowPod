@@ -124,13 +124,35 @@ Direct actuator control with advanced LED channel management:
 
 ![Manual Control](docs/images/manual_control.png)
 
+### Water Level Sensor (FDC1004)
+Non-contact capacitive water level sensing through plastic:
+
+![Water Level Sensor V1](docs/images/water_level_sensor_v1.jpg)
+
+**Features:**
+- Measures water level from 0-60mm with ~0.5mm resolution
+- Non-contact sensing through Nalgene bottle wall
+- Continuous 400 S/s hardware averaging for stability
+- Two-point calibration stored in filesystem
+- Auto-load calibration on boot
+
+**Current Limitations (V1):**
+- 2-3 minute thermal settling time after rapid water changes
+- Single-ended measurement susceptible to temperature drift
+
+**Planned V2:** Three-electrode differential design for instant thermal compensation
+
+📘 **[Complete Documentation](docs/FDC1004_Water_Level_Sensor.md)**
+
 ## 🔧 Hardware Setup
 
 ### Core Electronics
 - **ESP32-S3-DevKitC-1** - Main microcontroller
+- **[TI FDC1004](https://www.ti.com/product/FDC1004)** - 4-channel capacitive-to-digital converter for water level sensing
 - **[Adafruit INA219](https://www.adafruit.com/product/904)** - High-side DC current sensor for power monitoring
+- **[Adafruit SHT45](https://www.adafruit.com/product/5665)** - Precision temperature and humidity sensor
+- **[Adafruit TSL2591](https://www.adafruit.com/product/1980)** - High dynamic range light sensor
 - **[Adafruit 1.14" TFT Display](https://www.adafruit.com/product/4383)** - ST7789 240x135 local status display
-- **Custom Level Sensing PCB** - Exposed trace design for water level detection
 - **Off-the-Shelf Peristaltic Pumps** - Commercial pumps in custom enclosure for water movement control
 
 ### Adafruit Components Used
@@ -152,11 +174,12 @@ Direct actuator control with advanced LED channel management:
 
 ### Sensor Network
 ```
-I²C Bus:
-- SDA: GPIO 8
-- SCL: GPIO 9
-- INA219 (Power monitor)
-- MCP23017 (GPIO expander for level sensing)
+I²C Bus (400 kHz):
+- SDA: GPIO 42, SCL: GPIO 41
+- INA219/INA260 (Power monitor)
+- FDC1004 (Capacitive water level sensor) - 0x50
+- SHT45 (Temperature/Humidity sensor)
+- TSL2591 (Light sensor)
 - TB6612 (PWM motor controller)
 
 Display (SPI):

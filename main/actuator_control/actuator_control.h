@@ -78,6 +78,10 @@ void set_drain_pump_pwm(uint32_t duty_percentage);  // Future expansion
 void set_planter_pump_pwm(uint32_t duty_percentage);
 void set_food_pump_pwm(uint32_t duty_percentage);
 
+// Timed dosing/sweep operations
+void dose_food_pump_ms(uint32_t duration_ms, uint8_t speed);
+void sweep_planter_pump_ms(uint32_t duration_ms, uint8_t min_speed, uint8_t max_speed, uint32_t sweep_period_ms);
+
 // Food pump dosing functions
 void dose_food_pump_ms(uint32_t duration_ms, uint8_t speed);
 

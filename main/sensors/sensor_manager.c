@@ -5,11 +5,13 @@
 
 #include "sensor_manager.h"
 #include "sensor_logger.h"
+#include "sensor_config.h"
 #include "sht45_sensor.h"
 #include "tsl2591_sensor.h"
 #include "i2c_scanner.h"
 #include "../ina_power_monitor/power_monitor_HAL.h"
 #include "distance_sensor.h"
+#include "fdc1004_distance_sensor.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -217,6 +219,19 @@ esp_err_t sensor_manager_init(const sensor_manager_config_t *config) {
         g_sensor_mgr.enabled[SENSOR_TYPE_LIGHT] = false;
     }
     
+    // Initialize FDC1004 capacitive distance sensor
+    ESP_LOGI(TAG, "Initializing FDC1004 capacitive distance sensor");
+    ret = fdc1004_init();
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "FDC1004 init failed (may not be connected): %s", esp_err_to_name(ret));
+        // Disable water level sensor if init fails
+        g_sensor_mgr.enabled[SENSOR_TYPE_WATER_LEVEL] = false;
+    } else {
+        // Try to load saved calibration from filesystem
+        ESP_LOGI(TAG, "Loading FDC1004 calibration from filesystem...");
+        sensor_config_init();
+    }
+
     ESP_LOGI(TAG, "Sensor manager initialized successfully");
     return ESP_OK;
 }
@@ -404,13 +419,18 @@ static esp_err_t read_tsl2591_sensor(sensor_type_t type, light_data_t *light_dat
  * @brief Read water level sensor
  */
 static esp_err_t read_water_sensor(float *value) {
-    ESP_LOGD(TAG, "[I2C] Reading water level sensor");
+    ESP_LOGD(TAG, "[I2C] Reading water level sensor (FDC1004)");
     
-    // TODO: Implement water sensor reading when ready
-    // For now, return a placeholder value
-    *value = 0.0f;
+    // Read distance from FDC1004 capacitive sensor
+    int dist_mm = fdc1004_read_distance_mm();
     
-    ESP_LOGD(TAG, "[I2C] Water level (placeholder): %.2f mm", *value);
+    if (dist_mm < 0) {
+        ESP_LOGW(TAG, "[I2C] Failed to read FDC1004 water level sensor");
+        return ESP_FAIL;
+    }
+    
+    *value = (float)dist_mm;
+    ESP_LOGD(TAG, "[I2C] Water level: %.2f mm", *value);
     return ESP_OK;
 }
 

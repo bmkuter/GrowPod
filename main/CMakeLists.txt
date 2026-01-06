@@ -12,6 +12,7 @@ idf_component_register(
         "uart_comm/uart_comm.c"
         "sensors/distance_sensor.c"
         "sensors/fdc1004_distance_sensor.c"
+        "sensors/sensor_config.c"
         "sensors/sht45_sensor.c"
         "sensors/tsl2591_sensor.c"
         "sensors/i2c_scanner.c"

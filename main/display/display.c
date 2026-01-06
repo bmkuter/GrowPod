@@ -127,8 +127,15 @@ static void lvgl_sensor_update_cb(lv_timer_t *timer)
         light_data.light.lux = 0.0f;
     }
     
-    // Read water level sensor (already non-blocking)
-    water_level_mm = distance_sensor_read_mm();
+    // Read water level sensor from cache (non-blocking)
+    sensor_data_t water_level_data;
+    ret = sensor_manager_get_data_cached(SENSOR_TYPE_WATER_LEVEL, &water_level_data, NULL);
+    if (ret == ESP_OK) {
+        water_level_mm = water_level_data.water_level.level_mm;
+    } else {
+        // Fallback to direct reading if sensor manager cache isn't available
+        water_level_mm = distance_sensor_read_mm();
+    }
     
     // Format power in SI units (A, V, W)
     float current_a = current_ma / 1000.0f;

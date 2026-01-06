@@ -1449,287 +1449,6 @@ def launch_unified_gui(console_instance):
     root.mainloop()
 
 
-def create_compact_sensor_display(parent_frame, console_instance, title="Current Sensors"):
-    """
-    Create a compact, reusable sensor display component with responsive grid layout.
-    Returns a dict containing:
-    - 'frame': The container frame
-    - 'labels': Dict of all sensor label widgets for updates
-    - 'refresh': Function to refresh all sensor data
-    
-    This component is shared between Dashboard and Manual Control tabs.
-    """
-    # Main container - remove fixed padding, let it expand
-    container = tk.LabelFrame(
-        parent_frame,
-        text=title,
-        padx=10,
-        pady=10,
-        font=("Arial", 11, "bold")
-    )
-    
-    # Dictionary to store all label widgets
-    sensor_labels = {}
-    
-    # Define sensor groups with compact layout
-    # Format: (display_name, key, icon, format_func)
-    sensor_groups = {
-        "⚡ Power": [
-            ("Current", "total_current", "⚡", lambda v: f"{v:.2f} mA" if v is not None else "N/A"),
-            ("Voltage", "total_voltage", "🔋", lambda v: f"{v:.2f} mV" if v is not None else "N/A"),
-            ("Power", "total_power", "💡", lambda v: f"{v:.2f} mW" if v is not None else "N/A"),
-        ],
-        "💧 Water": [
-            ("Level", "water_level", "📏", lambda v: f"{v:.1f} mm" if v >= 0 else "N/A"),
-            ("Volume", "water_volume", "💧", lambda v: f"{v:.1f} ml" if v >= 0 else "N/A"),
-            ("Fill", "water_percentage", "📊", lambda v: f"{v:.1f}%" if v >= 0 else "N/A"),
-        ],
-        "🌡️ Environment": [
-            ("Temperature", "temperature", "🌡️", lambda v: v if v else "N/A"),  # Pre-formatted
-            ("Humidity", "humidity", "💦", lambda v: f"{v:.1f}% RH" if v >= 0 else "N/A"),
-        ],
-        "☀️ Light (TSL2591)": [
-            ("Illuminance", "light_lux", "☀️", lambda v: f"{v:.0f} lux" if v >= 0 else "N/A"),
-            ("Visible", "light_visible", "👁️", lambda v: f"{v}" if v >= 0 else "N/A"),
-            ("Infrared", "light_infrared", "🔴", lambda v: f"{v}" if v >= 0 else "N/A"),
-        ],
-    }
-    
-    # Create grid layout for each sensor group
-    for group_name, sensors in sensor_groups.items():
-        group_frame = tk.LabelFrame(container, text=group_name, padx=8, pady=6)
-        group_frame.pack(fill="x", pady=3)
-        
-        # Configure grid weights for responsive layout
-        group_frame.columnconfigure(2, weight=1)  # Value column expands
-        group_frame.columnconfigure(5, weight=1)  # Second value column expands
-        
-        # Use grid layout - single row for Power/Water (3 items), one row for others
-        for idx, (name, key, icon, format_func) in enumerate(sensors):
-            if len(sensors) > 2:  # Power, Water, Light have 3 items - use 2 columns
-                row = idx // 2
-                col_offset = (idx % 2) * 3  # Each sensor takes 3 columns
-            else:  # Environment has 2 items - stack vertically
-                row = idx
-                col_offset = 0
-            
-            # Icon
-            tk.Label(
-                group_frame,
-                text=icon,
-                font=("Arial", 10),
-                width=2
-            ).grid(row=row, column=col_offset, sticky="w", padx=(3, 0))
-            
-            # Name
-            tk.Label(
-                group_frame,
-                text=f"{name}:",
-                font=("Arial", 9, "bold"),
-                anchor="w"
-            ).grid(row=row, column=col_offset+1, sticky="w", padx=(0, 3))
-            
-            # Value (will be updated) - allow to expand
-            value_label = tk.Label(
-                group_frame,
-                text="Loading...",
-                font=("Arial", 9),
-                fg="#2c3e50",
-                anchor="w"
-            )
-            value_label.grid(row=row, column=col_offset+2, sticky="ew", padx=(0, 10))
-            
-            # Store reference with formatter
-            sensor_labels[key] = {
-                'label': value_label,
-                'formatter': format_func
-            }
-    
-    # Add container specs note
-    specs_note = tk.Label(
-        container,
-        text="📐 4\" PVC (Ø97.6mm×80mm, ~600ml)",
-        font=("Arial", 8, "italic"),
-        fg="#7f8c8d"
-    )
-    specs_note.pack(pady=(3, 0))
-    
-    # Create refresh function that updates all sensors
-    def refresh_sensors():
-        """Fetch latest sensor data and update all labels"""
-        try:
-            device = devices[console_instance.selected_device]
-            url = f"https://{device['address']}:{device['port']}/api/unit-metrics"
-            response = console_instance.session.get(url, timeout=5)
-            
-            if response.status_code == 200:
-                data = response.json()
-                
-                # Update power metrics
-                for key in ['total_current', 'total_voltage', 'total_power']:
-                    raw_value = data.get(key.replace('total_', '') if 'total' in key else key, 0)
-                    # Map API keys correctly
-                    if key == 'total_current':
-                        raw_value = data.get('current_mA', 0)
-                    elif key == 'total_voltage':
-                        raw_value = data.get('voltage_mV', 0)
-                    elif key == 'total_power':
-                        raw_value = data.get('power_consumption_mW', 0)
-                    
-                    formatted = sensor_labels[key]['formatter'](raw_value)
-                    sensor_labels[key]['label'].config(text=formatted)
-                
-                # Update water metrics
-                water_level_mm = data.get('water_level_mm', -1)
-                sensor_labels['water_level']['label'].config(
-                    text=sensor_labels['water_level']['formatter'](water_level_mm)
-                )
-                
-                # Calculate volume and percentage
-                if water_level_mm >= 0:
-                    TUBE_RADIUS_MM = 48.8  # 4" PVC inner radius
-                    volume_ml = 3.14159 * (TUBE_RADIUS_MM ** 2) * water_level_mm / 1000
-                    
-                    MAX_HEIGHT_MM = 80
-                    max_volume_ml = 3.14159 * (TUBE_RADIUS_MM ** 2) * MAX_HEIGHT_MM / 1000
-                    percentage = (volume_ml / max_volume_ml) * 100
-                    
-                    sensor_labels['water_volume']['label'].config(
-                        text=sensor_labels['water_volume']['formatter'](volume_ml)
-                    )
-                    sensor_labels['water_percentage']['label'].config(
-                        text=sensor_labels['water_percentage']['formatter'](percentage)
-                    )
-                else:
-                    sensor_labels['water_volume']['label'].config(text="N/A")
-                    sensor_labels['water_percentage']['label'].config(text="N/A")
-                
-                # Update environment sensors
-                temp_c = data.get('temperature_c', -999)
-                humidity = data.get('humidity_rh', -999)
-                
-                if temp_c != -999:
-                    temp_f = (temp_c * 9/5) + 32
-                    temp_str = f"{temp_c:.1f}°C ({temp_f:.1f}°F)"
-                    sensor_labels['temperature']['label'].config(text=temp_str)
-                else:
-                    sensor_labels['temperature']['label'].config(text="N/A")
-                
-                if humidity != -999:
-                    sensor_labels['humidity']['label'].config(
-                        text=sensor_labels['humidity']['formatter'](humidity)
-                    )
-                else:
-                    sensor_labels['humidity']['label'].config(text="N/A")
-                
-                # Update light sensors
-                lux = data.get('light_lux', -999)
-                visible = data.get('light_visible', -1)
-                infrared = data.get('light_infrared', -1)
-                
-                sensor_labels['light_lux']['label'].config(
-                    text=sensor_labels['light_lux']['formatter'](lux if lux != -999 else -1)
-                )
-                sensor_labels['light_visible']['label'].config(
-                    text=sensor_labels['light_visible']['formatter'](visible)
-                )
-                sensor_labels['light_infrared']['label'].config(
-                    text=sensor_labels['light_infrared']['formatter'](infrared)
-                )
-                
-                return True, "Success"
-            else:
-                return False, f"HTTP {response.status_code}"
-        except Exception as e:
-            return False, str(e)
-    
-    # Return the component interface
-    return {
-        'frame': container,
-        'labels': sensor_labels,
-        'refresh': refresh_sensors
-    }
-
-
-def create_draggable_panel_layout(parent_frame, left_width=350, left_minsize=250, right_minsize=400):
-    """
-    Create a draggable panel layout with PanedWindow.
-    
-    Args:
-        parent_frame: The parent frame to create the layout in
-        left_width: Initial width of left panel in pixels
-        left_minsize: Minimum width of left panel in pixels
-        right_minsize: Minimum width of right panel in pixels
-    
-    Returns:
-        dict: {
-            'paned_window': The PanedWindow widget,
-            'left_frame': Left panel frame,
-            'right_frame': Right panel frame,
-            'left_canvas': Canvas for left panel (if scrollable),
-            'left_scrollbar': Scrollbar for left panel,
-            'left_scrollable_frame': Scrollable content frame for left panel
-        }
-    """
-    # Create PanedWindow with draggable sash
-    paned_window = tk.PanedWindow(
-        parent_frame,
-        orient=tk.HORIZONTAL,
-        sashwidth=8,
-        sashrelief=tk.RAISED,
-        bg="#95a5a6",
-        sashpad=2
-    )
-    paned_window.pack(fill="both", expand=True)
-    
-    # Left panel (sensor display)
-    left_frame = tk.Frame(paned_window, bg="#f5f6fa")
-    
-    # Create scrollable canvas for left panel
-    left_canvas = tk.Canvas(left_frame, bg="#f5f6fa", highlightthickness=0)
-    left_scrollbar = tk.Scrollbar(left_frame, orient="vertical", command=left_canvas.yview)
-    left_scrollable_frame = tk.Frame(left_canvas, bg="#f5f6fa")
-    
-    # Configure scroll region and dynamic width
-    canvas_window = left_canvas.create_window((0, 0), window=left_scrollable_frame, anchor="nw")
-    
-    def configure_scroll_region(event=None):
-        left_canvas.configure(scrollregion=left_canvas.bbox("all"))
-        # Calculate canvas width based on left_frame width minus scrollbar
-        canvas_width = left_frame.winfo_width() - left_scrollbar.winfo_width() - 5
-        if canvas_width > 50:  # Sanity check
-            left_canvas.itemconfig(canvas_window, width=canvas_width)
-    
-    left_scrollable_frame.bind("<Configure>", configure_scroll_region)
-    left_frame.bind("<Configure>", configure_scroll_region)
-    
-    left_canvas.configure(yscrollcommand=left_scrollbar.set)
-    left_canvas.pack(side="left", fill="both", expand=True)
-    left_scrollbar.pack(side="right", fill="y")
-    
-    # Enable mousewheel scrolling
-    def on_mousewheel(event):
-        left_canvas.yview_scroll(int(-1*(event.delta/120)), "units")
-    left_canvas.bind_all("<MouseWheel>", on_mousewheel)
-    
-    # Right panel
-    right_frame = tk.Frame(paned_window)
-    
-    # Add panels to PanedWindow
-    paned_window.add(left_frame, width=left_width, minsize=left_minsize, stretch="never")
-    paned_window.add(right_frame, minsize=right_minsize, stretch="always")
-    
-    return {
-        'paned_window': paned_window,
-        'left_frame': left_frame,
-        'right_frame': right_frame,
-        'left_canvas': left_canvas,
-        'left_scrollbar': left_scrollbar,
-        'left_scrollable_frame': left_scrollable_frame,
-        'canvas_window': canvas_window
-    }
-
-
 def create_dashboard_tab(parent_frame, console_instance):
     """
     Create the Dashboard tab.
@@ -1754,31 +1473,39 @@ def create_dashboard_tab(parent_frame, console_instance):
     else:
         logging.warning(f"[WARN] Sync failed: {sync_message}")
     
-    # Create draggable panel layout (wider left panel for Dashboard)
-    layout = create_draggable_panel_layout(
-        parent_frame,
-        left_width=680,      # Dashboard needs more space
-        left_minsize=400,    # Minimum width for sensor info
-        right_minsize=400    # Minimum width for graphs
+    # Split the frame into left (info) and right (graphs)
+    left_frame = tk.Frame(parent_frame)
+    left_frame.pack(side="left", fill="both", expand=False, padx=(0, 10))
+    
+    right_frame = tk.Frame(parent_frame)
+    right_frame.pack(side="right", fill="both", expand=True)
+    
+    # ========== LEFT PANEL: Sensor Info (with scrollbar) ==========
+    canvas = tk.Canvas(left_frame, width=600)
+    scrollbar = tk.Scrollbar(left_frame, orient="vertical", command=canvas.yview)
+    scrollable_frame = tk.Frame(canvas)
+    
+    scrollable_frame.bind(
+        "<Configure>",
+        lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
     )
     
-    left_frame = layout['left_frame']
-    right_frame = layout['right_frame']
-    canvas = layout['left_canvas']
-    scrollbar = layout['left_scrollbar']
-    scrollable_frame = layout['left_scrollable_frame']
+    canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+    canvas.configure(yscrollcommand=scrollbar.set)
+    
+    canvas.pack(side="left", fill="both", expand=True)
+    scrollbar.pack(side="right", fill="y")
     
     # Title
     title_label = tk.Label(
         scrollable_frame,
         text="📊 GrowPod Dashboard",
-        font=("Arial", 16, "bold"),
-        bg="#f5f6fa"
+        font=("Arial", 16, "bold")
     )
     title_label.pack(pady=15)
     
     # Device Information Section
-    device_frame = tk.LabelFrame(scrollable_frame, text="Device Information", padx=20, pady=15, font=("Arial", 11, "bold"), bg="#f5f6fa")
+    device_frame = tk.LabelFrame(scrollable_frame, text="Device Information", padx=20, pady=15, font=("Arial", 11, "bold"))
     device_frame.pack(fill="x", padx=20, pady=10)
     
     device_info = devices[console_instance.selected_device]
@@ -1798,7 +1525,7 @@ def create_dashboard_tab(parent_frame, console_instance):
         tk.Label(row_frame, text=value, font=("Arial", 10), fg="#2c3e50", anchor="w").pack(side="left", padx=10)
     
     # Plant Information Section
-    plant_frame = tk.LabelFrame(scrollable_frame, text="Plant Information", padx=20, pady=15, font=("Arial", 11, "bold"), bg="#f5f6fa")
+    plant_frame = tk.LabelFrame(scrollable_frame, text="Plant Information", padx=20, pady=15, font=("Arial", 11, "bold"))
     plant_frame.pack(fill="x", padx=20, pady=10)
     
     plant_info_labels = {}
@@ -1835,35 +1562,182 @@ def create_dashboard_tab(parent_frame, console_instance):
         plant_info_labels[key] = tk.Label(row_frame, text="Loading...", font=("Arial", 10), fg="#2c3e50", anchor="w")
         plant_info_labels[key].pack(side="left", padx=10)
     
-    # Current Sensor Readings Section - Use compact reusable component
-    sensor_display = create_compact_sensor_display(scrollable_frame, console_instance, "Current Sensor Readings")
-    sensor_display['frame'].pack(fill="x", padx=20, pady=10)
-    sensor_labels = sensor_display['labels']
+    # Current Sensor Readings Section
+    sensor_frame = tk.LabelFrame(scrollable_frame, text="Current Sensor Readings", padx=20, pady=15, font=("Arial", 11, "bold"))
+    sensor_frame.pack(fill="x", padx=20, pady=10)
+    
+    sensor_labels = {}
     
     def refresh_sensors():
-        """Wrapper function that calls compact display's refresh and updates graphs"""
         try:
             scrollable_frame.log_message("Refreshing sensor data...", "info")
-            success, message = sensor_display['refresh']()
+            device = devices[console_instance.selected_device]
+            url = f"https://{device['address']}:{device['port']}/api/unit-metrics"
+            response = console_instance.session.get(url, timeout=5)
             
-            if success:
+            if response.status_code == 200:
+                data = response.json()
+                
+                # Update MAC address if available
+                if 'mac_address' in data:
+                    devices[console_instance.selected_device]['mac'] = data['mac_address']
+                
+                # Power metrics
+                sensor_labels['total_current'].config(text=f"{data.get('current_mA', 0):.2f} mA")
+                sensor_labels['total_voltage'].config(text=f"{data.get('voltage_mV', 0):.2f} mV")
+                sensor_labels['total_power'].config(text=f"{data.get('power_consumption_mW', 0):.2f} mW")
+                
+                # Water metrics with volume calculation
+                water_level_mm = data.get('water_level_mm', -1)
+                sensor_labels['water_level'].config(text=f"{water_level_mm} mm" if water_level_mm >= 0 else "N/A")
+                
+                # Calculate volume from water level
+                # 4" PVC tube inner diameter ≈ 97.6mm, radius = 48.8mm
+                # Volume = π × r² × h
+                # V (ml) = π × (48.8mm)² × height_mm / 1000
+                if water_level_mm >= 0:
+                    TUBE_RADIUS_MM = 48.8  # 4" PVC inner radius
+                    volume_ml = 3.14159 * (TUBE_RADIUS_MM ** 2) * water_level_mm / 1000
+                    sensor_labels['water_volume'].config(text=f"{volume_ml:.1f} ml")
+                    
+                    # Calculate percentage (assuming 80mm max height = ~600ml capacity)
+                    MAX_HEIGHT_MM = 80
+                    max_volume_ml = 3.14159 * (TUBE_RADIUS_MM ** 2) * MAX_HEIGHT_MM / 1000
+                    percentage = (volume_ml / max_volume_ml) * 100
+                    sensor_labels['water_percentage'].config(text=f"{percentage:.1f}%")
+                else:
+                    sensor_labels['water_volume'].config(text="N/A")
+                    sensor_labels['water_percentage'].config(text="N/A")
+                
+                # Environment sensors
+                temp_c = data.get('temperature_c', -999)
+                humidity = data.get('humidity_rh', -999)
+                if temp_c != -999:
+                    temp_f = (temp_c * 9/5) + 32
+                    sensor_labels['temperature'].config(text=f"{temp_c:.1f}°C ({temp_f:.1f}°F)")
+                else:
+                    sensor_labels['temperature'].config(text="N/A")
+                
+                if humidity != -999:
+                    sensor_labels['humidity'].config(text=f"{humidity:.1f}%")
+                else:
+                    sensor_labels['humidity'].config(text="N/A")
+                
+                # Light sensor
+                lux = data.get('light_lux', -999)
+                visible = data.get('light_visible', 0)
+                infrared = data.get('light_infrared', 0)
+                if lux != -999:
+                    sensor_labels['light_lux'].config(text=f"{lux:.1f} lux")
+                    sensor_labels['light_visible'].config(text=f"{visible}")
+                    sensor_labels['light_infrared'].config(text=f"{infrared}")
+                else:
+                    sensor_labels['light_lux'].config(text="N/A")
+                    sensor_labels['light_visible'].config(text="N/A")
+                    sensor_labels['light_infrared'].config(text="N/A")
+                
                 # Update graphs with current time range selection
                 update_graphs(current_hours_selection[0])
+                
                 status_label.config(text="✅ Sensor data updated", fg="#27ae60")
                 scrollable_frame.log_message("Sensor data updated successfully", "success")
             else:
-                status_label.config(text=f"⚠️ Failed: {message}", fg="#e67e22")
-                scrollable_frame.log_message(f"Failed to fetch sensor data: {message}", "error")
+                status_label.config(text="⚠️ Failed to fetch sensor data", fg="#e67e22")
+                scrollable_frame.log_message(f"Failed to fetch sensor data (HTTP {response.status_code})", "error")
         except Exception as e:
             status_label.config(text=f"❌ Error: {str(e)}", fg="#e74c3c")
             scrollable_frame.log_message(f"Error refreshing sensors: {str(e)}", "error")
     
+    # Power metrics display
+    power_subframe = tk.LabelFrame(sensor_frame, text="⚡ Power Metrics", padx=15, pady=10)
+    power_subframe.pack(fill="x", pady=5)
+    
+    power_items = [
+        ("Current:", "total_current", "⚡", "mA"),
+        ("Voltage:", "total_voltage", "🔋", "mV"),
+        ("Power:", "total_power", "💡", "mW")
+    ]
+    
+    for i, (label, key, icon, unit) in enumerate(power_items):
+        row_frame = tk.Frame(power_subframe)
+        row_frame.pack(fill="x", pady=5)
+        
+        tk.Label(row_frame, text=f"{icon} {label}", font=("Arial", 10, "bold"), anchor="w", width=20).pack(side="left")
+        sensor_labels[key] = tk.Label(row_frame, text=f"0.00 {unit}", font=("Arial", 10), fg="#2c3e50", anchor="w")
+        sensor_labels[key].pack(side="left", padx=10)
+    
+    # Water metrics display
+    water_subframe = tk.LabelFrame(sensor_frame, text="💧 Water System", padx=15, pady=10)
+    water_subframe.pack(fill="x", pady=5)
+    
+    water_items = [
+        ("Level:", "water_level", "📏", "mm"),
+        ("Volume:", "water_volume", "💧", "ml"),
+        ("Fill Status:", "water_percentage", "📊", "%")
+    ]
+    
+    for i, (label, key, icon, unit) in enumerate(water_items):
+        row_frame = tk.Frame(water_subframe)
+        row_frame.pack(fill="x", pady=5)
+        
+        tk.Label(row_frame, text=f"{icon} {label}", font=("Arial", 10, "bold"), anchor="w", width=20).pack(side="left")
+        sensor_labels[key] = tk.Label(row_frame, text=f"N/A", font=("Arial", 10), fg="#2c3e50", anchor="w")
+        sensor_labels[key].pack(side="left", padx=10)
+    
+    # Add note about tube specs
+    tk.Label(
+        water_subframe,
+        text="📐 Container: 4\" PVC tube (97.6mm ID, 80mm max height ≈ 600ml capacity)",
+        font=("Arial", 8),
+        fg="#7f8c8d",
+        anchor="w"
+    ).pack(fill="x", pady=(5, 0))
+    
+    # Environment sensors display
+    env_subframe = tk.LabelFrame(sensor_frame, text="🌡️ Environmental", padx=15, pady=10)
+    env_subframe.pack(fill="x", pady=5)
+    
+    env_items = [
+        ("Temperature:", "temperature", "🌡️", "°C"),
+        ("Humidity:", "humidity", "💧", "%RH")
+    ]
+    
+    for i, (label, key, icon, unit) in enumerate(env_items):
+        row_frame = tk.Frame(env_subframe)
+        row_frame.pack(fill="x", pady=5)
+        
+        # Use grid for better alignment control - separate emoji and text
+        tk.Label(row_frame, text=icon, font=("Arial", 10, "bold"), anchor="w", width=3).grid(row=0, column=0, sticky="w", padx=(0, 5))
+        tk.Label(row_frame, text=label, font=("Arial", 10, "bold"), anchor="w", width=15).grid(row=0, column=1, sticky="w")
+        sensor_labels[key] = tk.Label(row_frame, text=f"N/A", font=("Arial", 10), fg="#2c3e50", anchor="w")
+        sensor_labels[key].grid(row=0, column=2, sticky="w", padx=(10, 0))
+    
+    # Light sensor display
+    light_subframe = tk.LabelFrame(sensor_frame, text="Light Sensor (TSL2591)", padx=15, pady=10)
+    light_subframe.pack(fill="x", pady=5)
+    
+    light_items = [
+        ("Illuminance:", "light_lux", "☀️", "lux"),
+        ("Visible Light:", "light_visible", "👁️", "counts"),
+        ("Infrared:", "light_infrared", "🔴", "counts")
+    ]
+    
+    for i, (label, key, icon, unit) in enumerate(light_items):
+        row_frame = tk.Frame(light_subframe)
+        row_frame.pack(fill="x", pady=5)
+        
+        # Use grid for better alignment control
+        tk.Label(row_frame, text=icon, font=("Arial", 10, "bold"), anchor="w", width=3).grid(row=0, column=0, sticky="w", padx=(0, 5))
+        tk.Label(row_frame, text=label, font=("Arial", 10, "bold"), anchor="w", width=15).grid(row=0, column=1, sticky="w")
+        sensor_labels[key] = tk.Label(row_frame, text=f"N/A", font=("Arial", 10), fg="#2c3e50", anchor="w")
+        sensor_labels[key].grid(row=0, column=2, sticky="w", padx=(10, 0))
+    
     # Console Log Section
-    log_frame = tk.LabelFrame(scrollable_frame, text="📋 Console Log", padx=10, pady=10, font=("Arial", 11, "bold"), bg="#f5f6fa")
-    log_frame.pack(fill="x", padx=20, pady=10)
+    log_frame = tk.LabelFrame(sensor_frame, text="📋 Console Log", padx=10, pady=10, font=("Arial", 11, "bold"))
+    log_frame.pack(fill="both", expand=True, pady=10)
     
     # Create text widget with scrollbar for log
-    log_text_frame = tk.Frame(log_frame, bg="#f5f6fa")
+    log_text_frame = tk.Frame(log_frame)
     log_text_frame.pack(fill="both", expand=True)
     
     log_scrollbar = tk.Scrollbar(log_text_frame)
@@ -2603,346 +2477,216 @@ def create_manual_control_tab(parent_frame, console_instance):
     Create the Manual Control tab.
     Shows device metadata and current sensor readings on the left (same as Dashboard).
     Shows manual actuator controls on the right with visual representation.
-    Uses a draggable PanedWindow to allow user to adjust panel widths.
     """
     # Get device name
     device_name = console_instance.selected_device
     
-    # Create draggable panel layout (narrower left panel for Manual Control)
-    layout = create_draggable_panel_layout(
-        parent_frame,
-        left_width=350,      # Manual Control needs less space
-        left_minsize=250,    # Can shrink to make room for actuators
-        right_minsize=400    # Actuator controls need space
+    # Split the frame into left (info) and right (controls)
+    left_frame = tk.Frame(parent_frame)
+    left_frame.pack(side="left", fill="both", expand=False, padx=(0, 10))
+    
+    right_frame = tk.Frame(parent_frame, bg="#ecf0f1")
+    right_frame.pack(side="right", fill="both", expand=True)
+    
+    # ========== LEFT PANEL: Sensor Info (reuse from Dashboard) ==========
+    canvas = tk.Canvas(left_frame, width=600)
+    scrollbar = tk.Scrollbar(left_frame, orient="vertical", command=canvas.yview)
+    scrollable_frame = tk.Frame(canvas)
+    
+    scrollable_frame.bind(
+        "<Configure>",
+        lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
     )
     
-    left_frame = layout['left_frame']
-    right_frame = layout['right_frame']
-    canvas = layout['left_canvas']
-    scrollbar = layout['left_scrollbar']
-    scrollable_frame = layout['left_scrollable_frame']
+    canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+    canvas.configure(yscrollcommand=scrollbar.set)
     
-    # Update right frame background
-    right_frame.config(bg="#ecf0f1")
+    canvas.pack(side="left", fill="both", expand=True)
+    scrollbar.pack(side="right", fill="y")
     
-    # Title - smaller for Manual Control
+    # Title
     title_label = tk.Label(
         scrollable_frame,
         text="🎮 Manual Control",
-        font=("Arial", 14, "bold"),
-        bg="#f5f6fa"
+        font=("Arial", 16, "bold")
     )
-    title_label.pack(pady=10)
+    title_label.pack(pady=15)
     
-    # Device Information Section - more compact
-    device_frame = tk.LabelFrame(scrollable_frame, text="Device Info", padx=10, pady=8, font=("Arial", 10, "bold"), bg="#f5f6fa")
-    device_frame.pack(fill="x", padx=10, pady=5)
+    # Device Information Section
+    device_frame = tk.LabelFrame(scrollable_frame, text="Device Information", padx=20, pady=15, font=("Arial", 11, "bold"))
+    device_frame.pack(fill="x", padx=20, pady=10)
     
     device_info = devices[console_instance.selected_device]
     
     info_items = [
-        ("Device:", console_instance.selected_device, "🌱"),
-        ("IP:", device_info.get('address', 'Unknown'), "🔗"),
+        ("Device Name:", console_instance.selected_device, "🌱"),
+        ("IP Address:", device_info.get('address', 'Unknown'), "🔗"),
         ("Port:", str(device_info.get('port', 'Unknown')), "🔌"),
-        ("Status:", "Connected", "✅")
+        ("Connection Status:", "Connected", "✅")
     ]
     
     for i, (label, value, icon) in enumerate(info_items):
-        row_frame = tk.Frame(device_frame, bg="#f5f6fa")
-        row_frame.pack(fill="x", pady=2)
+        row_frame = tk.Frame(device_frame)
+        row_frame.pack(fill="x", pady=5)
         
-        tk.Label(row_frame, text=f"{icon} {label}", font=("Arial", 9, "bold"), anchor="w", width=12, bg="#f5f6fa").pack(side="left")
-        tk.Label(row_frame, text=value, font=("Arial", 9), fg="#2c3e50", anchor="w", bg="#f5f6fa").pack(side="left", padx=5)
+        tk.Label(row_frame, text=f"{icon} {label}", font=("Arial", 10, "bold"), anchor="w", width=20).pack(side="left")
+        tk.Label(row_frame, text=value, font=("Arial", 10), fg="#2c3e50", anchor="w").pack(side="left", padx=10)
     
-    # Current Sensor Readings Section - Use compact reusable component with tighter spacing
-    sensor_display = create_compact_sensor_display(scrollable_frame, console_instance, "Sensors")
-    sensor_display['frame'].pack(fill="x", padx=10, pady=5)
-    sensor_labels = sensor_display['labels']
+    # Current Sensor Readings Section
+    sensor_frame = tk.LabelFrame(scrollable_frame, text="Current Sensor Readings", padx=20, pady=15, font=("Arial", 11, "bold"))
+    sensor_frame.pack(fill="x", padx=20, pady=10)
+    
+    sensor_labels = {}
     
     def refresh_sensors():
-        """Wrapper function that calls compact display's refresh"""
-        try:
-            success, message = sensor_display['refresh']()
-            if success:
-                status_label.config(text="✅ Sensor data updated", fg="#27ae60")
-            else:
-                status_label.config(text=f"⚠️ Failed: {message}", fg="#e67e22")
-        except Exception as e:
-            status_label.config(text=f"❌ Error: {str(e)}", fg="#e74c3c")
-    
-    # Pump Calibration Section - more compact
-    cal_frame = tk.LabelFrame(scrollable_frame, text="⚗️ Pump Cal", padx=10, pady=8, font=("Arial", 10, "bold"), bg="#f5f6fa")
-    cal_frame.pack(fill="x", padx=10, pady=5)
-    
-    cal_labels = {}
-    
-    def refresh_calibration():
         try:
             device = devices[console_instance.selected_device]
-            url = f"https://{device['address']}:{device['port']}/api/calibration/foodpump"
+            url = f"https://{device['address']}:{device['port']}/api/unit-metrics"
             response = console_instance.session.get(url, timeout=5)
             
             if response.status_code == 200:
                 data = response.json()
                 
-                if data.get('calibrated', False):
-                    cal_labels['status'].config(text="✅ Calibrated", fg="#27ae60")
-                    cal_labels['flow_rate'].config(text=f"{data.get('flow_rate_mg_per_ms', 0):.3f} mg/ms")
-                    cal_labels['flow_rate_ml'].config(text=f"{data.get('flow_rate_ml_per_s', 0):.3f} ml/s")
+                # Power metrics
+                sensor_labels['total_current'].config(text=f"{data.get('current_mA', 0):.2f} mA")
+                sensor_labels['total_voltage'].config(text=f"{data.get('voltage_mV', 0):.2f} mV")
+                sensor_labels['total_power'].config(text=f"{data.get('power_consumption_mW', 0):.2f} mW")
+                
+                # Water metrics with volume calculation
+                water_level_mm = data.get('water_level_mm', -1)
+                sensor_labels['water_level'].config(text=f"{water_level_mm} mm")
+                
+                # Calculate volume from water level
+                # 4" PVC tube inner diameter ≈ 97.6mm, radius = 48.8mm
+                # Volume = π × r² × h
+                if water_level_mm >= 0:
+                    TUBE_RADIUS_MM = 48.8
+                    volume_ml = 3.14159 * (TUBE_RADIUS_MM ** 2) * water_level_mm / 1000
+                    sensor_labels['water_volume'].config(text=f"{volume_ml:.1f} ml")
                     
-                    # Display test conditions
-                    test_duration = data.get('test_duration_ms', 0)
-                    test_speed = data.get('test_speed_percent', 0)
-                    test_output = data.get('test_output_mg', 0)
-                    cal_labels['test_conditions'].config(
-                        text=f"{test_duration}ms @ {test_speed}% = {test_output:.1f}mg"
-                    )
-                    
-                    # Display calibration date
-                    cal_date = data.get('calibration_date', 'Unknown')
-                    cal_labels['cal_date'].config(text=cal_date)
-                    
-                    # Calculate example doses
-                    flow_rate = data.get('flow_rate_mg_per_ms', 0)
-                    if flow_rate > 0:
-                        # Example: 750ms @ 100% (common dose)
-                        dose_750_mg = flow_rate * 750
-                        dose_750_ml = dose_750_mg / 1000
-                        cal_labels['example_750'].config(text=f"{dose_750_ml:.2f} ml ({dose_750_mg:.0f} mg)")
-                        
-                        # Example: 1000ms @ 100%
-                        dose_1000_mg = flow_rate * 1000
-                        dose_1000_ml = dose_1000_mg / 1000
-                        cal_labels['example_1000'].config(text=f"{dose_1000_ml:.2f} ml ({dose_1000_mg:.0f} mg)")
+                    # Calculate percentage (80mm max height = ~600ml capacity)
+                    MAX_HEIGHT_MM = 80
+                    max_volume_ml = 3.14159 * (TUBE_RADIUS_MM ** 2) * MAX_HEIGHT_MM / 1000
+                    percentage = (volume_ml / max_volume_ml) * 100
+                    sensor_labels['water_percentage'].config(text=f"{percentage:.1f}%")
                 else:
-                    cal_labels['status'].config(text="⚠️ Not Calibrated", fg="#e67e22")
-                    cal_labels['flow_rate'].config(text="N/A")
-                    cal_labels['flow_rate_ml'].config(text="N/A")
-                    cal_labels['test_conditions'].config(text="No calibration data")
-                    cal_labels['cal_date'].config(text="N/A")
-                    cal_labels['example_750'].config(text="N/A")
-                    cal_labels['example_1000'].config(text="N/A")
+                    sensor_labels['water_volume'].config(text="N/A")
+                    sensor_labels['water_percentage'].config(text="N/A")
+                
+                # Environment sensors
+                temp_c = data.get('temperature_c', -999)
+                humidity = data.get('humidity_rh', -999)
+                if temp_c != -999:
+                    temp_f = (temp_c * 9/5) + 32
+                    sensor_labels['temperature'].config(text=f"{temp_c:.1f}°C ({temp_f:.1f}°F)")
+                else:
+                    sensor_labels['temperature'].config(text="N/A")
+                
+                if humidity != -999:
+                    sensor_labels['humidity'].config(text=f"{humidity:.1f}%")
+                else:
+                    sensor_labels['humidity'].config(text="N/A")
+                
+                # Light sensor
+                lux = data.get('light_lux', -999)
+                visible = data.get('light_visible', 0)
+                infrared = data.get('light_infrared', 0)
+                if lux != -999:
+                    sensor_labels['light_lux'].config(text=f"{lux:.1f} lux")
+                    sensor_labels['light_visible'].config(text=f"{visible}")
+                    sensor_labels['light_infrared'].config(text=f"{infrared}")
+                else:
+                    sensor_labels['light_lux'].config(text="N/A")
+                    sensor_labels['light_visible'].config(text="N/A")
+                    sensor_labels['light_infrared'].config(text="N/A")
+                
+                status_label.config(text="✅ Sensor data updated", fg="#27ae60")
             else:
-                cal_labels['status'].config(text="⚠️ API Error", fg="#e67e22")
+                status_label.config(text="⚠️ Failed to fetch sensor data", fg="#e67e22")
         except Exception as e:
-            cal_labels['status'].config(text=f"❌ Error: {str(e)[:20]}", fg="#e74c3c")
-            print(f"Calibration fetch error: {e}")
+            status_label.config(text=f"❌ Error: {str(e)}", fg="#e74c3c")
     
-    # Calibration status display - compact version
-    status_row = tk.Frame(cal_frame, bg="#f5f6fa")
-    status_row.pack(fill="x", pady=2)
-    tk.Label(status_row, text="Status:", font=("Arial", 9, "bold"), anchor="w", width=12, bg="#f5f6fa").pack(side="left")
-    cal_labels['status'] = tk.Label(status_row, text="⏳ Loading...", font=("Arial", 9, "bold"), fg="#7f8c8d", anchor="w", bg="#f5f6fa")
-    cal_labels['status'].pack(side="left", padx=5)
+    # Power metrics display
+    power_subframe = tk.LabelFrame(sensor_frame, text="⚡ Power Metrics", padx=15, pady=10)
+    power_subframe.pack(fill="x", pady=5)
     
-    # Flow rate display
-    flow_row = tk.Frame(cal_frame, bg="#f5f6fa")
-    flow_row.pack(fill="x", pady=2)
-    tk.Label(flow_row, text="Flow:", font=("Arial", 9, "bold"), anchor="w", width=12, bg="#f5f6fa").pack(side="left")
-    cal_labels['flow_rate'] = tk.Label(flow_row, text="N/A", font=("Arial", 9), fg="#2c3e50", anchor="w", bg="#f5f6fa")
-    cal_labels['flow_rate'].pack(side="left", padx=5)
+    power_items = [
+        ("Current:", "total_current", "⚡", "mA"),
+        ("Voltage:", "total_voltage", "🔋", "mV"),
+        ("Power:", "total_power", "💡", "mW")
+    ]
     
-    # Flow rate ml/s display
-    flow_ml_row = tk.Frame(cal_frame, bg="#f5f6fa")
-    flow_ml_row.pack(fill="x", pady=2)
-    tk.Label(flow_ml_row, text="Flow (ml/s):", font=("Arial", 9, "bold"), anchor="w", width=12, bg="#f5f6fa").pack(side="left")
-    cal_labels['flow_rate_ml'] = tk.Label(flow_ml_row, text="N/A", font=("Arial", 9), fg="#2c3e50", anchor="w", bg="#f5f6fa")
-    cal_labels['flow_rate_ml'].pack(side="left", padx=5)
+    for i, (label, key, icon, unit) in enumerate(power_items):
+        row_frame = tk.Frame(power_subframe)
+        row_frame.pack(fill="x", pady=5)
+        
+        tk.Label(row_frame, text=f"{icon} {label}", font=("Arial", 10, "bold"), anchor="w", width=20).pack(side="left")
+        sensor_labels[key] = tk.Label(row_frame, text=f"0.00 {unit}", font=("Arial", 10), fg="#2c3e50", anchor="w")
+        sensor_labels[key].pack(side="left", padx=10)
     
-    # Test conditions display
-    test_row = tk.Frame(cal_frame, bg="#f5f6fa")
-    test_row.pack(fill="x", pady=2)
-    tk.Label(test_row, text="Test:", font=("Arial", 9, "bold"), anchor="w", width=12, bg="#f5f6fa").pack(side="left")
-    cal_labels['test_conditions'] = tk.Label(test_row, text="N/A", font=("Arial", 9), fg="#2c3e50", anchor="w", bg="#f5f6fa")
-    cal_labels['test_conditions'].pack(side="left", padx=5)
+    # Water system display
+    water_subframe = tk.LabelFrame(sensor_frame, text="💧 Water System", padx=15, pady=10)
+    water_subframe.pack(fill="x", pady=5)
     
-    # Calibration date
-    date_row = tk.Frame(cal_frame, bg="#f5f6fa")
-    date_row.pack(fill="x", pady=2)
-    tk.Label(date_row, text="Date:", font=("Arial", 9, "bold"), anchor="w", width=12, bg="#f5f6fa").pack(side="left")
-    cal_labels['cal_date'] = tk.Label(date_row, text="N/A", font=("Arial", 9), fg="#2c3e50", anchor="w", bg="#f5f6fa")
-    cal_labels['cal_date'].pack(side="left", padx=5)
+    water_items = [
+        ("Level:", "water_level", "📏", "mm"),
+        ("Volume:", "water_volume", "💧", "ml"),
+        ("Fill Status:", "water_percentage", "📊", "%")
+    ]
     
-    # Separator
-    tk.Label(cal_frame, text="━ Dose Examples ━", font=("Arial", 8, "italic"), fg="#7f8c8d", bg="#f5f6fa").pack(pady=5)
+    for i, (label, key, icon, unit) in enumerate(water_items):
+        row_frame = tk.Frame(water_subframe)
+        row_frame.pack(fill="x", pady=5)
+        
+        tk.Label(row_frame, text=f"{icon} {label}", font=("Arial", 10, "bold"), anchor="w", width=20).pack(side="left")
+        sensor_labels[key] = tk.Label(row_frame, text=f"N/A", font=("Arial", 10), fg="#2c3e50", anchor="w")
+        sensor_labels[key].pack(side="left", padx=10)
     
-    # Example doses
-    example_750_row = tk.Frame(cal_frame, bg="#f5f6fa")
-    example_750_row.pack(fill="x", pady=2)
-    tk.Label(example_750_row, text="750ms:", font=("Arial", 9, "bold"), anchor="w", width=12, bg="#f5f6fa").pack(side="left")
-    cal_labels['example_750'] = tk.Label(example_750_row, text="N/A", font=("Arial", 9), fg="#2c3e50", anchor="w", bg="#f5f6fa")
-    cal_labels['example_750'].pack(side="left", padx=5)
+    # Add container specs note
+    tk.Label(
+        water_subframe,
+        text="📐 Container: 4\" PVC tube (97.6mm ID, 80mm max height ≈ 600ml capacity)",
+        font=("Arial", 8, "italic"),
+        fg="#7f8c8d",
+        anchor="w"
+    ).pack(fill="x", pady=(5, 0))
     
-    example_1000_row = tk.Frame(cal_frame, bg="#f5f6fa")
-    example_1000_row.pack(fill="x", pady=2)
-    tk.Label(example_1000_row, text="1000ms:", font=("Arial", 9, "bold"), anchor="w", width=12, bg="#f5f6fa").pack(side="left")
-    cal_labels['example_1000'] = tk.Label(example_1000_row, text="N/A", font=("Arial", 9), fg="#2c3e50", anchor="w", bg="#f5f6fa")
-    cal_labels['example_1000'].pack(side="left", padx=5)
+    # Environment sensors display
+    env_subframe = tk.LabelFrame(sensor_frame, text="🌡️ Environmental", padx=15, pady=10)
+    env_subframe.pack(fill="x", pady=5)
     
-    # Calibration dialog function
-    def open_calibration_dialog():
-        """Open dialog to set pump calibration values"""
-        dialog = tk.Toplevel(parent_frame)
-        dialog.title("Set Food Pump Calibration")
-        dialog.geometry("500x400")
-        dialog.grab_set()  # Make dialog modal
-        
-        tk.Label(
-            dialog,
-            text="⚗️ Food Pump Calibration",
-            font=("Arial", 14, "bold")
-        ).pack(pady=15)
-        
-        tk.Label(
-            dialog,
-            text="Run a test dose and enter the measured values below:",
-            font=("Arial", 10),
-            fg="#7f8c8d"
-        ).pack(pady=5)
-        
-        # Input form
-        form = tk.Frame(dialog)
-        form.pack(pady=20, padx=30, fill="both")
-        
-        # Test Duration
-        tk.Label(form, text="Test Duration (ms):", font=("Arial", 10, "bold")).grid(row=0, column=0, sticky="w", pady=10)
-        duration_var = tk.StringVar(value="750")
-        tk.Entry(form, textvariable=duration_var, width=15, font=("Arial", 10)).grid(row=0, column=1, sticky="w", padx=10)
-        tk.Label(form, text="milliseconds", font=("Arial", 9, "italic"), fg="#7f8c8d").grid(row=0, column=2, sticky="w")
-        
-        # Test Speed
-        tk.Label(form, text="Test Speed (%):", font=("Arial", 10, "bold")).grid(row=1, column=0, sticky="w", pady=10)
-        speed_var = tk.StringVar(value="100")
-        tk.Entry(form, textvariable=speed_var, width=15, font=("Arial", 10)).grid(row=1, column=1, sticky="w", padx=10)
-        tk.Label(form, text="percent (0-100)", font=("Arial", 9, "italic"), fg="#7f8c8d").grid(row=1, column=2, sticky="w")
-        
-        # Measured Output
-        tk.Label(form, text="Measured Output (g):", font=("Arial", 10, "bold")).grid(row=2, column=0, sticky="w", pady=10)
-        output_var = tk.StringVar(value="1.2")
-        tk.Entry(form, textvariable=output_var, width=15, font=("Arial", 10)).grid(row=2, column=1, sticky="w", padx=10)
-        tk.Label(form, text="grams", font=("Arial", 9, "italic"), fg="#7f8c8d").grid(row=2, column=2, sticky="w")
-        
-        # Calculated flow rate display
-        calc_frame = tk.Frame(dialog, bg="#ecf0f1", relief=tk.GROOVE, bd=2)
-        calc_frame.pack(pady=15, padx=30, fill="x")
-        
-        tk.Label(calc_frame, text="Calculated Flow Rate:", font=("Arial", 10, "bold"), bg="#ecf0f1").pack(pady=5)
-        flow_rate_label = tk.Label(calc_frame, text="0.000 mg/ms (0.000 ml/s)", font=("Arial", 11), fg="#2c3e50", bg="#ecf0f1")
-        flow_rate_label.pack(pady=5)
-        
-        def update_flow_rate(*args):
-            """Update calculated flow rate as user types"""
-            try:
-                duration = float(duration_var.get())
-                output = float(output_var.get())
-                if duration > 0:
-                    flow_rate = (output * 1000) / duration  # Convert g to mg, divide by ms
-                    flow_rate_label.config(text=f"{flow_rate:.3f} mg/ms ({flow_rate:.3f} ml/s)")
-                else:
-                    flow_rate_label.config(text="0.000 mg/ms (0.000 ml/s)")
-            except ValueError:
-                flow_rate_label.config(text="Invalid input")
-        
-        # Update flow rate as user types
-        duration_var.trace('w', update_flow_rate)
-        output_var.trace('w', update_flow_rate)
-        update_flow_rate()  # Initial calculation
-        
-        # Save button
-        def save_calibration():
-            try:
-                test_duration_ms = int(duration_var.get())
-                test_speed_percent = int(speed_var.get())
-                measured_output_grams = float(output_var.get())
-                
-                # Validate
-                if test_duration_ms <= 0 or test_speed_percent <= 0 or test_speed_percent > 100 or measured_output_grams <= 0:
-                    messagebox.showerror("Invalid Input", "All values must be positive.\nSpeed must be 0-100%.")
-                    return
-                
-                # POST to firmware
-                device = devices[console_instance.selected_device]
-                url = f"https://{device['address']}:{device['port']}/api/calibration/foodpump"
-                payload = {
-                    'test_duration_ms': test_duration_ms,
-                    'test_speed_percent': test_speed_percent,
-                    'measured_output_grams': measured_output_grams
-                }
-                
-                response = console_instance.session.post(url, json=payload, timeout=10)
-                
-                if response.status_code == 200:
-                    data = response.json()
-                    messagebox.showinfo(
-                        "Success",
-                        f"Calibration saved successfully!\n\n"
-                        f"Flow Rate: {data.get('flow_rate_mg_per_ms', 0):.3f} mg/ms\n"
-                        f"Test: {test_duration_ms}ms @ {test_speed_percent}% = {measured_output_grams}g"
-                    )
-                    dialog.destroy()
-                    refresh_calibration()  # Refresh display
-                else:
-                    messagebox.showerror("Error", f"Failed to save calibration.\nStatus: {response.status_code}")
-            except ValueError:
-                messagebox.showerror("Invalid Input", "Please enter valid numbers.")
-            except Exception as e:
-                messagebox.showerror("Error", f"Failed to save calibration:\n{str(e)}")
-        
-        button_frame = tk.Frame(dialog)
-        button_frame.pack(pady=15)
-        
-        tk.Button(
-            button_frame,
-            text="💾 Save Calibration",
-            command=save_calibration,
-            font=("Arial", 11, "bold"),
-            bg="#27ae60",
-            fg="white",
-            padx=20,
-            pady=10
-        ).pack(side="left", padx=5)
-        
-        tk.Button(
-            button_frame,
-            text="❌ Cancel",
-            command=dialog.destroy,
-            font=("Arial", 11, "bold"),
-            bg="#e74c3c",
-            fg="white",
-            padx=20,
-            pady=10
-        ).pack(side="left", padx=5)
+    env_items = [
+        ("Temperature:", "temperature", "🌡️", "°C"),
+        ("Humidity:", "humidity", "💧", "%RH")
+    ]
     
-    # Button frame for calibration actions
-    button_frame = tk.Frame(cal_frame)
-    button_frame.pack(pady=10)
+    for i, (label, key, icon, unit) in enumerate(env_items):
+        row_frame = tk.Frame(env_subframe)
+        row_frame.pack(fill="x", pady=5)
+        
+        tk.Label(row_frame, text=icon, font=("Arial", 10, "bold"), anchor="w", width=3).grid(row=0, column=0, sticky="w", padx=(0, 5))
+        tk.Label(row_frame, text=label, font=("Arial", 10, "bold"), anchor="w", width=15).grid(row=0, column=1, sticky="w")
+        sensor_labels[key] = tk.Label(row_frame, text=f"N/A", font=("Arial", 10), fg="#2c3e50", anchor="w")
+        sensor_labels[key].grid(row=0, column=2, sticky="w", padx=(10, 0))
     
-    # Set Calibration button
-    tk.Button(
-        button_frame,
-        text="⚗️ Set Calibration",
-        command=open_calibration_dialog,
-        font=("Arial", 10, "bold"),
-        bg="#27ae60",
-        fg="white",
-        padx=15,
-        pady=5
-    ).pack(side="left", padx=5)
+    # Light sensor display
+    light_subframe = tk.LabelFrame(sensor_frame, text="Light Sensor (TSL2591)", padx=15, pady=10)
+    light_subframe.pack(fill="x", pady=5)
     
-    # Refresh calibration button
-    tk.Button(
-        button_frame,
-        text="🔄 Refresh",
-        command=refresh_calibration,
-        font=("Arial", 10, "bold"),
-        bg="#3498db",
-        fg="white",
-        padx=15,
-        pady=5
-    ).pack(side="left", padx=5)
+    light_items = [
+        ("Illuminance:", "light_lux", "☀️", "lux"),
+        ("Visible Light:", "light_visible", "👁️", "counts"),
+        ("Infrared:", "light_infrared", "🔴", "counts")
+    ]
     
-    # Auto-refresh calibration on load
-    refresh_calibration()
+    for i, (label, key, icon, unit) in enumerate(light_items):
+        row_frame = tk.Frame(light_subframe)
+        row_frame.pack(fill="x", pady=5)
+        
+        tk.Label(row_frame, text=icon, font=("Arial", 10, "bold"), anchor="w", width=3).grid(row=0, column=0, sticky="w", padx=(0, 5))
+        tk.Label(row_frame, text=label, font=("Arial", 10, "bold"), anchor="w", width=15).grid(row=0, column=1, sticky="w")
+        sensor_labels[key] = tk.Label(row_frame, text=f"N/A", font=("Arial", 10), fg="#2c3e50", anchor="w")
+        sensor_labels[key].grid(row=0, column=2, sticky="w", padx=(10, 0))
     
     # Command Results Log (scrollable)
     log_frame = tk.LabelFrame(scrollable_frame, text="📋 Command Log", padx=10, pady=10, font=("Arial", 11, "bold"))
@@ -3561,6 +3305,205 @@ def create_manual_control_tab(parent_frame, console_instance):
                 'value_var': value_var,
                 'duration_var': duration_var,
                 'dose_speed_var': dose_speed_var
+            }
+        elif actuator['key'] == 'planterpump':
+            # Special handling for planter pump - add sweep control
+            sweep_frame = tk.LabelFrame(card_frame, text="🌊 Sweep Mode (Sprinkler Effect)", bg="white", padx=10, pady=10, font=("Arial", 10, "bold"))
+            sweep_frame.pack(fill="x", padx=15, pady=(0, 10))
+            
+            # Duration and speed range inputs
+            sweep_input_frame = tk.Frame(sweep_frame, bg="white")
+            sweep_input_frame.pack(fill="x", pady=5)
+            
+            tk.Label(
+                sweep_input_frame,
+                text="Duration (ms):",
+                font=("Arial", 9, "bold"),
+                bg="white"
+            ).pack(side="left", padx=(0, 5))
+            
+            sweep_duration_var = tk.StringVar(value="5000")
+            sweep_duration_entry = tk.Entry(
+                sweep_input_frame,
+                textvariable=sweep_duration_var,
+                font=("Arial", 10),
+                width=8
+            )
+            sweep_duration_entry.pack(side="left", padx=(0, 15))
+            
+            # Min/Max speed range
+            tk.Label(
+                sweep_input_frame,
+                text="PWM Range:",
+                font=("Arial", 9, "bold"),
+                bg="white"
+            ).pack(side="left", padx=(0, 5))
+            
+            sweep_min_var = tk.StringVar(value="65")
+            sweep_min_entry = tk.Entry(
+                sweep_input_frame,
+                textvariable=sweep_min_var,
+                font=("Arial", 10),
+                width=5
+            )
+            sweep_min_entry.pack(side="left", padx=(0, 5))
+            
+            tk.Label(
+                sweep_input_frame,
+                text="to",
+                font=("Arial", 9),
+                bg="white"
+            ).pack(side="left", padx=(0, 5))
+            
+            sweep_max_var = tk.StringVar(value="100")
+            sweep_max_entry = tk.Entry(
+                sweep_input_frame,
+                textvariable=sweep_max_var,
+                font=("Arial", 10),
+                width=5
+            )
+            sweep_max_entry.pack(side="left", padx=(0, 5))
+            
+            tk.Label(
+                sweep_input_frame,
+                text="%",
+                font=("Arial", 9),
+                bg="white"
+            ).pack(side="left", padx=(0, 15))
+            
+            # Sweep period (how fast the sweep oscillates)
+            tk.Label(
+                sweep_input_frame,
+                text="Period (ms):",
+                font=("Arial", 9, "bold"),
+                bg="white"
+            ).pack(side="left", padx=(0, 5))
+            
+            sweep_period_var = tk.StringVar(value="2000")
+            sweep_period_entry = tk.Entry(
+                sweep_input_frame,
+                textvariable=sweep_period_var,
+                font=("Arial", 10),
+                width=6
+            )
+            sweep_period_entry.pack(side="left", padx=(0, 10))
+            
+            # Sweep button
+            def execute_sweep():
+                try:
+                    duration_ms = int(sweep_duration_var.get())
+                    min_speed = int(sweep_min_var.get())
+                    max_speed = int(sweep_max_var.get())
+                    period_ms = int(sweep_period_var.get())
+                    
+                    if duration_ms <= 0:
+                        scrollable_frame.log_message("❌ Planter pump: Duration must be positive", "error")
+                        return
+                    
+                    if min_speed < 0 or min_speed > 100 or max_speed < 0 or max_speed > 100:
+                        scrollable_frame.log_message("❌ Planter pump: Speed range must be 0-100%", "error")
+                        return
+                    
+                    if min_speed > max_speed:
+                        scrollable_frame.log_message("❌ Planter pump: Min speed must be <= max speed", "error")
+                        return
+                    
+                    if period_ms < 100:
+                        scrollable_frame.log_message("❌ Planter pump: Period must be >= 100ms", "error")
+                        return
+                    
+                    device = devices[console_instance.selected_device]
+                    url = f"https://{device['address']}:{device['port']}/api/actuators/planterpump"
+                    payload = {
+                        'sweep': duration_ms,
+                        'min_speed': min_speed,
+                        'max_speed': max_speed,
+                        'period': period_ms
+                    }
+                    
+                    scrollable_frame.log_message(f"🌊 Sweeping planter pump: {duration_ms}ms, {min_speed}-{max_speed}%, period {period_ms}ms...", "info")
+                    response = console_instance.session.post(url, json=payload, timeout=max(10, duration_ms//1000 + 2), verify=False)
+                    
+                    if response.status_code == 200:
+                        scrollable_frame.log_message(f"✅ Planter pump sweep completed successfully", "success")
+                    else:
+                        scrollable_frame.log_message(f"❌ Planter pump sweep failed: HTTP {response.status_code}", "error")
+                        
+                except ValueError:
+                    scrollable_frame.log_message("❌ Planter pump: Invalid sweep parameters", "error")
+                except Exception as e:
+                    scrollable_frame.log_message(f"❌ Planter pump sweep error: {str(e)}", "error")
+            
+            sweep_button = tk.Button(
+                sweep_input_frame,
+                text="🌊 Sweep Now",
+                command=execute_sweep,
+                font=("Arial", 10, "bold"),
+                bg="#27ae60",
+                fg="white",
+                padx=15,
+                pady=5
+            )
+            sweep_button.pack(side="left", padx=(10, 0))
+            
+            # Add preset sweep configurations
+            preset_sweep_frame = tk.Frame(sweep_frame, bg="white")
+            preset_sweep_frame.pack(fill="x", pady=(5, 0))
+            
+            tk.Label(
+                preset_sweep_frame,
+                text="Quick Presets:",
+                font=("Arial", 9),
+                bg="white",
+                fg="#666"
+            ).pack(side="left", padx=(0, 10))
+            
+            def make_sweep_preset(duration, min_spd, max_spd, period):
+                def set_sweep():
+                    sweep_duration_var.set(str(duration))
+                    sweep_min_var.set(str(min_spd))
+                    sweep_max_var.set(str(max_spd))
+                    sweep_period_var.set(str(period))
+                return set_sweep
+            
+            # Preset configurations: (duration, min, max, period)
+            presets = [
+                ("3s Fast", 3000, 65, 100, 1000),
+                ("5s Medium", 5000, 65, 100, 2000),
+                ("10s Slow", 10000, 65, 100, 3000),
+                ("15s Wide", 15000, 50, 100, 2500)
+            ]
+            
+            for label, duration, min_spd, max_spd, period in presets:
+                tk.Button(
+                    preset_sweep_frame,
+                    text=label,
+                    command=make_sweep_preset(duration, min_spd, max_spd, period),
+                    font=("Arial", 8),
+                    bg="#ecf0f1",
+                    width=8
+                ).pack(side="left", padx=2)
+            
+            # Add explanation label
+            tk.Label(
+                sweep_frame,
+                text="💡 Sweep mode varies PWM between min and max to create a sprinkler effect, covering more surface area.",
+                font=("Arial", 8, "italic"),
+                bg="white",
+                fg="#666",
+                wraplength=700,
+                justify="left"
+            ).pack(fill="x", pady=(8, 0))
+            
+            # Store state for planter pump with sweep controls
+            actuator_states[actuator['key']] = {
+                'enabled': enabled_var,
+                'scale': pwm_scale,
+                'value_var': value_var,
+                'sweep_duration_var': sweep_duration_var,
+                'sweep_min_var': sweep_min_var,
+                'sweep_max_var': sweep_max_var,
+                'sweep_period_var': sweep_period_var
             }
         else:
             # Store state for other non-LED actuators
@@ -4990,7 +4933,7 @@ def create_routine_calendar_tab(parent_frame, console_instance):
     
     # Quick action: Import from plant profile
     def import_from_profile():
-        """Import complete schedule (dosing + water changes) from plant profile"""
+        """Import dosing schedule from plant profile"""
         profile_dir = "plant_profiles"
         if not os.path.exists(profile_dir):
             messagebox.showerror("Error", f"Profile directory '{profile_dir}' not found")
@@ -5001,70 +4944,16 @@ def create_routine_calendar_tab(parent_frame, console_instance):
             messagebox.showwarning("No Profiles", "No plant profiles found")
             return
         
-        # Get current plant info to determine grow day offset
-        plant_info = console_instance._get_plant_info()
-        
-        if not plant_info or not plant_info.get('exists'):
-            messagebox.showwarning(
-                "No Plant Info",
-                "Please set plant information in the Plant Info tab before importing a schedule.\n\n"
-                "The plant start date is needed to calculate the correct schedule offset."
-            )
-            return
-        
-        plant_start_date_str = plant_info.get('start_date')
-        plant_name = plant_info.get('plant_name', 'Unknown')
-        days_growing = plant_info.get('days_growing', 0)
-        
-        try:
-            plant_start_date = datetime.strptime(plant_start_date_str, '%Y-%m-%d')
-        except (ValueError, TypeError):
-            messagebox.showerror("Error", f"Invalid plant start date: {plant_start_date_str}")
-            return
-        
         # Simple selection dialog
         selection_dialog = tk.Toplevel(parent_frame)
         selection_dialog.title("Select Plant Profile")
-        selection_dialog.geometry("500x450")
+        selection_dialog.geometry("400x300")
         
         tk.Label(
             selection_dialog,
-            text="Select a plant profile to import complete schedule:",
+            text="Select a plant profile to import feeding schedule:",
             font=("Arial", 11, "bold")
         ).pack(pady=10)
-        
-        tk.Label(
-            selection_dialog,
-            text="This will create both feeding events and water change events",
-            font=("Arial", 9, "italic"),
-            fg="#7f8c8d"
-        ).pack(pady=5)
-        
-        # Show current plant info
-        info_frame = tk.Frame(selection_dialog, bg="#ecf0f1", padx=10, pady=10)
-        info_frame.pack(fill="x", padx=20, pady=10)
-        
-        tk.Label(
-            info_frame,
-            text=f"📋 Current Plant: {plant_name}",
-            font=("Arial", 9, "bold"),
-            bg="#ecf0f1"
-        ).pack(anchor="w")
-        
-        tk.Label(
-            info_frame,
-            text=f"📅 Start Date: {plant_start_date_str} (Day {days_growing})",
-            font=("Arial", 9),
-            bg="#ecf0f1"
-        ).pack(anchor="w")
-        
-        tk.Label(
-            info_frame,
-            text="✨ Schedule will be applied relative to plant start date",
-            font=("Arial", 8, "italic"),
-            fg="#7f8c8d",
-            bg="#ecf0f1"
-        ).pack(anchor="w", pady=(5, 0))
         
         listbox = tk.Listbox(selection_dialog, font=("Arial", 10))
         listbox.pack(fill="both", expand=True, padx=20, pady=10)
@@ -5085,26 +4974,22 @@ def create_routine_calendar_tab(parent_frame, console_instance):
                 with open(profile_path, 'r') as f:
                     profile_data = json.load(f)
                 
-                # Use plant's actual start date (not the selected calendar date)
-                # This ensures events are scheduled relative to when the plant was actually started
-                result = calendar_scheduler.create_all_events_from_profile(
+                # Ask for start date
+                start_date = cal.selection_get()
+                
+                event_ids = calendar_scheduler.create_dosing_events_from_profile(
                     console_instance.selected_device,
                     profile_data,
-                    plant_start_date
+                    start_date
                 )
-                
-                total_events = len(result['dosing_events']) + len(result['water_change_events'])
                 
                 selection_dialog.destroy()
                 update_calendar_marks()
                 refresh_events_for_date(cal.selection_get())
                 messagebox.showinfo(
                     "Success",
-                    f"Imported {total_events} events from {profile_name}!\n\n"
-                    f"• {len(result['dosing_events'])} feeding events\n"
-                    f"• {len(result['water_change_events'])} water change events\n\n"
-                    f"Schedule applied relative to plant start date:\n"
-                    f"{plant_start_date_str} ({plant_name}, Day {days_growing})"
+                    f"Imported {len(event_ids)} feeding events from {profile_name}!\n\n"
+                    f"Events start on {start_date.strftime('%B %d, %Y')}"
                 )
                 
             except Exception as e:
@@ -5120,33 +5005,6 @@ def create_routine_calendar_tab(parent_frame, console_instance):
             padx=20,
             pady=10
         ).pack(pady=10)
-    
-    def delete_all_events():
-        """Delete all calendar events with confirmation"""
-        # Count current events
-        all_events = calendar_scheduler.get_events_for_device(console_instance.selected_device)
-        event_count = len(all_events)
-        
-        if event_count == 0:
-            messagebox.showinfo("No Events", "There are no events to delete.")
-            return
-        
-        # Confirmation dialog
-        result = messagebox.askyesno(
-            "Confirm Delete All",
-            f"⚠️ Delete all {event_count} events?\n\n"
-            f"This action cannot be undone.",
-            icon="warning"
-        )
-        
-        if result:
-            deleted_count = calendar_scheduler.delete_all_events(console_instance.selected_device)
-            update_calendar_marks()
-            refresh_events_for_date(cal.selection_get())
-            messagebox.showinfo(
-                "Success",
-                f"Deleted {deleted_count} events from the calendar."
-            )
     
     tk.Button(
         quick_action_frame,
@@ -5170,17 +5028,7 @@ def create_routine_calendar_tab(parent_frame, console_instance):
         pady=5
     ).pack(fill="x", pady=2)
     
-    tk.Button(
-        quick_action_frame,
-        text="🗑️ Delete All Events",
-        command=delete_all_events,
-        font=("Arial", 9),
-        bg="#e74c3c",
-        fg="white",
-        padx=10,
-        pady=5
-    ).pack(fill="x", pady=2)
-    
+    # Initial load
     # Initial load
     refresh_events_for_date(cal.selection_get())
     update_calendar_marks()

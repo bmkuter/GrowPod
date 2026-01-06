@@ -172,6 +172,20 @@ esp_err_t i2c_food_pump_start(uint8_t speed);
 esp_err_t i2c_food_pump_stop(void);
 
 /**
+ * @brief Run planter pump with PWM sweep for a specific duration
+ * 
+ * Sweeps PWM between min_speed and max_speed to create a sprinkler effect.
+ * Continuously sweeps back and forth during the entire duration.
+ * 
+ * @param duration_ms Duration to run the planter pump in milliseconds
+ * @param min_speed Minimum speed percentage (default: 65%)
+ * @param max_speed Maximum speed percentage (default: 100%)
+ * @param sweep_period_ms Time for one complete sweep cycle (up and down) in milliseconds (default: 2000ms)
+ * @return esp_err_t ESP_OK on success, error code otherwise
+ */
+esp_err_t i2c_planter_pump_sweep_ms(uint32_t duration_ms, uint8_t min_speed, uint8_t max_speed, uint32_t sweep_period_ms);
+
+/**
  * @brief Perform a PWM sweep on all 4 channels of a motor shield
  * 
  * Sweeps each motor channel from 0% to 100% and back to 0% over 2 seconds.

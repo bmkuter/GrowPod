@@ -464,6 +464,86 @@ esp_err_t i2c_food_pump_stop(void)
     return i2c_motor_set(MOTOR_FOOD_PUMP, 0, MOTOR_RELEASE);
 }
 
+esp_err_t i2c_planter_pump_sweep_ms(uint32_t duration_ms, uint8_t min_speed, uint8_t max_speed, uint32_t sweep_period_ms)
+{
+    // Validate parameters
+    if (min_speed > 100) min_speed = 100;
+    if (max_speed > 100) max_speed = 100;
+    if (min_speed > max_speed) {
+        ESP_LOGE(TAG, "min_speed (%u) must be <= max_speed (%u)", min_speed, max_speed);
+        return ESP_ERR_INVALID_ARG;
+    }
+    
+    if (duration_ms == 0) {
+        ESP_LOGW(TAG, "Planter pump sweep duration is 0ms, ignoring");
+        return ESP_OK;
+    }
+    
+    if (sweep_period_ms < 100) {
+        ESP_LOGW(TAG, "Sweep period too short (%lu ms), setting to 100ms minimum", sweep_period_ms);
+        sweep_period_ms = 100;
+    }
+    
+    ESP_LOGI(TAG, "Sweeping planter pump: %lu ms, PWM range %u-%u%%, sweep period %lu ms", 
+             duration_ms, min_speed, max_speed, sweep_period_ms);
+    
+    // Calculate sweep parameters
+    uint8_t speed_range = max_speed - min_speed;
+    uint32_t start_time = xTaskGetTickCount() * portTICK_PERIOD_MS;
+    uint32_t elapsed = 0;
+    
+    // Number of steps for smooth sweep (aim for ~50ms updates)
+    const uint32_t update_interval_ms = 50;
+    uint32_t steps_per_half_cycle = (sweep_period_ms / 2) / update_interval_ms;
+    if (steps_per_half_cycle < 2) steps_per_half_cycle = 2; // Minimum 2 steps
+    
+    esp_err_t ret = ESP_OK;
+    
+    // Sweep loop
+    while (elapsed < duration_ms) {
+        // Calculate position in current sweep cycle (0.0 to 1.0)
+        uint32_t cycle_position = elapsed % sweep_period_ms;
+        float normalized_position;
+        
+        // Create triangle wave (0->1->0)
+        if (cycle_position < sweep_period_ms / 2) {
+            // Rising edge: 0 to 1
+            normalized_position = (float)cycle_position / (float)(sweep_period_ms / 2);
+        } else {
+            // Falling edge: 1 to 0
+            normalized_position = 1.0f - ((float)(cycle_position - sweep_period_ms / 2) / (float)(sweep_period_ms / 2));
+        }
+        
+        // Calculate current speed
+        uint8_t current_speed = min_speed + (uint8_t)(speed_range * normalized_position);
+        
+        // Set the motor speed
+        ret = i2c_motor_set(MOTOR_PLANTER_PUMP, current_speed, MOTOR_FORWARD);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to set planter pump speed: %s", esp_err_to_name(ret));
+            // Try to stop the motor before returning
+            i2c_motor_set(MOTOR_PLANTER_PUMP, 0, MOTOR_RELEASE);
+            return ret;
+        }
+        
+        // Wait for next update
+        vTaskDelay(pdMS_TO_TICKS(update_interval_ms));
+        
+        // Update elapsed time
+        elapsed = (xTaskGetTickCount() * portTICK_PERIOD_MS) - start_time;
+    }
+    
+    // Stop the planter pump
+    ret = i2c_motor_set(MOTOR_PLANTER_PUMP, 0, MOTOR_RELEASE);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to stop planter pump: %s", esp_err_to_name(ret));
+        return ret;
+    }
+    
+    ESP_LOGI(TAG, "Planter pump sweep completed");
+    return ESP_OK;
+}
+
 esp_err_t i2c_motor_get_direction_config(motor_direction_config_t *config)
 {
     if (config == NULL) {

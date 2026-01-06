@@ -179,29 +179,6 @@ class CalendarScheduler:
         conn.close()
         logger.info(f"Deleted calendar event ID: {event_id}")
     
-    def delete_all_events(self, device_name: Optional[str] = None) -> int:
-        """
-        Delete all calendar events, optionally filtered by device.
-        Returns the number of events deleted.
-        """
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        if device_name:
-            cursor.execute('SELECT COUNT(*) FROM calendar_events WHERE device_name = ?', (device_name,))
-            count = cursor.fetchone()[0]
-            cursor.execute('DELETE FROM calendar_events WHERE device_name = ?', (device_name,))
-            logger.info(f"Deleted {count} calendar events for device: {device_name}")
-        else:
-            cursor.execute('SELECT COUNT(*) FROM calendar_events')
-            count = cursor.fetchone()[0]
-            cursor.execute('DELETE FROM calendar_events')
-            logger.info(f"Deleted all {count} calendar events")
-        
-        conn.commit()
-        conn.close()
-        return count
-    
     def get_event(self, event_id: int) -> Optional[CalendarEvent]:
         """Get a specific event by ID"""
         conn = sqlite3.connect(self.db_path)
@@ -316,9 +293,8 @@ class CalendarScheduler:
             days_between = 7 / frequency_per_week
             
             # Create events for this stage
-            # Use < instead of <= to avoid overlap at stage boundaries
             current_day = day_start
-            while current_day < day_end:
+            while current_day <= day_end:
                 event_date = start_date + timedelta(days=current_day)
                 
                 # Create dosing event
@@ -348,86 +324,3 @@ class CalendarScheduler:
         
         logger.info(f"Created {len(event_ids)} dosing events from plant profile")
         return event_ids
-    
-    def create_water_change_events_from_profile(self, device_name: str, profile_data: dict,
-                                                start_date: datetime) -> List[int]:
-        """
-        Create recurring water change events from plant profile water_change_schedule.
-        Returns list of created event IDs.
-        """
-        event_ids = []
-        
-        water_change_schedule = profile_data.get('water_change_schedule', {}).get('schedule', [])
-        plant_name = profile_data.get('plant_info', {}).get('name', 'Unknown Plant')
-        procedure = profile_data.get('water_change_schedule', {}).get('procedure', {})
-        
-        drain_target = procedure.get('drain_target_mm', 75)
-        refill_target = procedure.get('refill_target_mm', 57)
-        
-        for stage in water_change_schedule:
-            stage_name = stage.get('stage', 'unknown')
-            day_start = stage.get('day_start', 0)
-            day_end = stage.get('day_end', 0)
-            interval_days = stage.get('interval_days', 7)
-            notes = stage.get('notes', '')
-            
-            # Create events for this stage
-            # Use < instead of <= to avoid overlap at stage boundaries
-            current_day = day_start
-            while current_day < day_end:
-                event_date = start_date + timedelta(days=current_day)
-                
-                # Create water change event
-                event = CalendarEvent(
-                    device_name=device_name,
-                    event_type='water_change',
-                    title=f'{plant_name} - {stage_name.capitalize()} Water Change',
-                    description=f'Drain & refill reservoir - {notes}',
-                    scheduled_time=datetime(event_date.year, event_date.month, event_date.day, 10, 0),  # 10 AM default
-                    duration_minutes=15,
-                    command_type='drain_fill',
-                    command_params={
-                        'drain_target_mm': drain_target,
-                        'refill_target_mm': refill_target,
-                        'stage': stage_name,
-                        'settling_minutes': procedure.get('post_change_settling_minutes', 5)
-                    },
-                    recurrence='none',
-                    enabled=True,
-                    color='#3498db'  # Blue for water changes
-                )
-                
-                event_id = self.add_event(event)
-                event_ids.append(event_id)
-                
-                current_day += interval_days
-        
-        logger.info(f"Created {len(event_ids)} water change events from plant profile")
-        return event_ids
-    
-    def create_all_events_from_profile(self, device_name: str, profile_data: dict,
-                                      start_date: datetime) -> Dict[str, List[int]]:
-        """
-        Create all calendar events from plant profile (dosing + water changes).
-        Returns dictionary with event type keys and lists of created event IDs.
-        """
-        result = {
-            'dosing_events': [],
-            'water_change_events': []
-        }
-        
-        # Create dosing events
-        result['dosing_events'] = self.create_dosing_events_from_profile(
-            device_name, profile_data, start_date
-        )
-        
-        # Create water change events
-        result['water_change_events'] = self.create_water_change_events_from_profile(
-            device_name, profile_data, start_date
-        )
-        
-        total_events = len(result['dosing_events']) + len(result['water_change_events'])
-        logger.info(f"Created {total_events} total events from plant profile "
-                   f"({len(result['dosing_events'])} dosing, {len(result['water_change_events'])} water changes)")
-        
-        return result

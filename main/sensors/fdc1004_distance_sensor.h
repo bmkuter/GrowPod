@@ -47,6 +47,75 @@ extern "C" {
 #define FDC1004_CAP_TO_MM_SCALE   1.0f  // Scale factor (placeholder)
 #define FDC1004_CAP_TO_MM_OFFSET  0.0f  // Offset (placeholder)
 
+// Calibration data structure
+typedef struct {
+    uint8_t capdac;              // Optimal CAPDAC value (0-31)
+    float cap_empty_pf;          // Capacitance when empty (pF)
+    float cap_full_pf;           // Capacitance when full (pF)
+    float height_mm;             // Total calibrated height (mm)
+    float cap_per_mm;            // Capacitance change per mm
+    bool is_calibrated;          // True if calibration is valid
+} fdc1004_calibration_t;
+
+/**
+ * @brief Calibrate minimum water level (empty point)
+ * 
+ * This function measures the capacitance at the minimum water level and
+ * calculates the optimal CAPDAC to center the measurement range.
+ * Call this first with empty container, then fill and call calibrate_water_max.
+ * 
+ * @param min_height_mm Height in mm at minimum level (typically 0)
+ * @return ESP_OK on success, error code otherwise
+ */
+esp_err_t fdc1004_calibrate_water_min(float min_height_mm);
+
+/**
+ * @brief Calibrate maximum water level (full point)
+ * 
+ * This function measures the capacitance at the maximum water level and
+ * completes the two-point calibration. Must call calibrate_water_min first.
+ * 
+ * @param max_height_mm Height in mm at maximum level (e.g., 75mm)
+ * @return ESP_OK on success, error code otherwise
+ */
+esp_err_t fdc1004_calibrate_water_max(float max_height_mm);
+
+/**
+ * @brief Calibrate the FDC1004 water level sensor (legacy single-step)
+ * 
+ * This function performs a two-point calibration of the water level sensor:
+ * 1. Measures capacitance with empty container
+ * 2. User fills to max line
+ * 3. Measures capacitance at full level
+ * 4. Calculates optimal CAPDAC and scaling factors
+ * 
+ * NOTE: Consider using calibrate_water_min/max for better control.
+ * 
+ * The calibration optimizes CAPDAC to center the measurement range for
+ * best resolution and uses the full ±15pF range efficiently.
+ * 
+ * @param height_mm Height from empty to full mark (e.g., 75mm)
+ * @param calibration Pointer to store calibration data
+ * @return ESP_OK on success, error code otherwise
+ */
+esp_err_t fdc1004_calibrate_water_level(float height_mm, fdc1004_calibration_t *calibration);
+
+/**
+ * @brief Get current calibration data
+ * 
+ * @param calibration Pointer to store calibration data
+ * @return ESP_OK on success, ESP_ERR_INVALID_STATE if not calibrated
+ */
+esp_err_t fdc1004_get_calibration(fdc1004_calibration_t *calibration);
+
+/**
+ * @brief Set calibration data (e.g., loaded from NVS)
+ * 
+ * @param calibration Pointer to calibration data to apply
+ * @return ESP_OK on success, error code otherwise
+ */
+esp_err_t fdc1004_set_calibration(const fdc1004_calibration_t *calibration);
+
 /**
  * @brief Initialize the FDC1004 capacitive distance sensor
  * 

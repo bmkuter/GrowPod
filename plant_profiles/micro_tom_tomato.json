@@ -118,66 +118,6 @@
     },
     "notes": "Water level sensor pending. Manual monitoring required until sensor installed. DWC with continuous aeration allows roots to be fully submerged while maintaining high dissolved oxygen levels."
   },
-  "water_change_schedule": {
-    "description": "Complete reservoir drainage and refill schedule to maintain nutrient balance and prevent salt buildup",
-    "schedule": [
-      {
-        "stage": "seedling",
-        "day_start": 7,
-        "day_end": 20,
-        "interval_days": 7,
-        "notes": "Weekly water changes - gentle system for young plants, prevents nutrient imbalances"
-      },
-      {
-        "stage": "vegetative",
-        "day_start": 21,
-        "day_end": 41,
-        "interval_days": 7,
-        "notes": "Weekly water changes - rapid growth phase, consistent nutrient uptake"
-      },
-      {
-        "stage": "flowering",
-        "day_start": 42,
-        "day_end": 56,
-        "interval_days": 5,
-        "notes": "Every 5 days - higher nutrient demand during flowering, prevents nutrient lockout"
-      },
-      {
-        "stage": "fruiting",
-        "day_start": 55,
-        "day_end": 85,
-        "interval_days": 5,
-        "notes": "Every 5 days - peak nutrient uptake for fruit development, maintain optimal EC/pH"
-      }
-    ],
-    "procedure": {
-      "drain_target_mm": 75,
-      "refill_target_mm": 57,
-      "drain_duration_estimate_seconds": 30,
-      "refill_duration_estimate_seconds": 45,
-      "post_change_settling_minutes": 5,
-      "notes": "Drain to sensor max (75mm = empty), refill to target (57mm = ~400ml). Allow 5min for water temperature equilibration and bubble settling before taking measurements."
-    },
-    "emergency_triggers": {
-      "ph_drift_threshold": 0.5,
-      "ec_drift_percent": 20,
-      "water_clarity": "Perform immediate change if water becomes cloudy or discolored",
-      "notes": "Emergency water changes may be needed between scheduled changes if pH drifts >0.5 units from target 6.0, EC changes >20%, or visible contamination occurs."
-    },
-    "benefits": [
-      "Prevents nutrient salt buildup and imbalances",
-      "Removes plant metabolic waste products",
-      "Resets pH and EC to optimal levels",
-      "Reduces risk of root diseases and algae growth",
-      "Ensures fresh dissolved oxygen levels",
-      "Allows inspection of root health"
-    ],
-    "sensor_requirements": {
-      "water_level_sensor": "Required for automated drain/fill operations",
-      "implementation_status": "Pending - Manual water changes required until water level sensor fully operational",
-      "future_automation": "Calendar events will trigger automated drain/fill sequences when sensor validated"
-    }
-  },
   "pump_configuration": {
     "air_pump": {
       "function": "Continuous aeration for Deep Water Culture",

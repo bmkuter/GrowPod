@@ -184,10 +184,6 @@ static esp_err_t plant_info_post_handler(httpd_req_t *req);
 // Sensor history API handler
 static esp_err_t sensor_history_get_handler(httpd_req_t *req);
 
-// Pump calibration API handlers
-static esp_err_t pump_calibration_get_handler(httpd_req_t *req);
-static esp_err_t pump_calibration_post_handler(httpd_req_t *req);
-
 extern void schedule_manager_task(void *pvParam);
 extern void schedule_air_task(void *pvParam);
 extern void schedule_led_task(void *pvParam); 
@@ -572,23 +568,6 @@ void start_https_server(void) {
             .user_ctx = NULL
         };
         httpd_register_uri_handler(server, &sensor_history_uri);
-        
-        // Pump calibration API endpoints
-        httpd_uri_t pump_calibration_get_uri = {
-            .uri      = "/api/calibration/foodpump",
-            .method   = HTTP_GET,
-            .handler  = pump_calibration_get_handler,
-            .user_ctx = NULL
-        };
-        httpd_register_uri_handler(server, &pump_calibration_get_uri);
-        
-        httpd_uri_t pump_calibration_post_uri = {
-            .uri      = "/api/calibration/foodpump",
-            .method   = HTTP_POST,
-            .handler  = pump_calibration_post_handler,
-            .user_ctx = NULL
-        };
-        httpd_register_uri_handler(server, &pump_calibration_post_uri);
         
         ESP_LOGI(TAG, "HTTPS server started successfully");
     } else {
@@ -1499,12 +1478,15 @@ static esp_err_t sourcepump_post_handler(httpd_req_t *req)
 }
 
 //-----------------------------------------------------------------------------------
-// Handler for planter pump POST request (JSON: {"value": <0..100>})
+// Handler for planter pump POST request 
+// JSON: {"value": <0..100>} for PWM mode
+// JSON: {"sweep": <duration_ms>, "min_speed": <65-100>, "max_speed": <65-100>, "period": <sweep_period_ms>} for sweep mode
 //-----------------------------------------------------------------------------------
 static esp_err_t planterpump_post_handler(httpd_req_t *req)
 {
-    char content[100];
-    int ret = httpd_req_recv(req, content, req->content_len);
+    char content[256];
+    size_t max_len = (req->content_len < sizeof(content) - 1) ? req->content_len : sizeof(content) - 1;
+    int ret = httpd_req_recv(req, content, max_len);
     if (ret <= 0) {
         ESP_LOGE(TAG, "Failed to receive request data");
         return ESP_FAIL;
@@ -1518,6 +1500,31 @@ static esp_err_t planterpump_post_handler(httpd_req_t *req)
         return ESP_FAIL;
     }
 
+    // Check for sweep mode
+    cJSON *sweep_json = cJSON_GetObjectItem(json, "sweep");
+    cJSON *min_speed_json = cJSON_GetObjectItem(json, "min_speed");
+    cJSON *max_speed_json = cJSON_GetObjectItem(json, "max_speed");
+    cJSON *period_json = cJSON_GetObjectItem(json, "period");
+    
+    if (sweep_json && cJSON_IsNumber(sweep_json)) {
+        // Sweep mode
+        uint32_t duration_ms = (uint32_t)sweep_json->valueint;
+        uint8_t min_speed = min_speed_json && cJSON_IsNumber(min_speed_json) ? (uint8_t)min_speed_json->valueint : 65;
+        uint8_t max_speed = max_speed_json && cJSON_IsNumber(max_speed_json) ? (uint8_t)max_speed_json->valueint : 100;
+        uint32_t sweep_period_ms = period_json && cJSON_IsNumber(period_json) ? (uint32_t)period_json->valueint : 2000;
+        
+        sweep_planter_pump_ms(duration_ms, min_speed, max_speed, sweep_period_ms);
+        
+        cJSON_Delete(json);
+        
+        char response[200];
+        snprintf(response, sizeof(response), "Planter pump sweep: %lu ms, PWM %u-%u%%, period %lu ms", 
+                 (unsigned long)duration_ms, min_speed, max_speed, (unsigned long)sweep_period_ms);
+        httpd_resp_sendstr(req, response);
+        return ESP_OK;
+    }
+    
+    // Regular PWM mode
     cJSON *value = cJSON_GetObjectItem(json, "value");
     if (!value || !cJSON_IsNumber(value)) {
         ESP_LOGE(TAG, "Invalid or missing 'value' in JSON");
@@ -2240,195 +2247,6 @@ static esp_err_t sensor_history_get_handler(httpd_req_t *req) {
     
     cJSON_Delete(root);
     free(entries);
-    
-    return ESP_OK;
-}
-
-/* ==========================================
- * Pump Calibration API Handler
- * ==========================================
- */
-
-/**
- * GET /api/calibration/foodpump
- * Returns pump calibration data from motors.json config
- */
-static esp_err_t pump_calibration_get_handler(httpd_req_t *req) {
-    ESP_LOGI(TAG, "GET /api/calibration/foodpump");
-    
-    // Load calibration from motors.json using config_manager
-    float flow_rate_mg_per_ms = 0.0f;
-    uint32_t test_duration_ms = 0;
-    uint8_t test_speed_percent = 0;
-    float test_output_mg = 0.0f;
-    int64_t calibration_timestamp = 0;
-    bool calibrated = false;
-    
-    esp_err_t err = config_load_pump_calibration(&flow_rate_mg_per_ms, &test_duration_ms,
-                                                  &test_speed_percent, &test_output_mg,
-                                                  &calibration_timestamp, &calibrated);
-    
-    // Build response
-    cJSON *response = cJSON_CreateObject();
-    if (response == NULL) {
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "JSON creation failed");
-        return ESP_FAIL;
-    }
-    
-    if (err == ESP_OK && calibrated) {
-        // Pump is calibrated
-        cJSON_AddBoolToObject(response, "calibrated", true);
-        cJSON_AddNumberToObject(response, "flow_rate_mg_per_ms", flow_rate_mg_per_ms);
-        cJSON_AddNumberToObject(response, "flow_rate_ml_per_s", flow_rate_mg_per_ms);  // mg/ms ≈ ml/s for water
-        cJSON_AddNumberToObject(response, "test_duration_ms", test_duration_ms);
-        cJSON_AddNumberToObject(response, "test_speed_percent", test_speed_percent);
-        cJSON_AddNumberToObject(response, "test_output_mg", test_output_mg);
-        cJSON_AddNumberToObject(response, "calibration_timestamp", (double)calibration_timestamp);
-        
-        // Convert timestamp to ISO date string if valid
-        if (calibration_timestamp > 0) {
-            time_t cal_time = (time_t)calibration_timestamp;
-            struct tm timeinfo;
-            gmtime_r(&cal_time, &timeinfo);
-            char date_str[32];
-            strftime(date_str, sizeof(date_str), "%Y-%m-%dT%H:%M:%SZ", &timeinfo);
-            cJSON_AddStringToObject(response, "calibration_date", date_str);
-        }
-        
-        ESP_LOGI(TAG, "Pump calibrated: %.3f mg/ms", flow_rate_mg_per_ms);
-    } else {
-        // Pump not calibrated
-        cJSON_AddBoolToObject(response, "calibrated", false);
-        cJSON_AddStringToObject(response, "message", "Pump not calibrated. Use calibration dialog to set values.");
-        cJSON_AddNumberToObject(response, "flow_rate_mg_per_ms", 0.0);
-        cJSON_AddNumberToObject(response, "test_duration_ms", 0);
-        cJSON_AddNumberToObject(response, "test_speed_percent", 0);
-        cJSON_AddNumberToObject(response, "test_output_mg", 0.0);
-        
-        ESP_LOGW(TAG, "Pump not calibrated");
-    }
-    
-    // Send response
-    char *resp_str = cJSON_PrintUnformatted(response);
-    if (resp_str != NULL) {
-        httpd_resp_set_type(req, "application/json");
-        httpd_resp_sendstr(req, resp_str);
-        free(resp_str);
-    } else {
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Failed to serialize JSON");
-    }
-    
-    cJSON_Delete(response);
-    return ESP_OK;
-}
-
-/**
- * POST /api/calibration/foodpump
- * Receives calibration data from GUI and saves to motors.json
- * 
- * Expected payload:
- * {
- *   "test_duration_ms": 750,
- *   "test_speed_percent": 100,
- *   "measured_output_grams": 1.2
- * }
- */
-static esp_err_t pump_calibration_post_handler(httpd_req_t *req) {
-    ESP_LOGI(TAG, "POST /api/calibration/foodpump");
-    
-    char buf[512];
-    int ret, remaining = req->content_len;
-    
-    if (remaining >= sizeof(buf)) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Payload too large");
-        return ESP_FAIL;
-    }
-    
-    ret = httpd_req_recv(req, buf, remaining);
-    if (ret <= 0) {
-        if (ret == HTTPD_SOCK_ERR_TIMEOUT) {
-            httpd_resp_send_408(req);
-        }
-        return ESP_FAIL;
-    }
-    buf[ret] = '\0';
-    
-    // Parse JSON
-    cJSON *json = cJSON_Parse(buf);
-    if (json == NULL) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid JSON");
-        return ESP_FAIL;
-    }
-    
-    // Extract calibration parameters
-    cJSON *test_duration_json = cJSON_GetObjectItem(json, "test_duration_ms");
-    cJSON *test_speed_json = cJSON_GetObjectItem(json, "test_speed_percent");
-    cJSON *measured_output_json = cJSON_GetObjectItem(json, "measured_output_grams");
-    
-    if (!test_duration_json || !cJSON_IsNumber(test_duration_json) ||
-        !test_speed_json || !cJSON_IsNumber(test_speed_json) ||
-        !measured_output_json || !cJSON_IsNumber(measured_output_json)) {
-        cJSON_Delete(json);
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, 
-                           "Missing or invalid fields: test_duration_ms, test_speed_percent, measured_output_grams");
-        return ESP_FAIL;
-    }
-    
-    uint32_t test_duration_ms = (uint32_t)test_duration_json->valueint;
-    uint8_t test_speed_percent = (uint8_t)test_speed_json->valueint;
-    float measured_output_grams = (float)measured_output_json->valuedouble;
-    
-    // Validate inputs
-    if (test_duration_ms == 0 || test_speed_percent == 0 || measured_output_grams <= 0.0f) {
-        cJSON_Delete(json);
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, 
-                           "Invalid values: all must be > 0");
-        return ESP_FAIL;
-    }
-    
-    // Calculate flow rate: mg/ms
-    float measured_output_mg = measured_output_grams * 1000.0f;  // Convert g to mg
-    float flow_rate_mg_per_ms = measured_output_mg / (float)test_duration_ms;
-    
-    // Get current timestamp
-    time_t now;
-    time(&now);
-    int64_t calibration_timestamp = (int64_t)now;
-    
-    // Save to motors.json using config_manager
-    esp_err_t err = config_save_pump_calibration(flow_rate_mg_per_ms, test_duration_ms,
-                                                  test_speed_percent, measured_output_mg,
-                                                  calibration_timestamp);
-    
-    cJSON_Delete(json);
-    
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to save pump calibration: %s", esp_err_to_name(err));
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, 
-                           "Failed to save calibration");
-        return ESP_FAIL;
-    }
-    
-    // Build success response
-    cJSON *response = cJSON_CreateObject();
-    cJSON_AddBoolToObject(response, "success", true);
-    cJSON_AddStringToObject(response, "message", "Pump calibration saved successfully");
-    cJSON_AddNumberToObject(response, "flow_rate_mg_per_ms", flow_rate_mg_per_ms);
-    cJSON_AddNumberToObject(response, "flow_rate_ml_per_s", flow_rate_mg_per_ms);
-    cJSON_AddNumberToObject(response, "test_duration_ms", test_duration_ms);
-    cJSON_AddNumberToObject(response, "test_speed_percent", test_speed_percent);
-    cJSON_AddNumberToObject(response, "test_output_mg", measured_output_mg);
-    cJSON_AddNumberToObject(response, "calibration_timestamp", (double)calibration_timestamp);
-    
-    char *resp_str = cJSON_PrintUnformatted(response);
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_sendstr(req, resp_str);
-    
-    free(resp_str);
-    cJSON_Delete(response);
-    
-    ESP_LOGI(TAG, "Pump calibration saved: %.3f mg/ms (test: %lums @ %u%% = %.1fmg)",
-             flow_rate_mg_per_ms, test_duration_ms, test_speed_percent, measured_output_mg);
     
     return ESP_OK;
 }

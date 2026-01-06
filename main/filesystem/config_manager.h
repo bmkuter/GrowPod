@@ -172,36 +172,6 @@ esp_err_t config_load_plant_info(plant_info_t *info);
  */
 int32_t config_get_days_growing(const plant_info_t *info);
 
-// Food pump calibration functions
-/**
- * @brief Save food pump calibration to motors.json
- * 
- * @param flow_rate_mg_per_ms Flow rate in mg per millisecond
- * @param test_duration_ms Test duration in milliseconds
- * @param test_speed_percent Test speed as percentage (0-100)
- * @param test_output_mg Measured output in milligrams
- * @param calibration_timestamp Unix timestamp of calibration
- * @return esp_err_t ESP_OK on success, error code otherwise
- */
-esp_err_t config_save_pump_calibration(float flow_rate_mg_per_ms, uint32_t test_duration_ms,
-                                        uint8_t test_speed_percent, float test_output_mg,
-                                        int64_t calibration_timestamp);
-
-/**
- * @brief Load food pump calibration from motors.json
- * 
- * @param flow_rate_mg_per_ms Pointer to store flow rate
- * @param test_duration_ms Pointer to store test duration
- * @param test_speed_percent Pointer to store test speed
- * @param test_output_mg Pointer to store test output
- * @param calibration_timestamp Pointer to store calibration timestamp
- * @param calibrated Pointer to store calibration status flag
- * @return esp_err_t ESP_OK on success, ESP_ERR_NOT_FOUND if not calibrated
- */
-esp_err_t config_load_pump_calibration(float *flow_rate_mg_per_ms, uint32_t *test_duration_ms,
-                                        uint8_t *test_speed_percent, float *test_output_mg,
-                                        int64_t *calibration_timestamp, bool *calibrated);
-
 #ifdef __cplusplus
 }
 #endif
