@@ -33,13 +33,8 @@ static int cmd_sensors(int argc, char **argv);          // NEW: Sensor manager t
 static int cmd_i2c_scan(int argc, char **argv);         // I2C bus scanner command
 static int cmd_fill_pod(int argc, char **argv);
 static int cmd_empty_pod(int argc, char **argv);
-static int cmd_calibrate_pod(int argc, char **argv); 
-static int cmd_calibrate_water(int argc, char **argv);  // FDC1004 water level calibration (legacy)
-static int cmd_calibrate_water_min(int argc, char **argv);  // FDC1004 min point
-static int cmd_calibrate_water_max(int argc, char **argv);  // FDC1004 max point
-static int cmd_save_water_calibration(int argc, char **argv);  // Save calibration to file
-static int cmd_load_water_calibration(int argc, char **argv);  // Load calibration from file
-static int cmd_confirm_level(int argc, char **argv);  // Command to confirm calibration level
+static int cmd_water_cal_empty(int argc, char **argv);  // FDC1004: Record empty capacitance
+static int cmd_water_cal_full(int argc, char **argv);   // FDC1004: Record full capacitance
 static int cmd_schedule(int argc, char **argv);
 static int cmd_showschedules(int argc, char **argv);
 static int cmd_motor_direction(int argc, char **argv);  // Motor direction configuration command
@@ -470,31 +465,65 @@ static int cmd_empty_pod(int argc, char **argv)
     return 0;
 }
 
-// Command handler for 'calibrate_pod' command
-static int cmd_calibrate_pod(int argc, char **argv)
-{
-    // no args
-    start_calibrate_pod_routine();
+/**
+ * @brief Command handler for 'water_cal_empty'
+ * Records the current capacitance as the empty/minimum point
+ * Can be run independently to update just the empty point
+ */
+static int cmd_water_cal_empty(int argc, char **argv) {
+    printf("\n=== FDC1004 Water Level Calibration - EMPTY Point ===\n");
+    printf("Ensure container is at EMPTY level before proceeding.\n");
+    printf("Note: This can be run independently to update just the empty point.\n\n");
+    
+    // Record empty point (0mm by definition)
+    esp_err_t ret = fdc1004_calibrate_water_min(0.0f);
+    
+    if (ret != ESP_OK) {
+        printf("❌ EMPTY calibration FAILED: %s\n\n", esp_err_to_name(ret));
+        return 1;
+    }
+    
+    printf("✓ EMPTY point recorded successfully!\n");
+    printf("Next: Fill container and run 'water_cal_full'\n");
+    printf("      (Or skip if you only wanted to update the empty point)\n\n");
+    
     return 0;
 }
 
 /**
- * @brief Command handler for 'confirm_level' command.
- * Usage: confirm_level <mm>
+ * @brief Command handler for 'water_cal_full'
+ * Records the current capacitance as the full/maximum point
+ * Can be run independently to update just the full point (requires existing empty calibration)
  */
-static int cmd_confirm_level(int argc, char **argv)
-{
-    if (argc != 2) {
-        ESP_LOGW(TAG, "Usage: confirm_level <mm>");
+static int cmd_water_cal_full(int argc, char **argv) {
+    printf("\n=== FDC1004 Water Level Calibration - FULL Point ===\n");
+    printf("Ensure container is at FULL level before proceeding.\n");
+    printf("Note: This will use the existing EMPTY point from previous calibration.\n\n");
+    
+    // Record full point (use nominal 50mm height for percentage calculation)
+    // The actual height doesn't matter - we're using percentage-based reporting
+    esp_err_t ret = fdc1004_calibrate_water_max(50.0f);
+    
+    if (ret != ESP_OK) {
+        printf("❌ FULL calibration FAILED: %s\n", esp_err_to_name(ret));
+        printf("    Make sure you have an existing EMPTY calibration (run 'water_cal_empty' first).\n\n");
         return 1;
     }
-    int mm = atoi(argv[1]);
-    if (mm < 0) {
-        ESP_LOGW(TAG, "Invalid level '%s'. Must be non-negative.", argv[1]);
-        return 1;
+    
+    // Get and display final calibration
+    fdc1004_calibration_t calibration;
+    if (fdc1004_get_calibration(&calibration) == ESP_OK) {
+        printf("✓ CALIBRATION UPDATED!\n\n");
+        printf("Calibration Summary:\n");
+        printf("  CAPDAC:            %d\n", calibration.capdac);
+        printf("  Empty cap:         %.4f pF\n", calibration.cap_empty_pf);
+        printf("  Full cap:          %.4f pF\n", calibration.cap_full_pf);
+        printf("  Capacitance range: %.4f pF\n", 
+               calibration.cap_full_pf - calibration.cap_empty_pf);
+        printf("\n✓ Calibration auto-saved and will persist across reboots.\n");
+        printf("✓ Water level now reported as fill percentage (0-100%%).\n\n");
     }
-    confirm_level(mm);
-    ESP_LOGI(TAG, "Calibration level confirmed: %d mm", mm);
+    
     return 0;
 }
 
@@ -887,205 +916,6 @@ static int cmd_i2c_scan(int argc, char **argv) {
     return 0;
 }
 
-/**
- * @brief Command handler for 'calibrate_water_min'
- * Sets the minimum water level calibration point
- */
-static int cmd_calibrate_water_min(int argc, char **argv) {
-    printf("\n=== FDC1004 Water Level Calibration - MIN Point ===\n");
-    
-    // Parse min height parameter (default 0mm)
-    float min_height_mm = 0.0f;
-    if (argc >= 2) {
-        min_height_mm = atof(argv[1]);
-        if (min_height_mm < 0 || min_height_mm > 200) {
-            printf("Error: Invalid height %.1f mm (must be 0-200)\n", min_height_mm);
-            return 1;
-        }
-    }
-    
-    printf("Setting minimum level at: %.1f mm\n", min_height_mm);
-    printf("Make sure container is at MIN level (typically empty)\n\n");
-    
-    // Perform min calibration
-    esp_err_t ret = fdc1004_calibrate_water_min(min_height_mm);
-    
-    if (ret != ESP_OK) {
-        printf("\n❌ MIN calibration FAILED: %s\n", esp_err_to_name(ret));
-        return 1;
-    }
-    
-    printf("\n✓ MIN point calibration complete!\n");
-    printf("Next: Fill to MAX level and run: calibrate_water_max <height_mm>\n\n");
-    
-    return 0;
-}
-
-/**
- * @brief Command handler for 'calibrate_water_max'
- * Sets the maximum water level calibration point
- */
-static int cmd_calibrate_water_max(int argc, char **argv) {
-    printf("\n=== FDC1004 Water Level Calibration - MAX Point ===\n");
-    
-    // Parse max height parameter (default 75mm)
-    float max_height_mm = 75.0f;
-    if (argc >= 2) {
-        max_height_mm = atof(argv[1]);
-        if (max_height_mm <= 0 || max_height_mm > 200) {
-            printf("Error: Invalid height %.1f mm (must be 1-200)\n", max_height_mm);
-            return 1;
-        }
-    }
-    
-    printf("Setting maximum level at: %.1f mm\n", max_height_mm);
-    printf("Make sure container is at MAX level\n\n");
-    
-    // Perform max calibration
-    esp_err_t ret = fdc1004_calibrate_water_max(max_height_mm);
-    
-    if (ret != ESP_OK) {
-        printf("\n❌ MAX calibration FAILED: %s\n", esp_err_to_name(ret));
-        return 1;
-    }
-    
-    // Get final calibration data
-    fdc1004_calibration_t calibration;
-    if (fdc1004_get_calibration(&calibration) == ESP_OK) {
-        printf("\n✓ TWO-POINT CALIBRATION COMPLETE!\n");
-        printf("\nCalibration Summary:\n");
-        printf("  CAPDAC:        %d\n", calibration.capdac);
-        printf("  Min cap:       %.4f pF\n", calibration.cap_empty_pf);
-        printf("  Max cap:       %.4f pF\n", calibration.cap_full_pf);
-        printf("  Height range:  %.1f mm\n", calibration.height_mm);
-        printf("  Sensitivity:   %.4f pF/mm\n", calibration.cap_per_mm);
-        printf("\n✓ Calibration saved to filesystem and will persist across reboots.\n\n");
-    }
-    
-    return 0;
-}
-
-/**
- * @brief Command handler for 'save_water_calibration'
- * Manually save current water level calibration to filesystem
- */
-static int cmd_save_water_calibration(int argc, char **argv) {
-    printf("\n=== Save Water Level Calibration ===\n");
-    
-    // Get current calibration
-    fdc1004_calibration_t calibration;
-    esp_err_t ret = fdc1004_get_calibration(&calibration);
-    
-    if (ret != ESP_OK) {
-        printf("❌ No calibration data available to save\n");
-        printf("   Run calibrate_water_min/max first\n\n");
-        return 1;
-    }
-    
-    // Save to filesystem
-    ret = sensor_config_save_water_calibration(&calibration);
-    
-    if (ret == ESP_OK) {
-        printf("✓ Calibration saved to %s\n", SENSOR_CONFIG_FILE);
-        printf("  CAPDAC=%d, empty=%.2f pF, full=%.2f pF, height=%.1f mm\n",
-               calibration.capdac, calibration.cap_empty_pf,
-               calibration.cap_full_pf, calibration.height_mm);
-        printf("  Calibration will persist across reboots\n\n");
-    } else {
-        printf("❌ Failed to save calibration: %s\n", esp_err_to_name(ret));
-        printf("   Check filesystem status with 'fs_info'\n\n");
-        return 1;
-    }
-    
-    return 0;
-}
-
-/**
- * @brief Command handler for 'load_water_calibration'
- * Manually load water level calibration from filesystem
- */
-static int cmd_load_water_calibration(int argc, char **argv) {
-    printf("\n=== Load Water Level Calibration ===\n");
-    
-    fdc1004_calibration_t calibration;
-    esp_err_t ret = sensor_config_load_water_calibration(&calibration);
-    
-    if (ret == ESP_ERR_NOT_FOUND) {
-        printf("❌ No saved calibration found in %s\n", SENSOR_CONFIG_FILE);
-        printf("   Run calibrate_water_min/max to create one\n\n");
-        return 1;
-    } else if (ret != ESP_OK) {
-        printf("❌ Failed to load calibration: %s\n", esp_err_to_name(ret));
-        return 1;
-    }
-    
-    // Apply to sensor driver
-    ret = fdc1004_set_calibration(&calibration);
-    
-    if (ret == ESP_OK) {
-        printf("✓ Calibration loaded and applied successfully\n");
-        printf("  CAPDAC=%d, empty=%.2f pF, full=%.2f pF, height=%.1f mm\n",
-               calibration.capdac, calibration.cap_empty_pf,
-               calibration.cap_full_pf, calibration.height_mm);
-        
-        if (calibration.cap_per_mm < 0) {
-            printf("  Sensor type: INVERTED (capacitance decreases with water)\n");
-        } else {
-            printf("  Sensor type: NORMAL (capacitance increases with water)\n");
-        }
-        printf("\n");
-    } else {
-        printf("❌ Failed to apply calibration: %s\n", esp_err_to_name(ret));
-        return 1;
-    }
-    
-    return 0;
-}
-
-/**
- * @brief Command handler for the 'calibrate_water' command (legacy)
- * Calibrates the FDC1004 water level sensor in single step
- */
-static int cmd_calibrate_water(int argc, char **argv) {
-    printf("\n=== FDC1004 Water Level Sensor Calibration ===\n");
-    printf("NOTE: Consider using calibrate_water_min/max for better control\n\n");
-    
-    // Parse height parameter (default 75mm)
-    float height_mm = 75.0f;
-    if (argc >= 2) {
-        height_mm = atof(argv[1]);
-        if (height_mm <= 0 || height_mm > 200) {
-            printf("Error: Invalid height %.1f mm (must be 1-200)\n", height_mm);
-            return 1;
-        }
-    }
-    
-    printf("Calibration height: %.1f mm\n", height_mm);
-    printf("Make sure container is EMPTY, then press ENTER...");
-    fflush(stdout);
-    getchar();  // Wait for Enter
-    
-    // Perform calibration
-    fdc1004_calibration_t calibration;
-    esp_err_t ret = fdc1004_calibrate_water_level(height_mm, &calibration);
-    
-    if (ret != ESP_OK) {
-        printf("\n❌ Calibration FAILED: %s\n", esp_err_to_name(ret));
-        return 1;
-    }
-    
-    printf("\n✓ Calibration SUCCESSFUL!\n");
-    printf("\nCalibration Summary:\n");
-    printf("  CAPDAC:        %d\n", calibration.capdac);
-    printf("  Empty:         %.4f pF\n", calibration.cap_empty_pf);
-    printf("  Full:          %.4f pF\n", calibration.cap_full_pf);
-    printf("  Height:        %.1f mm\n", calibration.height_mm);
-    printf("  Sensitivity:   %.4f pF/mm\n", calibration.cap_per_mm);
-    printf("\n✓ Calibration saved to filesystem and will persist across reboots.\n\n");
-    
-    return 0;
-}
-
 static void register_console_commands(void) {
     // Air pump command
     {
@@ -1219,85 +1049,25 @@ static void register_console_commands(void) {
         ESP_ERROR_CHECK(esp_console_cmd_register(&cmd));
     }
 
-    // calibrate_pod routine
+    // water_cal_empty - Record empty capacitance
     {
         const esp_console_cmd_t cmd = {
-            .command = "calibrate_pod",
-            .help    = "Calibrate the pod (fill and empty)",
+            .command = "water_cal_empty",
+            .help    = "Calibrate FDC1004 EMPTY point (records current capacitance as 0%)",
             .hint    = NULL,
-            .func    = &cmd_calibrate_pod,
+            .func    = &cmd_water_cal_empty,
             .argtable= NULL
         };
         ESP_ERROR_CHECK(esp_console_cmd_register(&cmd));
     }
 
-    // confirm_level command for calibration feedback
+    // water_cal_full - Record full capacitance
     {
         const esp_console_cmd_t cmd = {
-            .command = "confirm_level",
-            .help    = "Confirm measured water level during calibration (mm)",
+            .command = "water_cal_full",
+            .help    = "Calibrate FDC1004 FULL point (records current capacitance as 100%)",
             .hint    = NULL,
-            .func    = &cmd_confirm_level,
-            .argtable= NULL
-        };
-        ESP_ERROR_CHECK(esp_console_cmd_register(&cmd));
-    }
-
-    // calibrate_water - FDC1004 water level sensor calibration
-    {
-        const esp_console_cmd_t cmd = {
-            .command = "calibrate_water",
-            .help    = "Calibrate FDC1004 water level (legacy single-step). Usage: calibrate_water [height_mm]",
-            .hint    = NULL,
-            .func    = &cmd_calibrate_water,
-            .argtable= NULL
-        };
-        ESP_ERROR_CHECK(esp_console_cmd_register(&cmd));
-    }
-
-    // calibrate_water_min - Set minimum calibration point
-    {
-        const esp_console_cmd_t cmd = {
-            .command = "calibrate_water_min",
-            .help    = "Set MIN water level point. Usage: calibrate_water_min [height_mm] (default: 0)",
-            .hint    = NULL,
-            .func    = &cmd_calibrate_water_min,
-            .argtable= NULL
-        };
-        ESP_ERROR_CHECK(esp_console_cmd_register(&cmd));
-    }
-
-    // calibrate_water_max - Set maximum calibration point
-    {
-        const esp_console_cmd_t cmd = {
-            .command = "calibrate_water_max",
-            .help    = "Set MAX water level point. Usage: calibrate_water_max <height_mm> (default: 75)",
-            .hint    = NULL,
-            .func    = &cmd_calibrate_water_max,
-            .argtable= NULL
-        };
-        ESP_ERROR_CHECK(esp_console_cmd_register(&cmd));
-    }
-
-    // save_water_calibration - Save calibration to filesystem
-    {
-        const esp_console_cmd_t cmd = {
-            .command = "save_water_calibration",
-            .help    = "Save water level calibration to filesystem (auto-saved after calibration)",
-            .hint    = NULL,
-            .func    = &cmd_save_water_calibration,
-            .argtable= NULL
-        };
-        ESP_ERROR_CHECK(esp_console_cmd_register(&cmd));
-    }
-
-    // load_water_calibration - Load calibration from filesystem
-    {
-        const esp_console_cmd_t cmd = {
-            .command = "load_water_calibration",
-            .help    = "Load water level calibration from filesystem (auto-loaded at boot)",
-            .hint    = NULL,
-            .func    = &cmd_load_water_calibration,
+            .func    = &cmd_water_cal_full,
             .argtable= NULL
         };
         ESP_ERROR_CHECK(esp_console_cmd_register(&cmd));

@@ -71,7 +71,8 @@ typedef struct {
  * @brief Water level sensor data
  */
 typedef struct {
-    float level_mm;             // Water level in millimeters
+    float level_mm;             // Water level in millimeters (legacy, may drift)
+    float fill_percent;         // Fill percentage (0-100+%, relative to calibration)
 } water_level_data_t;
 
 /**

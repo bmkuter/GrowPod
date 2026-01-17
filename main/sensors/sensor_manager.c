@@ -421,16 +421,16 @@ static esp_err_t read_tsl2591_sensor(sensor_type_t type, light_data_t *light_dat
 static esp_err_t read_water_sensor(float *value) {
     ESP_LOGD(TAG, "[I2C] Reading water level sensor (FDC1004)");
     
-    // Read distance from FDC1004 capacitive sensor
-    int dist_mm = fdc1004_read_distance_mm();
+    // Read fill percentage from FDC1004 capacitive sensor (preferred method)
+    float fill_percent = fdc1004_read_fill_percent();
     
-    if (dist_mm < 0) {
+    if (fill_percent < -50.0f) {
         ESP_LOGW(TAG, "[I2C] Failed to read FDC1004 water level sensor");
         return ESP_FAIL;
     }
     
-    *value = (float)dist_mm;
-    ESP_LOGD(TAG, "[I2C] Water level: %.2f mm", *value);
+    *value = fill_percent;
+    ESP_LOGD(TAG, "[I2C] Water level: %.1f%%", *value);
     return ESP_OK;
 }
 
@@ -465,7 +465,13 @@ static esp_err_t update_sensor_cache(sensor_type_t type) {
             break;
             
         case SENSOR_TYPE_WATER_LEVEL:
-            ret = read_water_sensor(&sensor_data.water_level.level_mm);
+            // Read fill percentage (primary method, drift-resistant)
+            ret = read_water_sensor(&sensor_data.water_level.fill_percent);
+            // Also read mm for legacy compatibility (may drift with temperature)
+            if (ret == ESP_OK) {
+                int dist_mm = fdc1004_read_distance_mm();
+                sensor_data.water_level.level_mm = (dist_mm >= 0) ? (float)dist_mm : 0.0f;
+            }
             break;
             
         default:

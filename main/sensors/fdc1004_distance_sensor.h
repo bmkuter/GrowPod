@@ -148,6 +148,20 @@ esp_err_t fdc1004_read_capacitance(float *capacitance);
 int fdc1004_read_distance_mm(void);
 
 /**
+ * @brief Read the fill percentage from the FDC1004
+ * 
+ * This function reads the raw capacitance and converts it to a fill percentage
+ * relative to the calibrated empty/full range. Values can exceed 100% if the
+ * current capacitance exceeds the calibrated maximum (due to baseline drift).
+ * 
+ * Example: If calibrated at 50mm full, but current reading would be 60mm due to
+ * drift, this returns 120% (60/50 * 100).
+ * 
+ * @return Fill percentage (0-100+ %), or negative value on error/not calibrated
+ */
+float fdc1004_read_fill_percent(void);
+
+/**
  * @brief Configure the FDC1004 measurement parameters
  * 
  * @param channel Channel number (1-4)

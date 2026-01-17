@@ -129,11 +129,14 @@ static void lvgl_sensor_update_cb(lv_timer_t *timer)
     
     // Read water level sensor from cache (non-blocking)
     sensor_data_t water_level_data;
+    float water_fill_percent = 0.0f;
     ret = sensor_manager_get_data_cached(SENSOR_TYPE_WATER_LEVEL, &water_level_data, NULL);
     if (ret == ESP_OK) {
-        water_level_mm = water_level_data.water_level.level_mm;
+        water_fill_percent = water_level_data.water_level.fill_percent;
+        water_level_mm = (int)water_level_data.water_level.level_mm;  // Legacy, for reference only
     } else {
         // Fallback to direct reading if sensor manager cache isn't available
+        water_fill_percent = fdc1004_read_fill_percent();
         water_level_mm = distance_sensor_read_mm();
     }
     
@@ -151,14 +154,9 @@ static void lvgl_sensor_update_cb(lv_timer_t *timer)
     // Light sensor (lux)
     snprintf(light_str, sizeof(light_str), "Light:%.0flux", light_data.light.lux);
     
-    // Water level with fill percent
-    int fill_percent = pod_state_calc_fill_percent_int(&s_pod_state);
-    if (fill_percent >= 0) {
-        snprintf(water_level_str, sizeof(water_level_str), "Water:%dmm(%d%%)", water_level_mm, fill_percent);
-    } else {
-        snprintf(water_level_str, sizeof(water_level_str), "Water:%dmm(NC)", water_level_mm);
-    }
-    
+    // Water level as fill percentage (primary display)
+    snprintf(water_level_str, sizeof(water_level_str), "Water:%.0f%%", water_fill_percent);
+
     // Get plant info and calculate days growing
     plant_info_t plant_info = {0};
     esp_err_t plant_err = config_load_plant_info(&plant_info);
@@ -380,7 +378,7 @@ void display_lvgl_init(void)
     water_level_label = lv_label_create(lv_scr_act());
     lv_obj_set_style_text_color(water_level_label, lv_color_white(), 0);
     lv_obj_set_style_text_font(water_level_label, SIZE_8_FONT, LV_PART_MAIN);
-    lv_label_set_text(water_level_label, "Water:0mm(0%)");
+    lv_label_set_text(water_level_label, "Water:0%");
     lv_obj_align(water_level_label, LV_ALIGN_TOP_LEFT, 3, 59);
 
     // Actuators - Bottom rows

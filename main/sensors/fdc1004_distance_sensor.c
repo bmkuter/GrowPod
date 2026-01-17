@@ -476,26 +476,22 @@ esp_err_t fdc1004_calibrate_water_min(float min_height_mm)
 
 esp_err_t fdc1004_calibrate_water_max(float max_height_mm)
 {
-    // Check if min was calibrated first
-    if (s_calibration.capdac == 0 && s_calibration.cap_empty_pf == 0.0f) {
-        ESP_LOGE(TAG, "Must run calibrate_water_min first!");
+    // Check if we have a valid min/empty calibration point
+    // This can come from either:
+    // 1. Previously running calibrate_water_min in this session, OR
+    // 2. Loading existing calibration from filesystem at boot
+    if (s_calibration.cap_empty_pf == 0.0f) {
+        ESP_LOGE(TAG, "No MIN/EMPTY calibration point found!");
+        ESP_LOGE(TAG, "Either run 'water_cal_empty' first, or ensure calibration loaded from filesystem.");
         return ESP_ERR_INVALID_STATE;
     }
     
-    float min_height_mm = s_calibration.height_mm;  // Retrieve stored min height
-    
     ESP_LOGI(TAG, "========================================");
     ESP_LOGI(TAG, "FDC1004 Calibration - Step 2: MAX LEVEL");
-    ESP_LOGI(TAG, "Maximum height: %.1f mm", max_height_mm);
-    ESP_LOGI(TAG, "Current CAPDAC: %d (%.3f pF offset)", 
-             s_calibration.capdac, s_calibration.capdac * 3.125f);
+    ESP_LOGI(TAG, "Using existing EMPTY point: %.4f pF (CAPDAC=%d)", 
+             s_calibration.cap_empty_pf, s_calibration.capdac);
+    ESP_LOGI(TAG, "Recording new FULL point...");
     ESP_LOGI(TAG, "========================================");
-    
-    if (max_height_mm <= min_height_mm) {
-        ESP_LOGE(TAG, "Max height (%.1f mm) must be greater than min height (%.1f mm)", 
-                 max_height_mm, min_height_mm);
-        return ESP_ERR_INVALID_ARG;
-    }
     
     // Measure full level
     const int num_samples = 10;
@@ -523,8 +519,9 @@ esp_err_t fdc1004_calibrate_water_max(float max_height_mm)
     
     float cap_max = cap_sum / valid_samples;
     
-    // Calculate calibration parameters
-    float total_height = max_height_mm - min_height_mm;
+    // Calculate calibration parameters for percentage-based reporting
+    // Note: height_mm is stored but only used for legacy mm calculations
+    // Percentage calculation only needs cap_empty_pf and cap_full_pf
     float cap_range = cap_max - s_calibration.cap_empty_pf;
     
     // Detect if sensor is inverted (capacitance decreases with water level)
@@ -537,7 +534,8 @@ esp_err_t fdc1004_calibrate_water_max(float max_height_mm)
         cap_range = -cap_range;  // Make positive for calculations
     }
     
-    float cap_per_mm = cap_range / total_height;
+    // Calculate cap_per_mm for legacy mm-based calculations (if needed)
+    float cap_per_mm = cap_range / max_height_mm;
     
     // Store sign for inverted operation
     if (inverted) {
@@ -546,19 +544,14 @@ esp_err_t fdc1004_calibrate_water_max(float max_height_mm)
     
     ESP_LOGI(TAG, "");
     ESP_LOGI(TAG, "========================================");
-    ESP_LOGI(TAG, "TWO-POINT CALIBRATION COMPLETE");
+    ESP_LOGI(TAG, "CALIBRATION UPDATED");
     ESP_LOGI(TAG, "  CAPDAC:            %d (%.3f pF offset)", 
              s_calibration.capdac, s_calibration.capdac * 3.125f);
-    ESP_LOGI(TAG, "  Min level:");
-    ESP_LOGI(TAG, "    Height:          %.1f mm", min_height_mm);
-    ESP_LOGI(TAG, "    Capacitance:     %.4f pF", s_calibration.cap_empty_pf);
-    ESP_LOGI(TAG, "  Max level:");
-    ESP_LOGI(TAG, "    Height:          %.1f mm", max_height_mm);
-    ESP_LOGI(TAG, "    Capacitance:     %.4f pF", cap_max);
-    ESP_LOGI(TAG, "  Range:");
-    ESP_LOGI(TAG, "    Height span:     %.1f mm", total_height);
-    ESP_LOGI(TAG, "    Cap change:      %.4f pF%s", fabsf(cap_range), inverted ? " (inverted)" : "");
-    ESP_LOGI(TAG, "    Sensitivity:     %.4f pF/mm%s", fabsf(cap_per_mm), inverted ? " (inverted)" : "");
+    ESP_LOGI(TAG, "  Empty point:");
+    ESP_LOGI(TAG, "    Capacitance:     %.4f pF (0%%)", s_calibration.cap_empty_pf);
+    ESP_LOGI(TAG, "  Full point:");
+    ESP_LOGI(TAG, "    Capacitance:     %.4f pF (100%%)", cap_max);
+    ESP_LOGI(TAG, "  Capacitance range: %.4f pF%s", fabsf(cap_range), inverted ? " (inverted)" : "");
     ESP_LOGI(TAG, "========================================");
     
     // Validate calibration
@@ -865,11 +858,69 @@ int fdc1004_read_distance_mm(void)
         water_level_mm = s_calibration.height_mm;
     }
     
-    // Single clean log line with water level and raw capacitance
-    ESP_LOGI(TAG, "Water level: %d mm (%.2f pF raw, %.2f pF filtered)", 
-             (int)water_level_mm, capacitance, filtered_cap);
+    // Legacy mm reading - only log at DEBUG level (percentage is now primary)
+    ESP_LOGD(TAG, "Water Level: %.1f mm (Raw Capacitance: %.4f pF, Min: %.4f pF, Max: %.4f pF)", 
+             water_level_mm, filtered_cap, s_calibration.cap_empty_pf, s_calibration.cap_full_pf);
     
     return (int)water_level_mm;
+}
+
+float fdc1004_read_fill_percent(void)
+{
+    float capacitance;
+    esp_err_t ret = fdc1004_read_capacitance(&capacitance);
+    
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to read capacitance");
+        return -1.0f;
+    }
+    
+    // Apply moving average filter for stability
+    s_cap_readings[s_filter_index] = capacitance;
+    s_filter_index = (s_filter_index + 1) % FDC1004_FILTER_SIZE;
+    if (s_filter_index == 0) {
+        s_filter_full = true;
+    }
+    
+    // Calculate filtered capacitance
+    float filtered_cap = 0.0f;
+    int samples_to_use = s_filter_full ? FDC1004_FILTER_SIZE : (s_filter_index > 0 ? s_filter_index : 1);
+    for (int i = 0; i < samples_to_use; i++) {
+        filtered_cap += s_cap_readings[i];
+    }
+    filtered_cap /= samples_to_use;
+    
+    // Check if calibrated
+    if (!s_calibration.is_calibrated) {
+        ESP_LOGW(TAG, "Sensor not calibrated - cannot calculate percentage");
+        return -1.0f;
+    }
+    
+    // Calculate percentage based on calibrated range
+    // Percentage = (current - empty) / (full - empty) * 100
+    float cap_range = s_calibration.cap_full_pf - s_calibration.cap_empty_pf;
+    
+    if (fabsf(cap_range) < 0.01f) {
+        ESP_LOGW(TAG, "Invalid calibration range (too small)");
+        return -1.0f;
+    }
+    
+    float cap_delta = filtered_cap - s_calibration.cap_empty_pf;
+    float fill_percent = (cap_delta / cap_range) * 100.0f;
+    
+    // Allow negative percentages (below empty) and >100% (above calibrated full)
+    // Clamp only to reasonable bounds to catch sensor errors
+    if (fill_percent < -50.0f) {
+        fill_percent = -50.0f;  // Cap at -50% for sensor errors
+    } else if (fill_percent > 200.0f) {
+        fill_percent = 200.0f;  // Cap at 200% for sensor errors
+    }
+    
+    // Log with percentage and capacitance details
+    ESP_LOGD(TAG, "Fill Level: %.1f%% (Raw Capacitance: %.4f pF, Range: %.4f-%.4f pF)", 
+             fill_percent, filtered_cap, s_calibration.cap_empty_pf, s_calibration.cap_full_pf);
+    
+    return fill_percent;
 }
 
 esp_err_t fdc1004_read_device_id(uint16_t *manufacturer_id, uint16_t *device_id)

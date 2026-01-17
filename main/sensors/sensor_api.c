@@ -192,7 +192,6 @@ esp_err_t sensor_api_force_read(const char *sensor_name, float *value) {
 void sensor_api_print_all(void) {
     float current_ma, voltage_mv, power_mw;
     float temperature_c, humidity_rh;
-    float water_level_mm;
     
     ESP_LOGI(TAG, "=== Current Sensor Values ===");
     
@@ -226,11 +225,14 @@ void sensor_api_print_all(void) {
         ESP_LOGW(TAG, "TSL2591 Light Sensor: Failed to read");
     }
     
-    // Water level
-    if (sensor_api_read_water_level(&water_level_mm) == ESP_OK) {
-        ESP_LOGI(TAG, "Water Level: %.2f mm", water_level_mm);
+    // Water level - read full data structure for percentage and mm
+    sensor_data_t water_level_data;
+    if (sensor_manager_get_data_cached(SENSOR_TYPE_WATER_LEVEL, &water_level_data, NULL) == ESP_OK) {
+        ESP_LOGI(TAG, "FDC1004 Water Level:");
+        ESP_LOGI(TAG, "  Fill Percent: %.1f%%", water_level_data.water_level.fill_percent);
+        ESP_LOGI(TAG, "  Level (legacy): %.1f mm", water_level_data.water_level.level_mm);
     } else {
-        ESP_LOGW(TAG, "Water Level: Failed to read");
+        ESP_LOGW(TAG, "FDC1004 Water Level: Failed to read");
     }
     
     // Print sensor manager statistics
